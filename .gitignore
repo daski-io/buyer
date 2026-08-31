@@ -7,3 +7,4 @@ conformance-runs/
 .env
 .env.*
 !.env.example
+.conformance-dist/
