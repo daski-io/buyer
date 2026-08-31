@@ -1,0 +1,7 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/x402-scheme/tsconfig.build.json" },
+    { "path": "./packages/pay/tsconfig.build.json" }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "name": "@daski/x402-scheme",
+  "version": "0.1.0",
+  "description": "Composite Exact-EVM client plugin for the modular x402 v2 SDK: wraps the stock handler, adds Daski recipe-order binding, and refuses to sign anything its policy validator has not independently checked.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/daski-io/buyer.git",
+    "directory": "packages/x402-scheme"
+  },
+  "homepage": "https://github.com/daski-io/buyer/tree/main/packages/x402-scheme#readme",
+  "bugs": {
+    "url": "https://github.com/daski-io/buyer/issues"
+  },
+  "keywords": [
+    "x402",
+    "daski",
+    "eip-3009",
+    "exact-evm",
+    "agent-payments"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-dist/test/**/*.test.js\"",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "viem": "2.21.55"
+  },
+  "peerDependencies": {
+    "@x402/core": ">=2.20.0 <3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

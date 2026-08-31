@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.test-dist/
+*.tsbuildinfo
+.scratch/
+conformance-runs/
+.env
+.env.*
+!.env.example

@@ -1,0 +1,59 @@
+{
+  "name": "@daski/pay",
+  "version": "0.1.0",
+  "description": "The Daski buyer bridge CLI. Server proposes, the bridge validates and recomputes, the wallet signs, the gateway never sees the key.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/daski-io/buyer.git",
+    "directory": "packages/pay"
+  },
+  "homepage": "https://github.com/daski-io/buyer/tree/main/packages/pay#readme",
+  "bugs": {
+    "url": "https://github.com/daski-io/buyer/issues"
+  },
+  "keywords": [
+    "daski",
+    "x402",
+    "cli",
+    "agent-payments",
+    "usdc"
+  ],
+  "bin": {
+    "daski": "./dist/bin/daski.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc --build tsconfig.build.json",
+    "test": "node --test --experimental-strip-types \"test/*.test.ts\"",
+    "conformance": "node --experimental-strip-types conformance/run.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@daski/x402-scheme": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@x402/core": "2.24.0",
+    "viem": "2.21.55"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "2.0.0"
+  }
+}
