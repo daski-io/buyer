@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "build": "tsc --build tsconfig.build.json",
-    "test": "node --test --experimental-strip-types \"test/*.test.ts\"",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-dist/test/**/*.test.js\"",
     "conformance": "tsc -p conformance/tsconfig.json && node .conformance-dist/conformance/run.js",
     "prepublishOnly": "npm run build"
   },
