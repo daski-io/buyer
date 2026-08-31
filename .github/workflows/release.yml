@@ -37,11 +37,15 @@ jobs:
       - name: Publish SHA256SUMS
         run: |
           set -euo pipefail
-          dir="$(npm query ".workspace" --workspace "${{ inputs.package }}" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const q=JSON.parse(s);process.stdout.write(q[0].path)})')"
+          # "@daski/pay" -> packages/pay, "@daski/x402-scheme" -> packages/x402-scheme
+          dir="packages/${PACKAGE##*/}"
+          test -f "$dir/package.json"
           cd "$dir"
           tarball="$(npm pack --silent)"
-          sha256sum "$tarball" > SHA256SUMS
-          cat SHA256SUMS
+          sha256sum "$tarball" | tee SHA256SUMS
+        env:
+          PACKAGE: ${{ inputs.package }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: sha256sums

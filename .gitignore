@@ -8,3 +8,4 @@ conformance-runs/
 .env.*
 !.env.example
 .conformance-dist/
+.tsbuild/
