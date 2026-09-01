@@ -9,3 +9,6 @@ conformance-runs/
 !.env.example
 .conformance-dist/
 .tsbuild/
+
+# Agent harness working files never ship.
+.claude/
