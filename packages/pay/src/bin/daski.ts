@@ -20,7 +20,8 @@ import { CLI_VERSION } from "../version.js";
 
 /** Flags every command accepts. */
 const GLOBAL_FLAGS = [
-  "json", "profile", "signer", "cdp-account", "max-per-order", "session-cap",
+  "json", "profile", "signer", "cdp-account", "circle-wallet",
+  "max-per-order", "session-cap",
 ] as const;
 
 const USAGE = `daski ${CLI_VERSION} — the Daski buyer bridge
@@ -48,7 +49,9 @@ Commands
 Global flags
   --json                              Machine-readable output
   --profile <name>                    Config profile (default: sandbox)
-  --signer <local|cdp>                Override the profile's signer
+  --signer <local|cdp|circle>         Override the profile's signer
+  --cdp-account <name>                CDP account for --signer cdp (or DASKI_CDP_ACCOUNT)
+  --circle-wallet <id>                Circle wallet id for --signer circle (or DASKI_CIRCLE_WALLET)
   --max-per-order <usdc>              Lower the per-order cap for this run only
   --session-cap <usdc>                Lower the session cap for this run only
 
@@ -74,6 +77,7 @@ async function main(argv: string[]): Promise<number> {
     profile: stringFlag(flags, "profile"),
     signerOverride: stringFlag(flags, "signer"),
     cdpAccount: stringFlag(flags, "cdp-account"),
+    circleWallet: stringFlag(flags, "circle-wallet"),
     maxPerOrderUsdc: stringFlag(flags, "max-per-order"),
     sessionCapUsdc: stringFlag(flags, "session-cap"),
   };
@@ -92,6 +96,7 @@ async function main(argv: string[]): Promise<number> {
         profile: shared.profile,
         signerOverride: shared.signerOverride,
         cdpAccount: shared.cdpAccount,
+        circleWallet: shared.circleWallet,
         yesHumanApproved: boolFlag(flags, "yes-human-approved"),
       };
       switch (command[1]) {

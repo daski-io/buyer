@@ -35,7 +35,7 @@ swap happily.
 ## Quick start
 
 ```bash
-npx @daski/pay@latest doctor --json
+npx @daski/pay@0.1.0 doctor --json
 ```
 
 ```bash
@@ -57,6 +57,11 @@ npm install -g @daski/pay
 
 Node ≥ 20. Sandbox is Base Sepolia (`eip155:84532`); the mainnet profile is
 scaffolded and **disabled by default**.
+
+Signers: `local` (the default, verified by the conformance suite), and `cdp`
+and `circle` (implemented, candidates pending conformance). Choose one per
+profile or with `--signer <local|cdp|circle>`; see
+[Signer adapters](./docs/signers.md).
 
 ## Using the scheme directly
 

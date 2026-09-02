@@ -4,7 +4,7 @@ The Daski buyer bridge. A CLI that buys outcomes, tracks orders across
 processes, and refuses to sign anything it has not independently checked.
 
 ```bash
-npx @daski/pay@latest doctor --json
+npx @daski/pay@0.1.0 doctor --json
 ```
 
 > Server proposes; buyer bridge validates against its own expectations and
@@ -23,8 +23,8 @@ npx @daski/pay@latest doctor --json
 | `daski order confirm/input/cancel <handle>` | Mutating lifecycle actions |
 | `daski sign-payment --challenge <file.json>` | Validate, recompute, sign; print the exact `paymentPayload` |
 
-All support `--json`. Global flags: `--profile`, `--signer`,
-`--max-per-order`, `--session-cap`.
+All support `--json`. Global flags: `--profile`, `--signer <local|cdp|circle>`,
+`--cdp-account`, `--circle-wallet`, `--max-per-order`, `--session-cap`.
 
 ## Spend caps are yours, not the agent's
 
@@ -67,6 +67,19 @@ the envelope metadata. Provider results are validated but untrusted, and both
 a terminal and an agent's context window are interpreters: dumping untrusted
 content into one is how "here is your result" becomes "here are your
 instructions".
+
+## Signers
+
+`local` is the default and the one adapter the conformance suite has verified.
+`cdp` and `circle` are implemented and marked *candidate pending conformance*
+until a run passes; `daski doctor` says so rather than implying otherwise. The
+Circle adapter accepts EOA wallets only: a smart-contract account signs via
+ERC-1271, which the gateway's plain ECDSA recovery cannot verify. Every
+adapter has to pass the doctor self-test — sign a fixed, unsettleable vector
+that recovers to its own address with a low-s signature — before it is
+reported usable.
+
+See [signer adapters](../../docs/signers.md).
 
 ## Keys
 

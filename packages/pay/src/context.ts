@@ -21,6 +21,7 @@ export interface ContextOptions {
   sessionCapUsdc?: string | undefined;
   signerOverride?: string | undefined;
   cdpAccount?: string | undefined;
+  circleWallet?: string | undefined;
   onCall?: ((entry: GatewayCallLog) => void) | undefined;
 }
 
@@ -51,6 +52,7 @@ export async function createContext(options: ContextOptions): Promise<CommandCon
     kind: (options.signerOverride as ProfileConfig["signer"] | undefined) ?? profile.signer,
     profile: loaded.profileName,
     cdpAccount: options.cdpAccount,
+    circleWallet: options.circleWallet,
   });
   const payerAddress = getAddress(await signer.getAddress());
 

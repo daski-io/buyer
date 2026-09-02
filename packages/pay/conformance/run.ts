@@ -14,6 +14,9 @@
  *   DASKI_CONFORMANCE_SPEND_OK=1 \
  *   DASKI_PAYER_PRIVATE_KEY=0x... \
  *   npm run conformance -- --profile sandbox --signer local
+ *
+ * `--signer cdp --cdp-account <name>` and `--signer circle --circle-wallet <id>`
+ * select the other adapters; their credentials come from the environment.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -50,6 +53,10 @@ async function main(): Promise<number> {
   const { flags } = parseArgs(process.argv.slice(2));
   const profile = stringFlag(flags, "profile") ?? "sandbox";
   const signerOverride = stringFlag(flags, "signer");
+  const cdpAccount = stringFlag(flags, "cdp-account");
+  const circleWallet = stringFlag(flags, "circle-wallet");
+  /** The signer selection every step shares, so a wallet flag reaches all of them. */
+  const selection = { profile, signerOverride, cdpAccount, circleWallet };
   const redactSignatures = boolFlag(flags, "redact-signatures");
   const withConfirm = boolFlag(flags, "confirm");
   const provider = stringFlag(flags, "provider") ?? "8327";
@@ -104,7 +111,7 @@ async function main(): Promise<number> {
   try {
     // -- doctor ------------------------------------------------------------
     const report = await step("doctor passes", async () => {
-      const doctor = await runDoctor({ profile, signerOverride });
+      const doctor = await runDoctor(selection);
       const blocking = doctor.issues.filter((issue) => issue.severity === "blocking");
       if (blocking.length > 0) {
         throw new Error(`blocking issues: ${blocking.map((i) => i.code).join(", ")}`);
@@ -112,7 +119,7 @@ async function main(): Promise<number> {
       return doctor;
     });
 
-    const context = await createContext({ profile, signerOverride, onCall: log });
+    const context = await createContext({ ...selection, onCall: log });
     try {
       specTier = await context.client.hasTool("daski_get_payment_challenge") &&
         await context.client.hasTool("daski_get_order_access")
@@ -172,14 +179,14 @@ async function main(): Promise<number> {
       await context.close();
 
       // -- reads: capability if available, per-action signing otherwise -----
-      await step("status", () => orderStatus({ profile, signerOverride, handle: orderHandle!, json: true }));
+      await step("status", () => orderStatus({ ...selection, handle: orderHandle!, json: true }));
       await step("artifact", () => orderArtifact({
-        profile, signerOverride, handle: orderHandle!, json: true,
+        ...selection, handle: orderHandle!, json: true,
         output: join(runDirectory, "artifact.bin"),
       }));
       if (withConfirm) {
         await step("confirm delivery", () => orderConfirm({
-          profile, signerOverride, handle: orderHandle!, json: true,
+          ...selection, handle: orderHandle!, json: true,
         }));
       }
     } finally {

@@ -50,7 +50,9 @@ on sandbox, the tier flips automatically and the tighter budget applies.
 | Flag | Effect |
 |---|---|
 | `--profile <name>` | Config profile (default `sandbox`) |
-| `--signer <local\|cdp>` | Override the profile's signer |
+| `--signer <local\|cdp\|circle>` | Override the profile's signer |
+| `--cdp-account <name>` | CDP account for `--signer cdp` (or `DASKI_CDP_ACCOUNT`) |
+| `--circle-wallet <id>` | Circle wallet id for `--signer circle` (or `DASKI_CIRCLE_WALLET`) |
 | `--provider` / `--outcome` | What to buy (default `8327` / `create-mailbox`) |
 | `--confirm` | Also run the delivery-confirmation step |
 | `--redact-signatures` | Blank signatures in the run log |
