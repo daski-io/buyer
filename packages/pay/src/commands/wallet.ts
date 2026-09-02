@@ -21,6 +21,7 @@ export interface WalletOptions {
   yesHumanApproved?: boolean;
   signerOverride?: string | undefined;
   cdpAccount?: string | undefined;
+  circleWallet?: string | undefined;
 }
 
 const CREATE_PHRASE = "create a new key";
@@ -89,6 +90,7 @@ export async function walletAddress(options: WalletOptions): Promise<Record<stri
     kind: (options.signerOverride as never) ?? loaded.profile.signer,
     profile: loaded.profileName,
     cdpAccount: options.cdpAccount,
+    circleWallet: options.circleWallet,
   });
   const location = await locateKey(loaded.profileName);
   return {
@@ -106,6 +108,7 @@ export async function walletBalance(options: WalletOptions): Promise<Record<stri
     kind: (options.signerOverride as never) ?? loaded.profile.signer,
     profile: loaded.profileName,
     cdpAccount: options.cdpAccount,
+    circleWallet: options.circleWallet,
   });
   const address = getAddress(await signer.getAddress());
   const balances = await readBalances({

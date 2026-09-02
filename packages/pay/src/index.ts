@@ -36,6 +36,7 @@ export {
 } from "./gateway/purchase.js";
 
 export { createSigner, type SignerSelection } from "./signers/index.js";
+export { runSignerSelfTest, selfTestVector, type SignerSelfTestResult } from "./signers/selfTest.js";
 export {
   activeReadCapability, authorizedTotalAtomic, findByIntent, findOrder,
   listOrders, updateOrder, upsertOrder, type OrderRecord, type OrderState,

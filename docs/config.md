@@ -46,6 +46,10 @@ a profile *contains* — only which human-owned block applies.
 `enabled` to `true` and setting real caps by hand. That is deliberate: an
 agent should not be able to reach mainnet through a flag.
 
+The procedure is identical on every network: select the profile, put a key
+behind it, fund its address with USDC on that network. Only the profile's
+values differ — gateway, chain, token, RPC, caps.
+
 <a id="caps"></a>
 ## Caps
 
@@ -71,4 +75,8 @@ approve.
 | `DASKI_PROFILE` | Default profile |
 | `DASKI_PAYER_PRIVATE_KEY` | **Developer/sandbox only.** See [keys.md](./keys.md) |
 | `DASKI_DISABLE_KEYCHAIN` | Force the encrypted-file keystore |
+| `DASKI_CDP_ACCOUNT` | CDP account name or address for `--signer cdp`; `--cdp-account` overrides it |
+| `CIRCLE_API_KEY` | Circle API key for `--signer circle`. Environment only, never a flag. See [signers.md](./signers.md#circle) |
+| `CIRCLE_ENTITY_SECRET` | Circle entity secret for `--signer circle`. Environment only, never a flag |
+| `DASKI_CIRCLE_WALLET` | Id of the Circle EOA wallet for `--signer circle`; `--circle-wallet` overrides it |
 | `DASKI_CONFORMANCE_SPEND_OK` | Required to run the conformance suite |

@@ -7,17 +7,20 @@
  * world-writable config) report but do not fail, because they describe a
  * posture rather than a broken setup.
  */
-import { keccak256, stringToHex, type Address } from "viem";
+import type { Address } from "viem";
 import { CliError } from "../cli/errors.js";
 import { permissionWarnings, applyCapOverrides, loadConfig, CONFIG_DOC } from "../config.js";
 import { readBalances } from "../gateway/balance.js";
 import { readiness } from "../gateway/client.js";
 import { configPath, daskiHome } from "../paths.js";
 import { createSigner } from "../signers/index.js";
+import { runSignerSelfTest, type SignerSelfTestResult } from "../signers/selfTest.js";
 import { locateKey } from "../store/keystore.js";
 import { authorizedTotalAtomic } from "../store/orders.js";
 import { CLI_VERSION } from "../version.js";
 import type { SignerAdapter } from "@daski/x402-scheme";
+
+const SIGNERS_DOC = "https://github.com/daski-io/buyer/blob/main/docs/signers.md";
 
 export interface DoctorIssue {
   severity: "blocking" | "warning";
@@ -32,6 +35,7 @@ export interface DoctorOptions {
   sessionCapUsdc?: string | undefined;
   signerOverride?: string | undefined;
   cdpAccount?: string | undefined;
+  circleWallet?: string | undefined;
 }
 
 export interface DoctorReport {
@@ -64,25 +68,30 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const location = await locateKey(loaded.profileName);
   let signer: SignerAdapter | undefined;
   let address: Address | undefined;
-  let eip712 = false;
+  let selfTest: SignerSelfTestResult | undefined;
   const signerKind = options.signerOverride ?? profile.signer;
   try {
     signer = await createSigner({
       kind: signerKind as never,
       profile: loaded.profileName,
       cdpAccount: options.cdpAccount,
+      circleWallet: options.circleWallet,
     });
     address = await signer.getAddress();
-    eip712 = await probeEip712(signer, profile.chainId);
-    if (!eip712) {
+    // The signer's word is not enough: sign a fixed, unsettleable vector and
+    // check it the way the gateway will. A signer that throws fails here too.
+    selfTest = await runSignerSelfTest(signer, profile.chainId);
+    if (!selfTest.passed) {
       issues.push({
         severity: "blocking",
-        code: "DASKI_SIGNER_NO_EIP712",
-        message: `The ${signerKind} signer did not produce a valid EIP-712 signature.`,
+        code: "DASKI_SIGNER_SELF_TEST_FAILED",
+        message:
+          `The ${signerKind} signer failed the self-test: ` +
+          `${selfTest.reason ?? "no reason given"}.`,
         remediation:
-          "Daski settles with EIP-3009 typed data; a signer that cannot sign it " +
-          "cannot buy. Try --signer local, or see " +
-          "https://github.com/daski-io/buyer/blob/main/docs/signers.md",
+          "Daski settles EIP-3009 typed data by plain low-s ECDSA recovery, so a " +
+          "signer whose signatures do not recover to its own address cannot buy. " +
+          `Try --signer local, or see ${SIGNERS_DOC}#self-test`,
       });
     }
   } catch (error) {
@@ -136,11 +145,9 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
           severity: "warning",
           code: "DASKI_NO_USDC",
           message: `${address} holds no USDC on ${profile.network}, so no purchase can settle.`,
-          remediation:
-            profile.chainId === 84532
-              ? "Fund the address with Base Sepolia USDC from a testnet faucet. " +
-                "This CLI deliberately has no faucet command."
-              : "Fund the address with USDC before buying.",
+          // The same sentence on every chain: where the USDC comes from is the
+          // operator's business, and this CLI has no opinion about it.
+          remediation: `Fund ${address} with USDC on ${profile.network} before buying.`,
         });
       }
     } catch (error) {
@@ -186,7 +193,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       address: address ?? null,
       keySource: location?.source ?? "none",
       keyLocation: location?.description ?? null,
-      eip712Capable: eip712,
+      // Null only when no signer could be created; every created signer is tested.
+      selfTest: selfTest ?? null,
     },
     chain: {
       network: profile.network,
@@ -212,24 +220,3 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     ok: !issues.some((issue) => issue.severity === "blocking"),
   };
 }
-
-/**
- * Confirms the signer really can produce an EIP-712 signature, by signing a
- * throwaway domain that is not a payment: no value, no recipient, no
- * verifying contract that could settle anything.
- */
-async function probeEip712(signer: SignerAdapter, chainId: number): Promise<boolean> {
-  try {
-    const signature = await signer.signTypedData({
-      domain: { name: "DaskiDoctor", version: "1", chainId, verifyingContract: ZERO_ADDRESS },
-      types: { Probe: [{ name: "nonce", type: "bytes32" }] },
-      primaryType: "Probe",
-      message: { nonce: keccak256(stringToHex("daski-doctor-probe")) },
-    });
-    return /^0x[0-9a-fA-F]{130}$/.test(signature);
-  } catch {
-    return false;
-  }
-}
-
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
