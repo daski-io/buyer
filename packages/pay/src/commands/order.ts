@@ -237,6 +237,7 @@ async function grantRead(
     action: "status",
     gatewayUrl: context.profile.gatewayUrl,
     request: {},
+    chainId: context.profile.chainId,
   });
   const signature = await context.signer.signTypedData(
     orderActionTypedData(challenge, context.profile.chainId, context.profile.gatewayUrl),

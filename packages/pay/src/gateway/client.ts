@@ -11,10 +11,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { TransferAuthorization } from "@daski/x402-scheme";
 import { CliError } from "../cli/errors.js";
+import { CLI_VERSION } from "../version.js";
 
 export interface McpToolResult {
   content: { type: string; text?: string }[];
   isError?: boolean | undefined;
+  /** MCP structured tool output (spec 2025-06-18). The gateway carries every payload here. */
+  structuredContent?: unknown;
   _meta?: Record<string, unknown> | undefined;
 }
 
@@ -83,7 +86,7 @@ export class GatewayClient {
     if (this.#client) return;
     const client = new Client({
       name: this.#options.clientName ?? "daski-pay",
-      version: this.#options.clientVersion ?? "0.1.0",
+      version: this.#options.clientVersion ?? CLI_VERSION,
     });
     try {
       await client.connect(
@@ -145,15 +148,21 @@ export class GatewayClient {
     return result;
   }
 
-  /** The first JSON object in a tool result's content, if there is one. */
+  /**
+   * The tool result's JSON payload. `structuredContent` is authoritative when
+   * present (MCP structured tool output); the first JSON object in a text
+   * block is the compatibility fallback. From gateway v0.28.0 (2026-09-01)
+   * until the text copy was restored, ordinary results carried their payload
+   * in `structuredContent` alone with a one-line summary in text, so a reader
+   * that stopped at text saw nothing — and `@daski/pay` 0.1.0 did exactly that.
+   */
   static json(result: McpToolResult): Record<string, unknown> | undefined {
+    if (isRecord(result.structuredContent)) return result.structuredContent;
     for (const item of result.content ?? []) {
       if (item.type !== "text" || typeof item.text !== "string") continue;
       try {
         const parsed: unknown = JSON.parse(item.text);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          return parsed as Record<string, unknown>;
-        }
+        if (isRecord(parsed)) return parsed;
       } catch {
         // Non-JSON text content is informational; keep looking.
       }
@@ -161,11 +170,132 @@ export class GatewayClient {
     return undefined;
   }
 
-  /** Reads the challenge from `_meta`, falling back to the content body. */
+  /**
+   * The x402 challenge in a tool result. Three places, in order: the x402 MCP
+   * transport's `_meta["x402/payment-required"]`; the prepare tool's body,
+   * which nests the challenge under `paymentRequired` beside its `preflight`;
+   * and a bare PaymentRequired body, which the unpaid buy call returns.
+   */
   static challenge(result: McpToolResult): PaymentChallenge | undefined {
     const fromMeta = result._meta?.["x402/payment-required"];
-    const candidate = (fromMeta ?? GatewayClient.json(result)) as PaymentChallenge | undefined;
-    return candidate && Array.isArray(candidate.accepts) ? candidate : undefined;
+    if (isChallenge(fromMeta)) return fromMeta;
+    const body = GatewayClient.json(result);
+    const nested = body?.paymentRequired;
+    if (isChallenge(nested)) return nested;
+    return isChallenge(body) ? body : undefined;
+  }
+
+  /** The prepare tool's `preflight` block, when the result carries one. */
+  static preflight(result: McpToolResult): Record<string, unknown> | undefined {
+    const body = GatewayClient.json(result);
+    const preflight = body?.preflight;
+    return isRecord(preflight) ? preflight : undefined;
+  }
+
+  /**
+   * A success result whose payload this client cannot find. That is a
+   * protocol mismatch between the CLI and the gateway, never a refusal, and
+   * it must never be reported as "not found" or "rejected".
+   */
+  static unreadable(result: McpToolResult): boolean {
+    return !result.isError && GatewayClient.json(result) === undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isChallenge(value: unknown): value is PaymentChallenge {
+  return isRecord(value) && Array.isArray(value.accepts);
+}
+
+/**
+ * What a result looked like, for an error report. Results carry no key
+ * material, so a bounded text preview is safe to print.
+ */
+export function describeResult(result: McpToolResult): Record<string, unknown> {
+  const content = result.content ?? [];
+  return {
+    isError: Boolean(result.isError),
+    hasStructuredContent: isRecord(result.structuredContent),
+    contentTypes: content.map((item) => item.type),
+    textPreview: content
+      .filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => (item.text as string).slice(0, 200)),
+  };
+}
+
+/**
+ * The gateway answered without an error and this CLI found no payload. The
+ * remediation depends on whether a signature has already left the process.
+ */
+export function unreadableResultError(
+  toolName: string,
+  result: McpToolResult,
+  options: { afterSubmit?: boolean | undefined } = {},
+): CliError {
+  return new CliError({
+    code: "DASKI_GATEWAY_RESULT_UNREADABLE",
+    message:
+      `The gateway answered ${toolName} without an error, but this CLI found no JSON ` +
+      "payload in the result: neither structuredContent nor a JSON text block.",
+    remediation: options.afterSubmit
+      ? "Do not re-run `daski buy`: the signature was submitted and the payment may have " +
+        "settled. The intent is recorded in the order store. Upgrade to the @daski/pay " +
+        "version the gateway's /skills/setup.md pins, run `daski doctor --json`, and " +
+        "check the payer's order history before any new purchase."
+      : "Nothing was signed. This CLI and the gateway disagree about the result shape: " +
+        "upgrade to the @daski/pay version the gateway's /skills/setup.md pins, then " +
+        "re-run `daski doctor --json`, which checks that gateway results are readable.",
+    details: { tool: toolName, gateway: describeResult(result) },
+  });
+}
+
+export interface GatewayProtocolProbe {
+  reachable: boolean;
+  tools: string[];
+  /** The read-only tool whose payload this client could read, or null when none. */
+  readableVia: string | null;
+  error?: string | undefined;
+}
+
+/** The surface the probe needs, so `doctor` can be tested without a network. */
+export interface ProbeTarget {
+  availableTools(): Promise<Set<string>>;
+  callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
+  close(): Promise<void>;
+}
+
+/**
+ * One read-only MCP round trip for `doctor`: list the tools, then read a
+ * payload through a read-only tool with this client's own parser. A gateway
+ * whose results this CLI cannot read blocks every purchase, and
+ * `/health/ready` cannot see that: on 2026-09-03 a CLI that passed doctor
+ * could not complete a single call.
+ */
+export async function probeGatewayProtocol(target: ProbeTarget): Promise<GatewayProtocolProbe> {
+  try {
+    const tools = [...await target.availableTools()].sort();
+    const attempts: [string, Record<string, unknown>, (body: Record<string, unknown>) => boolean][] = [
+      ["daski_get_setup_guide", { topic: "setup" }, (body) => typeof body.markdown === "string"],
+      ["daski_list_outcomes", { limit: 1 }, (body) => Array.isArray(body.outcomes)],
+    ];
+    let readableVia: string | null = null;
+    for (const [name, args, accept] of attempts) {
+      if (!tools.includes(name)) continue;
+      const result = await target.callTool(name, args);
+      const body = GatewayClient.json(result);
+      if (!result.isError && body && accept(body)) {
+        readableVia = name;
+        break;
+      }
+    }
+    return { reachable: true, tools, readableVia };
+  } catch (error) {
+    return { reachable: false, tools: [], readableVia: null, error: (error as Error).message };
+  } finally {
+    await target.close().catch(() => undefined);
   }
 }
 

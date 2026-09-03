@@ -5,7 +5,9 @@
  * command, so it is gated on a human: an interactive terminal and a typed
  * confirmation phrase. `--yes-human-approved` exists for provisioning
  * scripts, and its name is the documentation: whoever passes it is asserting a
- * human approved this.
+ * human approved this. No error message names the flag: on 2026-09-03 an
+ * agent read the remediation that did, passed the flag from its own shell,
+ * and created the key the guide had reserved for the human.
  */
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { getAddress } from "viem";
@@ -48,8 +50,8 @@ export async function createWallet(options: WalletOptions): Promise<Record<strin
         message:
           "Creating a signing key requires a human, and this session has no terminal.",
         remediation:
-          "Run it from an interactive terminal, or — if a human has approved " +
-          `this — re-run with --yes-human-approved.`,
+          "A human must run `daski wallet create` in their own interactive terminal " +
+          "and type the confirmation phrase. Do not run it from an agent's shell.",
       });
     }
     const approved = await confirmPhrase(

@@ -119,6 +119,12 @@ the same treatment: the family's closed type set, an `orderId`/handle that
 matches the target order, a short expiry, and — crucially — **method and URI
 hash inputs recomputed from what the CLI is about to call**.
 
+The gateway attaches its sign-ready EIP-712 proposal as `signRequest` beside
+each of these challenges. The bridge sets it aside for the closed-shape check,
+recomputes the typed data from the challenge fields, and requires the proposal
+to agree field for field (`DASKI_LIFECYCLE_SIGN_REQUEST_MISMATCH` otherwise).
+It signs only its own recomputation. Any other extra field is still refused.
+
 The gateway derives both deterministically:
 
 ```

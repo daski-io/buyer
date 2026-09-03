@@ -39,7 +39,9 @@ import {
   type OrderRecord,
 } from "../store/orders.js";
 import {
+  describeResult,
   GatewayClient,
+  unreadableResultError,
   type McpToolResult,
   type PaymentChallenge,
   type PaymentRequirement,
@@ -47,7 +49,7 @@ import {
 } from "./client.js";
 import { callWalletQuery } from "./lifecycle.js";
 
-/** The spec-01 tool; absent on today's sandbox, where we fall back. */
+/** The read-only prepare tool. A gateway without it serves the same challenge through an unpaid buy call. */
 export const CHALLENGE_TOOL = "daski_get_payment_challenge";
 export const BUY_TOOL = "daski_buy_outcome";
 
@@ -57,6 +59,8 @@ export interface ChallengeResult {
   binding: OrderBinding | undefined;
   /** True when the spec-01 challenge tool served this. */
   viaChallengeTool: boolean;
+  /** The prepare tool's balance and eligibility preflight, when it served one. */
+  preflight?: Record<string, unknown> | undefined;
 }
 
 /** A fresh reconciliation key. Also the idempotency key the gateway echoes. */
@@ -85,7 +89,14 @@ export async function requestChallenge(options: {
     : await client.callTool(BUY_TOOL, { providerAgentId, outcomeId, request });
 
   const challenge = GatewayClient.challenge(result);
-  if (!challenge) throw purchaseFailure(result);
+  if (!challenge) {
+    // A success answer with no payload this client can read is a protocol
+    // mismatch, not a refusal; say so instead of "the gateway rejected it".
+    if (GatewayClient.unreadable(result)) {
+      throw unreadableResultError(viaChallengeTool ? CHALLENGE_TOOL : BUY_TOOL, result);
+    }
+    throw purchaseFailure(result);
+  }
   const requirement = challenge.accepts[0];
   if (!requirement) {
     throw new CliError({
@@ -99,6 +110,7 @@ export async function requestChallenge(options: {
     requirement,
     binding: bindingFromExtensions(challenge.extensions),
     viaChallengeTool,
+    preflight: GatewayClient.preflight(result),
   };
 }
 
@@ -359,18 +371,29 @@ export function recordIntent(record: Omit<OrderRecord, "createdAt" | "updatedAt"
 
 export { updateOrder };
 
-export function purchaseFailure(result: McpToolResult): CliError {
+/**
+ * The gateway's answer to a purchase step, as an operator-facing error. An
+ * unreadable success is reported as the protocol mismatch it is, and the
+ * response is always attached — `gateway: null` sent operators in circles.
+ */
+export function purchaseFailure(
+  result: McpToolResult,
+  options: { afterSubmit?: boolean | undefined } = {},
+): CliError {
+  if (GatewayClient.unreadable(result)) return unreadableResultError(BUY_TOOL, result, options);
   const body = GatewayClient.json(result);
   const code = typeof body?.code === "string" ? body.code : "DASKI_PURCHASE_FAILED";
+  const fallbackRemediation = options.afterSubmit
+    ? "The signature was submitted: do not re-run `daski buy` until the recorded intent " +
+      "is reconciled. The gateway's response is under `gateway` in this error."
+    : "Nothing was signed. The gateway's response is under `gateway` in this error.";
   return new CliError({
     code,
     message: typeof body?.message === "string"
       ? body.message
       : "The gateway rejected the purchase.",
-    remediation: typeof body?.next_action === "string"
-      ? body.next_action
-      : "Re-run with --json to see the gateway's full response.",
-    details: { gateway: body ?? null },
+    remediation: typeof body?.next_action === "string" ? body.next_action : fallbackRemediation,
+    details: { gateway: body ?? describeResult(result) },
   });
 }
 

@@ -11,7 +11,7 @@ import type { Address } from "viem";
 import { CliError } from "../cli/errors.js";
 import { permissionWarnings, applyCapOverrides, loadConfig, CONFIG_DOC } from "../config.js";
 import { readBalances } from "../gateway/balance.js";
-import { readiness } from "../gateway/client.js";
+import { GatewayClient, probeGatewayProtocol, readiness, type GatewayProtocolProbe } from "../gateway/client.js";
 import { configPath, daskiHome } from "../paths.js";
 import { createSigner } from "../signers/index.js";
 import { runSignerSelfTest, type SignerSelfTestResult } from "../signers/selfTest.js";
@@ -180,6 +180,43 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     });
   }
 
+  // -- gateway protocol ----------------------------------------------------
+  // /health/ready says the process is up; it cannot say whether this CLI can
+  // read what the MCP tools return. One read-only round trip settles that,
+  // so "exit 0" means a purchase can actually complete.
+  let protocol: GatewayProtocolProbe | null = null;
+  if (health.reachable && health.status === "ready") {
+    protocol = await probeGatewayProtocol(new GatewayClient({ gatewayUrl: profile.gatewayUrl }));
+    if (!protocol.reachable) {
+      issues.push({
+        severity: "blocking",
+        code: "DASKI_GATEWAY_MCP_UNREACHABLE",
+        message: `${profile.gatewayUrl}/mcp did not answer: ${protocol.error ?? "unknown error"}`,
+        remediation: "Check connectivity to the gateway's /mcp endpoint, then re-run: daski doctor --json",
+      });
+    } else if (!protocol.tools.includes("daski_buy_outcome")) {
+      issues.push({
+        severity: "blocking",
+        code: "DASKI_GATEWAY_TOOLS_MISSING",
+        message: `The gateway at ${profile.gatewayUrl} does not advertise daski_buy_outcome.`,
+        remediation:
+          `Point the "${loaded.profileName}" profile's gatewayUrl at a Daski gateway in ` +
+          `${configPath()}, then re-run: daski doctor --json`,
+      });
+    } else if (!protocol.readableVia) {
+      issues.push({
+        severity: "blocking",
+        code: "DASKI_GATEWAY_PROTOCOL_MISMATCH",
+        message:
+          "The gateway answered a read-only tool call, but this CLI found no JSON payload " +
+          "in the result, so no purchase, order read, or reconciliation can complete.",
+        remediation:
+          "Upgrade to the @daski/pay version the gateway's /skills/setup.md pins, then " +
+          "re-run: daski doctor --json",
+      });
+    }
+  }
+
   const spent = authorizedTotalAtomic(loaded.profileName);
   return {
     cliVersion: CLI_VERSION,
@@ -215,6 +252,9 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       reachable: health.reachable,
       status: health.status ?? null,
       version: health.version ?? null,
+      mcp: protocol
+        ? { reachable: protocol.reachable, tools: protocol.tools.length, readableVia: protocol.readableVia }
+        : null,
     },
     issues,
     ok: !issues.some((issue) => issue.severity === "blocking"),

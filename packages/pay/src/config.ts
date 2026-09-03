@@ -157,6 +157,10 @@ export function loadConfig(profileOverride?: string): LoadedConfig {
 /** Directory and file permission checks, surfaced by `doctor` (§4.2). */
 export function permissionWarnings(path: string): ConfigWarning[] {
   const warnings: ConfigWarning[] = [];
+  // NTFS permissions are ACLs; Node synthesizes the POSIX mode on Windows and
+  // reports the world-writable bit regardless of the real ACL, and chmod is a
+  // no-op there. The check would only ever be a false positive: skip it.
+  if (process.platform === "win32") return warnings;
   for (const [target, label] of [[path, "config file"], [daskiHome(), "state directory"]] as const) {
     try {
       const mode = statSync(target).mode;
