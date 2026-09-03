@@ -13,7 +13,7 @@ import { getAddress, type Address } from "viem";
 import type { SplitterEvidence } from "@daski/x402-scheme";
 import { CliError } from "../cli/errors.js";
 import { daskiHome } from "../paths.js";
-import { GatewayClient } from "./client.js";
+import { GatewayClient, unreadableResultError } from "./client.js";
 
 /** How long catalog evidence stays fresh. Short: splitters can be re-listed. */
 export const CATALOG_TTL_SECONDS = 300;
@@ -106,8 +106,25 @@ export class Catalog {
       providerAgentId,
       outcomeId,
     });
+    // A success answer this client cannot read is a protocol mismatch, and
+    // saying "no such outcome" about it sent operators to a catalog that
+    // showed the outcome present and healthy (2026-09-03).
+    if (GatewayClient.unreadable(result)) throw unreadableResultError("daski_get_outcome", result);
     const body = GatewayClient.json(result);
     if (result.isError || !body) {
+      const gatewayCode = typeof body?.code === "string" ? body.code : "OUTCOME_NOT_FOUND";
+      if (gatewayCode !== "OUTCOME_NOT_FOUND") {
+        throw new CliError({
+          code: gatewayCode,
+          message: typeof body?.message === "string"
+            ? body.message
+            : `The gateway refused daski_get_outcome for ${providerAgentId}/${outcomeId}.`,
+          remediation: typeof body?.next_action === "string"
+            ? body.next_action
+            : "Run `daski doctor --json`, then retry.",
+          details: { gateway: body },
+        });
+      }
       throw new CliError({
         code: "DASKI_OUTCOME_NOT_FOUND",
         message: `The gateway has no outcome ${providerAgentId}/${outcomeId}.`,

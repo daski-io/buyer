@@ -36,14 +36,20 @@ The spec's budget of 6 assumes the spec-01 surfaces: `daski_get_payment_challeng
 for the challenge and `daski_get_order_access` for a read capability that
 serves both `status` and `artifact`.
 
-Today's sandbox exposes neither, so the CLI uses its documented fallbacks —
-an unpaid `daski_buy_outcome` for the challenge, and per-action lifecycle
-signing for each read, which costs a challenge plus an authorized retry.
+The sandbox has advertised both since gateway v0.28.0 (2026-09-01). A gateway
+without them still works: the CLI falls back to an unpaid `daski_buy_outcome`
+for the challenge and to per-action lifecycle signing for each read, which
+costs a challenge plus an authorized retry.
 
 The suite detects which tier it is running in and asserts the matching budget
 (`6` for `spec-01`, `12` for `fallback`), reporting the tier in `summary.json`
-rather than failing a budget that does not apply. When the spec-01 tools land
-on sandbox, the tier flips automatically and the tighter budget applies.
+rather than failing a budget that does not apply.
+
+Run the suite against the live sandbox before every publication, after the
+gateway release it targets is deployed, and record the gateway version from
+`daski doctor --json` in the changelog entry. 0.1.0 shipped without that run,
+one day after the gateway changed its result shape, and could not complete a
+single call.
 
 ## Flags
 

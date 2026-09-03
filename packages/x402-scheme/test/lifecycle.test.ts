@@ -13,6 +13,7 @@ import {
   orderActionTypedData,
   validateOrderActionChallenge,
   validateWalletActionChallenge,
+  walletActionTypedData,
   type OrderActionExpectations,
   type WalletActionExpectations,
 } from "../src/lifecycle.js";
@@ -235,5 +236,74 @@ test("a wallet challenge on the wrong chain is refused", () => {
   assert.equal(
     refusalCode(() => validateWalletActionChallenge(walletChallenge(), 8453, walletExpectations())),
     "DASKI_WALLET_DOMAIN_MISMATCH",
+  );
+});
+
+// The gateway attaches its sign-ready EIP-712 proposal as `signRequest` beside
+// every lifecycle and wallet challenge. Refusing it as an open shape blocked
+// every live order read, lifecycle action, and wallet query (2026-09-03); the
+// proposal is set aside for the shape check and must agree with what the
+// bridge recomputes, which is the only thing it ever signs.
+
+function jsonNumbers(message: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(message).map(([key, value]) => [key, typeof value === "bigint" ? Number(value) : value]),
+  );
+}
+
+test("an order-action challenge with an agreeing signRequest validates, and the proposal is set aside", () => {
+  const typed = orderActionTypedData(validateOrderActionChallenge(challenge(), expectations()), 84532, GATEWAY);
+  const signRequest = {
+    domain: typed.domain,
+    types: typed.types,
+    primaryType: typed.primaryType,
+    message: jsonNumbers(typed.message as Record<string, unknown>),
+  };
+  const validated = validateOrderActionChallenge(challenge({ signRequest }), expectations({ chainId: 84532 }));
+  assert.equal(validated.orderId, "order-123");
+  assert.equal("signRequest" in validated, false);
+  // Without the profile chain id the proposal's own domain still has to agree with itself.
+  assert.equal(validateOrderActionChallenge(challenge({ signRequest }), expectations()).action, "status");
+});
+
+test("an order-action signRequest that disagrees with the recomputation is refused", () => {
+  const typed = orderActionTypedData(validateOrderActionChallenge(challenge(), expectations()), 84532, GATEWAY);
+  const message = jsonNumbers(typed.message as Record<string, unknown>);
+  const disagreeing = {
+    domain: typed.domain, types: typed.types, primaryType: typed.primaryType,
+    message: { ...message, nonce: `0x${"ef".repeat(32)}` },
+  };
+  assert.equal(
+    refusalCode(() => validateOrderActionChallenge(challenge({ signRequest: disagreeing }), expectations({ chainId: 84532 }))),
+    "DASKI_LIFECYCLE_SIGN_REQUEST_MISMATCH",
+  );
+  const otherChain = { domain: { ...typed.domain, chainId: 1 }, types: typed.types, primaryType: typed.primaryType, message };
+  assert.equal(
+    refusalCode(() => validateOrderActionChallenge(challenge({ signRequest: otherChain }), expectations({ chainId: 84532 }))),
+    "DASKI_LIFECYCLE_SIGN_REQUEST_MISMATCH",
+  );
+  // Any other extra field is still an open shape.
+  assert.equal(
+    refusalCode(() => validateOrderActionChallenge(challenge({ signRequest: disagreeing, extra: 1 }), expectations({ chainId: 84532 }))),
+    "DASKI_LIFECYCLE_CHALLENGE_OPEN_SHAPE",
+  );
+});
+
+test("a wallet challenge with an agreeing signRequest validates; a disagreeing one is refused", () => {
+  const base = walletChallenge();
+  const typed = walletActionTypedData(validateWalletActionChallenge(base, 84532, walletExpectations()));
+  const signRequest = { domain: base.domain, types: typed.types, primaryType: typed.primaryType, message: base.message };
+  const validated = validateWalletActionChallenge({ ...base, signRequest }, 84532, walletExpectations());
+  assert.equal(validated.primaryType, "WalletActionAuthorizationV1");
+  assert.equal("signRequest" in validated, false);
+
+  const disagreeing = { ...signRequest, message: { ...base.message, payer: `0x${"2".repeat(40)}` } };
+  assert.equal(
+    refusalCode(() => validateWalletActionChallenge({ ...base, signRequest: disagreeing }, 84532, walletExpectations())),
+    "DASKI_LIFECYCLE_SIGN_REQUEST_MISMATCH",
+  );
+  assert.equal(
+    refusalCode(() => validateWalletActionChallenge({ ...base, unexpected: true }, 84532, walletExpectations())),
+    "DASKI_LIFECYCLE_OPEN_SHAPE",
   );
 });

@@ -102,6 +102,8 @@ export interface OrderActionExpectations {
   /** The exact request body the CLI will send. */
   request: Record<string, unknown>;
   nowSeconds?: number;
+  /** The profile's chain id, so a server-proposed signRequest domain can be checked. */
+  chainId?: number;
 }
 
 /**
@@ -131,7 +133,12 @@ export function validateOrderActionChallenge(
       remediation: `Retry the lifecycle call; see ${DOC}`,
     });
   }
-  const challenge = value as Record<string, unknown>;
+  // Sign-ready gateways attach the complete EIP-712 proposal as `signRequest`
+  // beside the challenge fields. This bridge recomputes the typed data itself
+  // and never signs the proposal, so it is set aside for the closed-shape check
+  // and compared with the recomputation at the end. Refusing it as an open
+  // shape failed every live lifecycle call and wallet query (2026-09-03).
+  const { challenge, signRequest } = splitSignRequest(value as Record<string, unknown>);
   const keys = Object.keys(challenge).sort();
   if (keys.join(",") !== [...ORDER_CHALLENGE_FIELDS].sort().join(",")) {
     refuse({
@@ -223,7 +230,17 @@ export function validateOrderActionChallenge(
   assertShortLived(Number(challenge.issuedAt), Number(challenge.validBefore),
     expectations.nowSeconds);
 
-  return challenge as unknown as OrderActionChallenge;
+  const validated = challenge as unknown as OrderActionChallenge;
+  if (signRequest) {
+    const proposedDomain = signRequest.domain as Record<string, unknown> | undefined;
+    const chainId = expectations.chainId ?? Number(proposedDomain?.chainId);
+    assertSignRequestAgrees(
+      signRequest,
+      orderActionTypedData(validated, chainId, expectations.gatewayUrl),
+      "order-action challenge",
+    );
+  }
+  return validated;
 }
 
 /**
@@ -293,7 +310,7 @@ export function validateWalletActionChallenge(
       remediation: `Retry the query; see ${DOC}`,
     });
   }
-  const challenge = value as Record<string, unknown>;
+  const { challenge, signRequest } = splitSignRequest(value as Record<string, unknown>);
   assertExactKeys(challenge, ["domain", "primaryType", "message"], "wallet challenge");
   const domain = challenge.domain as Record<string, unknown>;
   assertExactKeys(domain, ["name", "version", "chainId"], "wallet challenge domain");
@@ -397,7 +414,11 @@ export function validateWalletActionChallenge(
   assertShortLived(Number(message.issuedAt), Number(message.validBefore),
     expectations.nowSeconds);
 
-  return challenge as unknown as WalletActionChallenge;
+  const validated = challenge as unknown as WalletActionChallenge;
+  if (signRequest) {
+    assertSignRequestAgrees(signRequest, walletActionTypedData(validated), "wallet challenge");
+  }
+  return validated;
 }
 
 /** The typed-data payload for a validated wallet-action challenge. */
@@ -435,6 +456,56 @@ function assertShortLived(issuedAt: number, validBefore: number, nowSeconds?: nu
       remediation:
         "Expired, future-dated, or long-lived lifecycle challenges are refused. " +
         `Check the local clock, then retry; see ${DOC}`,
+    });
+  }
+}
+
+/** Sets a server-proposed `signRequest` aside so the closed-shape checks see only the challenge fields. */
+function splitSignRequest(value: Record<string, unknown>): {
+  challenge: Record<string, unknown>;
+  signRequest: Record<string, unknown> | undefined;
+} {
+  const { signRequest, ...challenge } = value;
+  const proposal = signRequest && typeof signRequest === "object" && !Array.isArray(signRequest)
+    ? signRequest as Record<string, unknown>
+    : undefined;
+  return { challenge, signRequest: proposal };
+}
+
+/**
+ * A server-proposed sign request is never signed as given; it must agree,
+ * field for field, with the typed data this bridge recomputes from the
+ * challenge. A difference means the server proposes one thing and binds
+ * another, and the proposal is refused rather than reconciled.
+ */
+function assertSignRequestAgrees(
+  signRequest: Record<string, unknown>,
+  recomputed: TypedDataRequest,
+  label: string,
+): void {
+  const proposedDomain = (signRequest.domain ?? {}) as Record<string, unknown>;
+  const proposedMessage = (signRequest.message ?? {}) as Record<string, unknown>;
+  const recomputedDomain = recomputed.domain as unknown as Record<string, unknown>;
+  const recomputedMessage = recomputed.message as Record<string, unknown>;
+  const same = (a: unknown, b: unknown): boolean =>
+    String(a).toLowerCase() === String(b).toLowerCase();
+  const differences: string[] = [];
+  if (signRequest.primaryType !== recomputed.primaryType) differences.push("primaryType");
+  for (const key of ["name", "version", "chainId"]) {
+    if (!same(proposedDomain[key], recomputedDomain[key])) differences.push(`domain.${key}`);
+  }
+  for (const key of new Set([...Object.keys(proposedMessage), ...Object.keys(recomputedMessage)])) {
+    if (!same(proposedMessage[key], recomputedMessage[key])) differences.push(`message.${key}`);
+  }
+  if (differences.length > 0) {
+    refuse({
+      check: "lifecycle-binding",
+      code: "DASKI_LIFECYCLE_SIGN_REQUEST_MISMATCH",
+      expected: `a signRequest equal to the typed data this bridge recomputes for the ${label}`,
+      actual: `differs at ${differences.join(", ")}`,
+      remediation:
+        "The server proposed typed data that differs from the challenge it binds. " +
+        `Do not sign it; see ${DOC}`,
     });
   }
 }

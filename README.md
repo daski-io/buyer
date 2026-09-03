@@ -35,12 +35,12 @@ swap happily.
 ## Quick start
 
 ```bash
-npx @daski/pay@0.1.0 doctor --json
+npx @daski/pay@0.1.1 doctor --json
 ```
 
 ```bash
 daski wallet create                     # interactive; a human must confirm
-daski doctor --json                     # exits 0 only when nothing blocks
+daski doctor --json                     # exit 0: signer, funds, gateway, and its MCP results check out
 daski buy --provider 8327 --outcome create-mailbox --request ./request.json
 daski order status <handle>
 daski order artifact <handle> --output ./result.json

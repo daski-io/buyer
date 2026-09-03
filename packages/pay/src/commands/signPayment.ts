@@ -165,7 +165,12 @@ function readChallenge(path: string): PaymentChallenge {
       remediation: "Save the gateway's PaymentRequired response to the file verbatim.",
     });
   }
-  const challenge = parsed as PaymentChallenge;
+  // The prepare tool's saved output nests the challenge under `paymentRequired`
+  // beside its preflight; accept that file as well as a bare PaymentRequired.
+  const nested = (parsed as { paymentRequired?: unknown }).paymentRequired;
+  const challenge = (
+    nested && typeof nested === "object" && !Array.isArray(nested) ? nested : parsed
+  ) as PaymentChallenge;
   const requirement = challenge.accepts?.[0] as PaymentRequirement | undefined;
   if (challenge.x402Version !== 2 || !requirement || !challenge.resource) {
     throw new CliError({

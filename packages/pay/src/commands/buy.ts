@@ -65,10 +65,30 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
       payerAddress: context.payerAddress,
     });
     const amountAtomic = BigInt(challenge.requirement.amount);
+    const preflight = challenge.preflight;
+    if (preflight?.sufficient === false) {
+      // The gateway already read the payer's balance: a signature now would be
+      // a doomed one. Say what is needed and stop; where the USDC comes from
+      // is the operator's business.
+      const network = String(preflight.network ?? context.profile.network);
+      const balance = typeof preflight.usdcBalance === "string"
+        ? `${formatUsdc(BigInt(preflight.usdcBalance))} USDC`
+        : "an unknown USDC balance";
+      throw new CliError({
+        code: "DASKI_INSUFFICIENT_USDC",
+        message:
+          `${context.payerAddress} holds ${balance} on ${network}; this purchase ` +
+          `needs ${formatUsdc(amountAtomic)}.`,
+        remediation:
+          `Fund ${context.payerAddress} with USDC on ${network}, then re-run. Nothing was signed.`,
+        details: { preflight, priceUsdc: formatUsdc(amountAtomic) },
+        exitCode: 2,
+      });
+    }
 
     // -- 2. approval -------------------------------------------------------
     const outcome = await context.catalog.getOutcome(options.providerAgentId, options.outcomeId);
-    const summary = approvalSummary(challenge.challenge.extensions, outcome, amountAtomic);
+    const summary = approvalSummary(challenge.challenge.extensions, outcome, amountAtomic, preflight);
     const threshold = atomicUsdc(context.profile.requireApprovalAboveUsdc);
     if (amountAtomic > threshold && !options.yes) {
       if (options.json || !isInteractive()) {
@@ -153,10 +173,19 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
         cause: `gateway reported ${code}`,
       });
     }
+    if (GatewayClient.unreadable(result)) {
+      // The paid call answered without an error and this client found no
+      // payload. The signature is out and the outcome is unknown: that is the
+      // ambiguous case, so reconcile — never report failure, never re-sign.
+      return await reconcile(context, {
+        intentId, options, request, authorized,
+        cause: "the paid result carried no payload this CLI could read",
+      });
+    }
     if (result.isError || !body || typeof body.orderHandle !== "string") {
       updateOrder(intentId, { state: "PENDING_RECONCILIATION" });
       const { purchaseFailure } = await import("../gateway/purchase.js");
-      throw purchaseFailure(result);
+      throw purchaseFailure(result, { afterSubmit: true });
     }
 
     // -- 6 & 7. persist and report ----------------------------------------
@@ -252,20 +281,23 @@ function normalizeState(status: unknown): "FULFILLED" | "INPUT_REQUIRED" | "PROV
 }
 
 /**
- * The human-facing summary. Prefers the gateway's `approvalSummary` when it
- * ships one; otherwise it is assembled from the order terms and the catalog,
- * so the operator sees who is being paid and under whose terms either way.
+ * The human-facing summary. The gateway's prepare tool ships a one-sentence
+ * `approvalSummary` in its preflight; it leads when present, and the rest is
+ * assembled from the order terms and the catalog, so the operator sees who is
+ * being paid and under whose terms either way.
  */
 function approvalSummary(
   extensions: Record<string, unknown> | undefined,
   outcome: { serviceName?: string | undefined; skillName?: string | undefined;
     payTo: string; commissionBps?: number | undefined; providerAudience?: string | undefined },
   amountAtomic: bigint,
+  preflight?: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
-  const supplied = extensions?.approvalSummary;
+  const supplied = preflight?.approvalSummary ?? extensions?.approvalSummary;
   if (supplied && typeof supplied === "object") return supplied as Record<string, unknown>;
   const terms = extensions?.["daski-order-terms"] as Record<string, unknown> | undefined;
   return {
+    ...(typeof supplied === "string" ? { gateway: supplied } : {}),
     what: [outcome.serviceName, outcome.skillName].filter(Boolean).join(" / ") || "Daski outcome",
     price: formatUsdc(amountAtomic),
     paysTo: outcome.payTo,

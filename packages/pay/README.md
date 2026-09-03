@@ -4,7 +4,7 @@ The Daski buyer bridge. A CLI that buys outcomes, tracks orders across
 processes, and refuses to sign anything it has not independently checked.
 
 ```bash
-npx @daski/pay@0.1.0 doctor --json
+npx @daski/pay@0.1.1 doctor --json
 ```
 
 > Server proposes; buyer bridge validates against its own expectations and
@@ -14,7 +14,7 @@ npx @daski/pay@0.1.0 doctor --json
 
 | Command | What it does |
 |---|---|
-| `daski doctor` | Readiness report; exits 0 only when nothing blocks. Every issue carries a remediation |
+| `daski doctor` | Readiness report; exits 0 only when nothing blocks, including one read-only MCP round trip that proves this CLI can read the gateway's results. Every issue carries a remediation |
 | `daski wallet create` | Generate a local EOA — interactive human confirmation required |
 | `daski wallet address` / `balance` | The active payer address; native + USDC balances |
 | `daski buy --provider <id> --outcome <id> --request <file.json>` | Challenge → approve → validate → sign → submit → record |

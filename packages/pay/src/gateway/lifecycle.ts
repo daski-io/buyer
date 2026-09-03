@@ -15,7 +15,12 @@ import {
 } from "@daski/x402-scheme";
 import type { Address } from "viem";
 import { CliError } from "../cli/errors.js";
-import { GatewayClient, type McpToolResult } from "./client.js";
+import {
+  describeResult,
+  GatewayClient,
+  unreadableResultError,
+  type McpToolResult,
+} from "./client.js";
 
 export interface LifecycleCallOptions {
   client: GatewayClient;
@@ -55,6 +60,7 @@ export async function callAuthorizedLifecycleTool(
     action: options.action,
     gatewayUrl: options.gatewayUrl,
     request,
+    chainId: options.chainId,
     ...(options.nowSeconds === undefined ? {} : { nowSeconds: options.nowSeconds }),
   });
   const signature = await options.signer.signTypedData(
@@ -119,6 +125,8 @@ export async function callWalletQuery(
 }
 
 function lifecycleFailure(toolName: string, result: McpToolResult): CliError {
+  // No payload in a success answer is a shape disagreement, not a refusal.
+  if (GatewayClient.unreadable(result)) return unreadableResultError(toolName, result);
   const body = GatewayClient.json(result);
   const code = typeof body?.code === "string" ? body.code : "DASKI_LIFECYCLE_CALL_FAILED";
   const message = typeof body?.message === "string"
@@ -130,6 +138,6 @@ function lifecycleFailure(toolName: string, result: McpToolResult): CliError {
     remediation: typeof body?.next_action === "string"
       ? body.next_action
       : `Run \`daski order status <handle>\` to see the order's current state.`,
-    details: { tool: toolName, gateway: body ?? null },
+    details: { tool: toolName, gateway: body ?? describeResult(result) },
   });
 }
