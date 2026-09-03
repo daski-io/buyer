@@ -4,7 +4,7 @@ The Daski buyer bridge. A CLI that buys outcomes, tracks orders across
 processes, and refuses to sign anything it has not independently checked.
 
 ```bash
-npx @daski/pay@0.1.1 doctor --json
+npx @daski/pay@0.1.2 doctor --json
 ```
 
 > Server proposes; buyer bridge validates against its own expectations and

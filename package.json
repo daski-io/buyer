@@ -1,6 +1,6 @@
 {
   "name": "daski-buyer",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Daski buyer bridge: the @daski/pay CLI and the @daski/x402-scheme composite x402 client plugin.",
   "license": "MIT",

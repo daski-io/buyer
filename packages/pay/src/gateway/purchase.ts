@@ -68,6 +68,44 @@ export function newIntentId(): string {
   return `daski-${randomBytes(16).toString("hex")}`;
 }
 
+/** The identifier the gateway pinned in a challenge's `payment-identifier` extension, if any. */
+export function issuedPaymentIdentifier(
+  extensions: Record<string, unknown> | undefined,
+): string | undefined {
+  const issued = extensions?.["payment-identifier"] as { info?: { id?: unknown } } | undefined;
+  const id = issued?.info?.id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+/**
+ * The payment identifier a submission must carry. The gateway looks a paid
+ * submission up by this identifier, so it has to be the one the gateway bound
+ * to the challenge: when we proposed one at challenge time (`buy`), the
+ * gateway echoes it; when the challenge came from elsewhere (`sign-payment`
+ * on a challenge the agent obtained itself), the gateway's own identifier is
+ * the only one that exists server-side. 0.1.1 minted a fresh identifier in
+ * that second case and every such submission was refused with
+ * `PAYMENT_IDENTIFIER_CONFLICT` before settlement (2026-09-03).
+ */
+export function resolvePaymentIdentifier(
+  extensions: Record<string, unknown> | undefined,
+  proposed: string | undefined,
+): string | undefined {
+  const issued = issuedPaymentIdentifier(extensions);
+  if (issued !== undefined && proposed !== undefined && issued !== proposed) {
+    throw new CliError({
+      code: "DASKI_PAYMENT_IDENTIFIER_MISMATCH",
+      message:
+        `The gateway bound this challenge to payment identifier ${issued}, not to ` +
+        `the ${proposed} this purchase proposed.`,
+      remediation:
+        "Do not sign: a payment carrying a different identifier than the challenge " +
+        "is refused by the gateway. Request a fresh challenge and retry.",
+    });
+  }
+  return issued ?? proposed;
+}
+
 /**
  * Step 1: obtain a payment challenge. Prefers `daski_get_payment_challenge`
  * and falls back to an unpaid `daski_buy_outcome`, which is the same challenge
@@ -182,6 +220,8 @@ export async function authorizePayment(options: AuthorizeOptions): Promise<Autho
     nonce,
   });
 
+  // The identifier the submission carries is the gateway's, never a fresh one.
+  const paymentIdentifier = resolvePaymentIdentifier(challenge.challenge.extensions, options.intentId);
   const validated = await validatePurchaseAuthorization(policy, proposal, {
     providerAgentId: options.providerAgentId,
     outcomeId: options.outcomeId,
@@ -190,7 +230,7 @@ export async function authorizePayment(options: AuthorizeOptions): Promise<Autho
     challengePayTo: splitter,
     challengeNetwork: requirement.network,
     approvedQuoteAtomic: options.approvedQuoteAtomic,
-    paymentIdentifier: options.intentId,
+    paymentIdentifier,
     binding,
     nowSeconds: now,
   });
@@ -207,7 +247,7 @@ export async function authorizePayment(options: AuthorizeOptions): Promise<Autho
       payload: { authorization: validated.authorization, signature },
       extensions: withPaymentIdentifier(
         paymentEchoExtensions(challenge.challenge.extensions),
-        options.intentId,
+        paymentIdentifier,
       ),
     },
     amountAtomic: validated.amountAtomic,

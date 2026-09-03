@@ -3,6 +3,27 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.1.2 — 2026-09-03
+
+### `@daski/pay`
+
+- **`sign-payment` carries the gateway's payment identifier.** A challenge the
+  caller obtained itself already has an identifier bound by the gateway
+  (`payment-identifier.info.id`); 0.1.1 minted a fresh one, and the gateway,
+  which looks a paid submission up by identifier, refused every such payment
+  with `PAYMENT_IDENTIFIER_CONFLICT` before settlement. Found by the harness's
+  published-CLI acceptance lane on its first live run against gateway v0.31.0
+  (2026-09-03). The signed payload and the local order record now use the
+  issued identifier; a fresh one is minted only for a challenge without one.
+  `buy` is unaffected: it proposes its identifier at challenge time and the
+  gateway echoes it. A challenge bound to a different identifier than the one
+  a purchase proposed is refused (`DASKI_PAYMENT_IDENTIFIER_MISMATCH`), never
+  signed.
+
+### `@daski/x402-scheme`
+
+- Version bump only; `@daski/pay` pins it exactly.
+
 ## 0.1.1 — 2026-09-03
 
 ### `@daski/pay`
