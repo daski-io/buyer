@@ -6,18 +6,17 @@
  * and any re-sign.
  */
 import { readFileSync } from "node:fs";
-import { formatUsdc, PolicyRefusal } from "@daski/x402-scheme";
+import { canonicalHash, formatUsdc, PolicyRefusal } from "@daski/x402-scheme";
 import { CliError } from "../cli/errors.js";
-import { confirm, isInteractive } from "../cli/prompt.js";
 import { note } from "../cli/output.js";
-import { atomicUsdc } from "../config.js";
-import { createContext, type ContextOptions } from "../context.js";
+import { createContext, type ContextOptions, type CommandContext } from "../context.js";
+import { approvePurchase, nextPurchaseApproval } from "./approval.js";
 import { GatewayClient } from "../gateway/client.js";
 import {
   authorizePayment,
   challengeIntentId,
   isAmbiguousPurchaseAnswer,
-  reconcileAmbiguousPurchase,
+  reconcileByIdentifier,
   recordIntent,
   requestChallenge,
   submitPayment,
@@ -31,13 +30,13 @@ export interface BuyOptions extends ContextOptions {
   payer?: string | undefined;
   json: boolean;
   legacyArg?: boolean;
-  /** Skips only the interactive prompt, never the policy validator. */
-  yes?: boolean;
+  /** The identifier of the quote the user approved. */
+  approved?: string | undefined;
 }
 
-export async function runBuy(options: BuyOptions): Promise<Record<string, unknown>> {
+export async function runBuy(options: BuyOptions, contextFactory: (options: ContextOptions) => Promise<CommandContext> = createContext): Promise<Record<string, unknown>> {
   const request = readRequestFile(options.requestFile);
-  const context = await createContext(options);
+  const context = await contextFactory(options);
   try {
     if (options.payer && options.payer.toLowerCase() !== context.payerAddress.toLowerCase()) {
       throw new CliError({
@@ -61,13 +60,25 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
     });
     const amountAtomic = BigInt(challenge.requirement.amount);
     const preflight = challenge.preflight;
+    const requestHash = canonicalHash({ method: "POST", resource: challenge.challenge.resource?.url,
+      providerAgentId: options.providerAgentId, outcomeId: options.outcomeId, body: request });
+    if (!challenge.binding || challenge.binding.canonicalRequestHash !== requestHash) {
+      throw new CliError({ code: "DASKI_REQUEST_BINDING_MISMATCH",
+        message: "The challenge does not match the requested purchase.",
+        remediation: "Obtain a challenge for the same provider, outcome, and request." });
+    }
+    const approval = nextPurchaseApproval({ gatewayUrl: context.profile.gatewayUrl,
+      payer: context.payerAddress, providerAgentId: options.providerAgentId, outcomeId: options.outcomeId,
+      requirement: challenge.requirement, binding: challenge.binding }, context.profileName);
+    const outcome = await context.catalog.getOutcome(options.providerAgentId, options.outcomeId);
+    const summary = approvalSummary(challenge.challenge.extensions, outcome, amountAtomic, preflight);
     if (preflight?.sufficient === false) {
       // The gateway already read the payer's balance: a signature now would be
       // a doomed one. Say what is needed and stop; where the USDC comes from
       // is the operator's business.
       const network = String(preflight.network ?? context.profile.network);
       const balance = typeof preflight.usdcBalance === "string"
-        ? `${formatUsdc(BigInt(preflight.usdcBalance))} USDC`
+        ? formatUsdc(BigInt(preflight.usdcBalance))
         : "an unknown USDC balance";
       throw new CliError({
         code: "DASKI_INSUFFICIENT_USDC",
@@ -76,41 +87,16 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
           `needs ${formatUsdc(amountAtomic)}.`,
         remediation:
           `Fund ${context.payerAddress} with USDC on ${network}, then re-run. Nothing was signed.`,
-        details: { preflight, priceUsdc: formatUsdc(amountAtomic) },
+        details: { preflight, priceUsdc: formatUsdc(amountAtomic), approval, approvalSummary: summary,
+          shortfallUsdc: typeof preflight.usdcBalance === "string"
+            ? formatUsdc(amountAtomic > BigInt(preflight.usdcBalance) ? amountAtomic - BigInt(preflight.usdcBalance) : 0n) : null },
         exitCode: 2,
       });
     }
 
     // -- 2. approval -------------------------------------------------------
-    const outcome = await context.catalog.getOutcome(options.providerAgentId, options.outcomeId);
-    const summary = approvalSummary(challenge.challenge.extensions, outcome, amountAtomic, preflight);
-    const threshold = atomicUsdc(context.profile.requireApprovalAboveUsdc);
-    if (amountAtomic > threshold && !options.yes) {
-      if (options.json || !isInteractive()) {
-        throw new CliError({
-          code: "DASKI_HUMAN_APPROVAL_REQUIRED",
-          message:
-            `${formatUsdc(amountAtomic)} is above this profile's ` +
-            `requireApprovalAboveUsdc of ${context.profile.requireApprovalAboveUsdc} USDC, ` +
-            "and this session cannot ask a human.",
-          remediation:
-            "Have a human run this command in an interactive terminal and confirm " +
-            "the prompt, or — if a human has already approved this exact purchase " +
-            "— re-run with --yes. Raising the threshold is a manual config edit.",
-          details: { approvalSummary: summary, priceUsdc: formatUsdc(amountAtomic) },
-          exitCode: 2,
-        });
-      }
-      note(renderApproval(summary, amountAtomic));
-      if (!await confirm("Authorize this payment?")) {
-        throw new CliError({
-          code: "DASKI_PURCHASE_DECLINED",
-          message: "The purchase was not approved.",
-          remediation: "Nothing was signed and no money moved. Re-run when ready.",
-          exitCode: 2,
-        });
-      }
-    }
+    await approvePurchase({ approval, approved: options.approved,
+      threshold: context.profile.requireApprovalAboveUsdc, json: options.json, summary });
 
     // -- 3 & 4. validate, recompute, sign ----------------------------------
     // The gateway bound its own payment identifier to the challenge; the
@@ -124,6 +110,7 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
       outcomeId: options.outcomeId,
       payer: context.payerAddress,
       amount: amountAtomic.toString(),
+      approvalTermsHash: approval.termsHash,
       state: "INTENT_RECORDED",
       request,
     });
@@ -157,7 +144,7 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
       // The signature left the process and the answer did not come back. This
       // is the ambiguous case: reconcile, never re-sign.
       return await reconcile(context, {
-        intentId, options, request, authorized,
+        intentId,
         cause: `transport failure after submit: ${(error as Error).message}`,
       });
     }
@@ -166,7 +153,7 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
     const code = typeof body?.code === "string" ? body.code : undefined;
     if (result.isError && isAmbiguousPurchaseAnswer(code, body)) {
       return await reconcile(context, {
-        intentId, options, request, authorized,
+        intentId,
         cause: `gateway reported ${code ?? "an error"} with the payment outcome unknown`,
       });
     }
@@ -175,7 +162,7 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
       // payload. The signature is out and the outcome is unknown: that is the
       // ambiguous case, so reconcile — never report failure, never re-sign.
       return await reconcile(context, {
-        intentId, options, request, authorized,
+        intentId,
         cause: "the paid result carried no payload this CLI could read",
       });
     }
@@ -221,31 +208,25 @@ async function reconcile(
   context: Awaited<ReturnType<typeof createContext>>,
   args: {
     intentId: string;
-    options: BuyOptions;
-    request: Record<string, unknown>;
-    authorized: Awaited<ReturnType<typeof authorizePayment>>;
     cause: string;
   },
 ): Promise<Record<string, unknown>> {
   updateOrder(args.intentId, { state: "PENDING_RECONCILIATION" });
   note(`payment outcome unclear (${args.cause}); reconciling before any re-sign...`);
   const record = updateOrder(args.intentId, {})!;
-  const outcome = await reconcileAmbiguousPurchase({
+  const outcome = await reconcileByIdentifier({
     client: context.client,
     signer: context.signer,
-    record,
+    intentId: args.intentId,
     payer: context.payerAddress,
     chainId: context.profile.chainId,
     gatewayUrl: context.profile.gatewayUrl,
-    submission: args.authorized.submission,
-    request: args.request,
-    ...(args.options.legacyArg === undefined ? {} : { legacyArg: args.options.legacyArg }),
   });
 
   if (outcome.status === "settled") {
     const settled = updateOrder(args.intentId, {
       handle: outcome.orderHandle,
-      state: normalizeState(outcome.body?.status),
+      state: normalizeState(outcome.gatewayState),
     });
     return {
       purchased: true,
@@ -260,7 +241,13 @@ async function reconcile(
     };
   }
 
-  // Provably absent: the caller may safely start over with a fresh challenge.
+  if (outcome.status !== "absent") {
+    throw new CliError({ code: "DASKI_PAYMENT_PENDING_RECONCILIATION",
+      message: "The gateway is still resolving this payment.",
+      remediation: `Check again with daski order reconcile ${args.intentId}.`,
+      details: { intentId: args.intentId, status: outcome.status, reconciliation: outcome.evidence }, exitCode: 3 });
+  }
+  updateOrder(args.intentId, { state: "NOT_SETTLED" });
   throw new CliError({
     code: "DASKI_PAYMENT_UNRESOLVED_NO_ORDER",
     message:
@@ -291,13 +278,14 @@ function normalizeState(status: unknown): "FULFILLED" | "INPUT_REQUIRED" | "PROV
 function approvalSummary(
   extensions: Record<string, unknown> | undefined,
   outcome: { serviceName?: string | undefined; skillName?: string | undefined;
-    payTo: string; commissionBps?: number | undefined; providerAudience?: string | undefined },
+    payTo: string; commissionBps?: number | undefined; providerAudience?: string | undefined;
+    terms?: Record<string, unknown> | undefined },
   amountAtomic: bigint,
   preflight?: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const supplied = preflight?.approvalSummary ?? extensions?.approvalSummary;
   if (supplied && typeof supplied === "object") return supplied as Record<string, unknown>;
-  const terms = extensions?.["daski-order-terms"] as Record<string, unknown> | undefined;
+  const terms = extensions?.["daski-order-terms"] as Record<string, unknown> | undefined ?? outcome.terms;
   return {
     ...(typeof supplied === "string" ? { gateway: supplied } : {}),
     what: [outcome.serviceName, outcome.skillName].filter(Boolean).join(" / ") || "Daski outcome",
@@ -308,17 +296,6 @@ function approvalSummary(
     providerTerms: terms?.providerTermsUrl ?? null,
     marketplaceTerms: terms?.marketplaceTermsUrl ?? null,
   };
-}
-
-function renderApproval(summary: Record<string, unknown>, amountAtomic: bigint): string {
-  const lines = ["", "  ─ Purchase approval ─────────────────────────────"];
-  for (const [key, value] of Object.entries(summary)) {
-    if (value === null || value === undefined) continue;
-    lines.push(`  ${key.padEnd(18)} ${String(value)}`);
-  }
-  lines.push(`  ${"you will pay".padEnd(18)} ${formatUsdc(amountAtomic)}`);
-  lines.push("  ─────────────────────────────────────────────────", "");
-  return lines.join("\n");
 }
 
 function readRequestFile(path: string): Record<string, unknown> {

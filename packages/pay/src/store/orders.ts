@@ -44,10 +44,17 @@ export interface OrderRecord {
   payer: string;
   /** Atomic USDC. */
   amount: string;
+  /** Approved business terms, used to distinguish repeat purchases. */
+  approvalTermsHash?: string | undefined;
   state: OrderState;
   /** The recomputed authorization nonce; identifies the order on-chain. */
   authorizationNonce?: string | undefined;
   readCapability?: ReadCapability | undefined;
+  /** A review submission retained for retries while sponsorship is pending. */
+  confirmationSubmission?: {
+    action: "confirmation" | "revoke-confirmation";
+    request: { phase: "submit"; preparationId: string; signature: string };
+  } | undefined;
   createdAt: string;
   updatedAt: string;
   /** The request body, kept so an interrupted purchase can be replayed byte-identically. */

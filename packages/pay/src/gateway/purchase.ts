@@ -1,23 +1,4 @@
-/**
- * The purchase flow, and the ambiguous-outcome path.
- *
- * The dangerous moment in a buyer bridge is not the signature — it is the
- * silence after it. A timeout, a dropped socket, or a
- * `PAYMENT_PENDING_RECONCILIATION` leaves us unable to say whether money
- * moved. The rule (§2) is: reconcile before any re-sign. A second signature
- * over a fresh challenge is a second order, and a second charge.
- *
- * Two facts make reconciliation provable rather than heuristic:
- *
- *   1. The recipe nonce is deterministic, so an identical resubmission is
- *      byte-identical, and the gateway's published retry policy treats an
- *      identical signed authorization as `transport-retry-same-purchase`.
- *      Replaying what we already signed cannot create a second order.
- *   2. The payer's own order history corroborates it independently.
- *
- * So we replay first, corroborate second, and only request a fresh challenge
- * when both agree the order does not exist.
- */
+/** Purchase authorization, submission, and exact-identifier reconciliation. */
 import { randomBytes } from "node:crypto";
 import {
   bindingFromExtensions,
@@ -49,7 +30,7 @@ import {
 } from "./client.js";
 import { callWalletQuery } from "./lifecycle.js";
 
-/** The read-only prepare tool. A gateway without it serves the same challenge through an unpaid buy call. */
+/** Prepares pricing and a draft without payment. Older gateways use an unpaid buy call. */
 export const CHALLENGE_TOOL = "daski_get_payment_challenge";
 export const BUY_TOOL = "daski_buy_outcome";
 
@@ -342,55 +323,17 @@ export interface ReconcileOutcome {
   evidence: string;
 }
 
-/**
- * The ambiguous-outcome path. Never signs anything: it replays what was
- * already signed, then corroborates against the payer's own history.
- */
-export async function reconcileAmbiguousPurchase(
-  options: ReconcileOptions,
-): Promise<ReconcileOutcome> {
-  const { client, record } = options;
-
-  // 1. Replay the identical authorization. Idempotent by the gateway's own
-  //    published retry policy, so this cannot create a second order.
-  const replay = await submitPayment({
-    client,
-    providerAgentId: record.providerAgentId,
-    outcomeId: record.outcomeId,
-    request: options.request,
-    submission: options.submission,
-    ...(options.legacyArg === undefined ? {} : { legacyArg: options.legacyArg }),
-  });
-  const replayBody = GatewayClient.json(replay);
-  if (!replay.isError && typeof replayBody?.orderHandle === "string") {
-    return {
-      status: "settled",
-      orderHandle: replayBody.orderHandle,
-      body: replayBody,
-      evidence: "identical signed authorization replayed to the same order",
-    };
+/** Compatibility wrapper around exact-identifier reconciliation. */
+export async function reconcileAmbiguousPurchase(options: ReconcileOptions): Promise<ReconcileOutcome> {
+  const outcome = await reconcileByIdentifier({ ...options, intentId: options.record.intentId });
+  if (outcome.status === "in_flight" || outcome.status === "ambiguous") {
+    throw new CliError({ code: "DASKI_PAYMENT_PENDING_RECONCILIATION",
+      message: "The gateway is still resolving this payment.",
+      remediation: `Check again with daski order reconcile ${options.record.intentId}.`,
+      details: { intentId: options.record.intentId, evidence: outcome.evidence } });
   }
-
-  // 2. Corroborate independently against the payer's own order history.
-  const listed = await listPayerOrders(options);
-  const match = listed.find((order) =>
-    order.providerAgentId === record.providerAgentId &&
-    order.outcomeId === record.outcomeId &&
-    order.grossAmount === record.amount &&
-    Date.parse(order.createdAt) >= Date.parse(record.createdAt) - 60_000);
-  if (match) {
-    return {
-      status: "settled",
-      orderHandle: match.orderHandle,
-      evidence: "matched an order in the payer's own history",
-    };
-  }
-
-  return {
-    status: "absent",
-    evidence:
-      "the identical replay produced no order and the payer's history contains none",
-  };
+  return { status: outcome.status, orderHandle: outcome.orderHandle,
+    body: { status: outcome.gatewayState }, evidence: outcome.evidence };
 }
 
 interface PayerOrderRow {
@@ -433,7 +376,10 @@ export async function listPayerOrders(options: {
     chainId: options.chainId,
     gatewayUrl: options.gatewayUrl,
   });
-  const rows = Array.isArray(body.orders) ? body.orders as PayerOrderRow[] : [];
+  if (!Array.isArray(body.orders)) throw new CliError({ code: "DASKI_ORDER_HISTORY_UNREADABLE",
+    message: "The gateway returned no readable order history.",
+    remediation: "Retry order reconcile with the recorded intent identifier." });
+  const rows = body.orders as PayerOrderRow[];
   if (!options.intentId) return rows;
   const filtered = rows.filter((row) => row.paymentIdentifier === options.intentId);
   // Only narrow when the gateway actually echoes the key; an empty result from
@@ -501,6 +447,9 @@ export function reconcileIdentifierRows(
   rows: readonly PayerOrderRow[],
 ): IdentifierReconciliation {
   const matches = rows.filter((row) => row.paymentIdentifier === intentId);
+  if (rows.some((row) => typeof row?.paymentIdentifier !== "string") || matches.length > 1) {
+    return { status: "ambiguous", evidence: "The gateway history does not identify one purchase reliably." };
+  }
   if (matches.length === 0) {
     return {
       status: "absent",

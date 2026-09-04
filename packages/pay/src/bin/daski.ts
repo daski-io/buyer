@@ -18,6 +18,7 @@ import {
 import { runSignPayment } from "../commands/signPayment.js";
 import { createWallet, walletAddress, walletBalance } from "../commands/wallet.js";
 import { CLI_VERSION } from "../version.js";
+import { configureBudgets } from "../config.js";
 
 /** Flags every command accepts. */
 const GLOBAL_FLAGS = [
@@ -35,12 +36,18 @@ Commands
   wallet create                       Generate a local EOA (requires human confirmation)
   wallet address                      Print the active payer address
   wallet balance                      Print native + USDC balances
+  budget [--per-order <usdc|none>] [--total <usdc|none>] [--approval-above <usdc>]
+                                      View or change optional spending settings
   buy --provider <id> --outcome <id> --request <file.json> [--payer <addr>]
                                       Challenge, approve, validate, sign, submit, record
+                                      After quote approval: repeat with --approve <approval.id>
   order status <handle>               Read an order's state
   order artifact <handle> [--output <file>]
                                       Write the result bytes to a file (never to stdout)
-  order confirm <handle>              Confirm delivery
+  order confirm <handle> --choice <Confirmed|NotConfirmed>
+                                      Record the user's delivery review
+  order revoke-confirmation <handle>  Withdraw the active review
+  order confirm <handle> --resume     Reconcile a pending review submission
   order input <handle> --request <file.json>
                                       Submit requested customer input
   order cancel <handle>               Request cancellation
@@ -54,11 +61,11 @@ Global flags
   --signer <local|cdp|circle>         Override the profile's signer
   --cdp-account <name>                CDP account for --signer cdp (or DASKI_CDP_ACCOUNT)
   --circle-wallet <id>                Circle wallet id for --signer circle (or DASKI_CIRCLE_WALLET)
-  --max-per-order <usdc>              Lower the per-order cap for this run only
-  --session-cap <usdc>                Lower the session cap for this run only
+  --max-per-order <usdc>              Apply a temporary per-order budget
+  --session-cap <usdc>                Apply a temporary total budget
 
-Caps live in ~/.daski/config.json and are human-owned: a flag may lower one,
-never raise it. See https://github.com/daski-io/buyer#readme
+New profiles use quote approval, with optional budgets. Doctor reports the
+active configuration path. See https://github.com/daski-io/buyer#readme
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -85,6 +92,12 @@ async function main(argv: string[]): Promise<number> {
   };
 
   switch (command[0]) {
+    case "budget": {
+      assertKnownFlags(flags, ["json", "profile", "per-order", "total", "approval-above"]);
+      emit(configureBudgets({ profile: shared.profile, perOrder: stringFlag(flags, "per-order"),
+        total: stringFlag(flags, "total"), approvalAbove: stringFlag(flags, "approval-above") }), output);
+      return 0;
+    }
     case "doctor": {
       assertKnownFlags(flags, GLOBAL_FLAGS);
       const report = await runDoctor(shared);
@@ -111,7 +124,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "buy": {
-      assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "outcome", "request", "payer", "legacy-arg", "yes"]);
+      assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "outcome", "request", "payer", "legacy-arg", "approve"]);
       const result = await runBuy({
         ...shared,
         providerAgentId: requireFlag(flags, "provider"),
@@ -119,7 +132,7 @@ async function main(argv: string[]): Promise<number> {
         requestFile: requireFlag(flags, "request"),
         payer: stringFlag(flags, "payer"),
         legacyArg: boolFlag(flags, "legacy-arg"),
-        yes: boolFlag(flags, "yes"),
+        approved: stringFlag(flags, "approve"),
         json,
       });
       emit(result, output);
@@ -146,8 +159,11 @@ async function main(argv: string[]): Promise<number> {
           emit(await orderArtifact({ ...base, output: stringFlag(flags, "output") }), output);
           return 0;
         case "confirm":
-          assertKnownFlags(flags, GLOBAL_FLAGS);
-          emit(await orderConfirm(base), output);
+        case "revoke-confirmation":
+          assertKnownFlags(flags, [...GLOBAL_FLAGS, "choice", "resume", "acknowledge-final-transition"]);
+          emit(await orderConfirm({ ...base, confirmation: stringFlag(flags, "choice"),
+            revoke: command[1] === "revoke-confirmation", resume: boolFlag(flags, "resume"),
+            acknowledgeFinalTransition: boolFlag(flags, "acknowledge-final-transition") }), output);
           return 0;
         case "cancel":
           assertKnownFlags(flags, GLOBAL_FLAGS);
@@ -163,17 +179,18 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         default:
           throw unknownSubcommand("order", command[1],
-            ["status", "artifact", "confirm", "input", "cancel", "reconcile"]);
+            ["status", "artifact", "confirm", "revoke-confirmation", "input", "cancel", "reconcile"]);
       }
     }
 
     case "sign-payment": {
-      assertKnownFlags(flags, [...GLOBAL_FLAGS, "challenge", "provider", "outcome"]);
+      assertKnownFlags(flags, [...GLOBAL_FLAGS, "challenge", "provider", "outcome", "approve"]);
       emit(await runSignPayment({
         ...shared,
         challengeFile: requireFlag(flags, "challenge"),
         providerAgentId: stringFlag(flags, "provider"),
         outcomeId: stringFlag(flags, "outcome"),
+        approved: stringFlag(flags, "approve"),
         json,
       }), output);
       return 0;

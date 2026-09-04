@@ -1,14 +1,5 @@
-/**
- * §5 — profiles, and §4.2 — caps are human-owned.
- *
- * The three caps live in `~/.daski/config.json` and nowhere else. No flag and
- * no environment variable can raise them; a flag may lower one for a single
- * invocation, which is the only direction that cannot be used to talk an
- * agent into spending more than its operator allowed.
- *
- * Sandbox and mainnet are separate blocks with separate keychain entries, so
- * a misconfigured profile cannot reach across and spend real money.
- */
+/** Profiles select a signer and network. Purchases use quote approval;
+ * additional budgets are optional. Existing configured budgets are preserved. */
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { getAddress, type Address } from "viem";
@@ -28,11 +19,11 @@ export interface ProfileConfig {
   usdcAddress: Address;
   /** EVM RPC used for balance reads. Never for signing. */
   rpcUrl: string;
-  /** Human-owned. Not raisable at runtime. */
-  maxPerOrderUsdc: string;
-  /** Human-owned. Not raisable at runtime. */
-  sessionCapUsdc: string;
-  /** Human-owned. Above this, a purchase needs an interactive human. */
+  /** Optional budget for a single purchase; null means no additional budget. */
+  maxPerOrderUsdc: string | null;
+  /** Optional budget across the profile's recorded authorizations. */
+  sessionCapUsdc: string | null;
+  /** Purchases above this user-selected allowance require quote approval. */
   requireApprovalAboveUsdc: string;
   signer: SignerKind;
   /** Profiles are opt-in; mainnet ships disabled. */
@@ -40,7 +31,7 @@ export interface ProfileConfig {
 }
 
 export interface DaskiConfig {
-  version: 1;
+  version: 1 | 2;
   defaultProfile: ProfileName;
   profiles: Record<ProfileName, ProfileConfig>;
 }
@@ -51,7 +42,7 @@ export const SANDBOX_USDC = getAddress("0x036CbD53842c5426634e7929541eC2318f3dCF
 export const MAINNET_USDC = getAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
 export const DEFAULT_CONFIG: DaskiConfig = {
-  version: 1,
+  version: 2,
   defaultProfile: "sandbox",
   profiles: {
     sandbox: {
@@ -60,21 +51,21 @@ export const DEFAULT_CONFIG: DaskiConfig = {
       chainId: 84532,
       usdcAddress: SANDBOX_USDC,
       rpcUrl: "https://sepolia.base.org",
-      maxPerOrderUsdc: "25.00",
-      sessionCapUsdc: "100.00",
-      requireApprovalAboveUsdc: "1.00",
+      maxPerOrderUsdc: null,
+      sessionCapUsdc: null,
+      requireApprovalAboveUsdc: "0.00",
       signer: "local",
       enabled: true,
     },
-    // Scaffolded, and deliberately off. Enabling it is a human edit.
+    // Mainnet is available when the user chooses to enable it.
     mainnet: {
       gatewayUrl: "https://gateway.daski.io",
       network: "eip155:8453",
       chainId: 8453,
       usdcAddress: MAINNET_USDC,
       rpcUrl: "https://mainnet.base.org",
-      maxPerOrderUsdc: "0.00",
-      sessionCapUsdc: "0.00",
+      maxPerOrderUsdc: null,
+      sessionCapUsdc: null,
       requireApprovalAboveUsdc: "0.00",
       signer: "local",
       enabled: false,
@@ -111,10 +102,7 @@ export function ensureConfig(): string {
   }
 }
 
-/**
- * Loads the config and selects a profile. `--profile` and `DASKI_PROFILE`
- * choose *which* human-owned block applies; neither can alter its contents.
- */
+/** Load the selected profile without changing existing spending choices. */
 export function loadConfig(profileOverride?: string): LoadedConfig {
   const path = ensureConfig();
   const warnings: ConfigWarning[] = [];
@@ -125,10 +113,15 @@ export function loadConfig(profileOverride?: string): LoadedConfig {
     throw new CliError({
       code: "DASKI_CONFIG_UNREADABLE",
       message: `${path} is not valid JSON: ${(error as Error).message}`,
-      remediation: `Fix the file by hand, or delete it to regenerate defaults. See ${DOC}`,
+      remediation: `Correct the JSON in ${path}. See ${DOC}`,
     });
   }
   warnings.push(...permissionWarnings(path));
+  if (parsed.version !== 1 && parsed.version !== 2) {
+    throw new CliError({ code: "DASKI_CONFIG_VERSION_UNSUPPORTED",
+      message: "This configuration version is not supported.",
+      remediation: `Check the installed CLI version and ${DOC}.` });
+  }
 
   const profileName = profileOverride ?? process.env.DASKI_PROFILE ?? parsed.defaultProfile;
   const profile = parsed.profiles?.[profileName];
@@ -146,8 +139,8 @@ export function loadConfig(profileOverride?: string): LoadedConfig {
       code: "DASKI_PROFILE_DISABLED",
       message: `The "${profileName}" profile is disabled.`,
       remediation:
-        `Enabling a profile — mainnet especially — is a human action: set ` +
-        `profiles.${profileName}.enabled to true in ${path} and set real caps. See ${DOC}`,
+        `When the user selects this network, set profiles.${profileName}.enabled ` +
+        `to true in ${path}. See ${DOC}`,
     });
   }
   assertProfileSane(profileName, profile, path);
@@ -169,7 +162,7 @@ export function permissionWarnings(path: string): ConfigWarning[] {
           code: "DASKI_CONFIG_WORLD_WRITABLE",
           message:
             `The ${label} ${target} is world-writable, so any local process can ` +
-            "raise your spend caps.",
+            "change its settings.",
           remediation: `Run: chmod ${label === "config file" ? "600" : "700"} ${target}`,
         });
       }
@@ -191,13 +184,14 @@ function assertProfileSane(name: string, profile: ProfileConfig, path: string): 
     });
   }
   for (const cap of ["maxPerOrderUsdc", "sessionCapUsdc", "requireApprovalAboveUsdc"] as const) {
-    if (!/^\d+(\.\d{1,6})?$/.test(profile[cap])) {
+    if (cap !== "requireApprovalAboveUsdc" && profile[cap] === null) continue;
+    if (typeof profile[cap] !== "string" || !/^\d+(\.\d{1,6})?$/.test(profile[cap])) {
       throw new CliError({
         code: "DASKI_PROFILE_CAP_MALFORMED",
         message: `Profile "${name}" has a malformed ${cap}: ${profile[cap]}`,
         remediation:
           `Set ${cap} to a decimal USDC amount with at most 6 decimals, e.g. "25.00", ` +
-          `in ${path}. See ${DOC}#caps`,
+          `in ${path}, or use daski budget to change optional budgets. See ${DOC}#budgets`,
       });
     }
   }
@@ -219,7 +213,7 @@ function assertProfileSane(name: string, profile: ProfileConfig, path: string): 
   }
 }
 
-/** Tightens the config's caps for one invocation. Lowering only (§4.2). */
+/** Apply a temporary budget within any existing configured budget. */
 export function applyCapOverrides(
   profile: ProfileConfig,
   overrides: { maxPerOrderUsdc?: string | undefined; sessionCapUsdc?: string | undefined },
@@ -235,15 +229,16 @@ export function applyCapOverrides(
         remediation: `Pass e.g. --${flagFor(cap)} 5.00`,
       });
     }
-    if (atomicUsdc(requested) > atomicUsdc(profile[cap])) {
+    const existing = profile[cap];
+    if (existing !== null && atomicUsdc(requested) > atomicUsdc(existing)) {
       throw new CliError({
         code: "DASKI_CAP_OVERRIDE_WOULD_RAISE",
         message:
           `--${flagFor(cap)} ${requested} is above the configured ${cap} of ` +
-          `${profile[cap]}. Flags may lower a cap, never raise one.`,
+          `${profile[cap]}.`,
         remediation:
-          `Raising a cap is a human action: edit ${cap} in ${configPath()} by hand. ` +
-          `See ${DOC}#caps`,
+          `To change the stored budget at the user's request, use daski budget ` +
+          `--${cap === "maxPerOrderUsdc" ? "per-order" : "total"} ${requested}. See ${DOC}#budgets`,
       });
     }
     tightened[cap] = requested;
@@ -262,3 +257,35 @@ export function atomicUsdc(value: string): bigint {
 }
 
 export { DOC as CONFIG_DOC };
+
+/** An explicit settings command; normal purchases and upgrades do not call it. */
+export function configureBudgets(options: {
+  profile?: string | undefined;
+  perOrder?: string | undefined;
+  total?: string | undefined;
+  approvalAbove?: string | undefined;
+}): Record<string, unknown> {
+  const loaded = loadConfig(options.profile);
+  const profile = { ...loaded.profile };
+  for (const [value, key] of [
+    [options.perOrder, "maxPerOrderUsdc"],
+    [options.total, "sessionCapUsdc"],
+    [options.approvalAbove, "requireApprovalAboveUsdc"],
+  ] as const) {
+    if (value === undefined) continue;
+    if (value === "none" && key !== "requireApprovalAboveUsdc") profile[key] = null;
+    else if (/^\d+(\.\d{1,6})?$/.test(value)) profile[key] = value;
+    else throw new CliError({ code: "DASKI_BUDGET_INVALID",
+      message: `Invalid ${key} value.`,
+      remediation: "Use a decimal USDC amount, or none for an optional budget." });
+  }
+  const changed = options.perOrder !== undefined || options.total !== undefined || options.approvalAbove !== undefined;
+  if (changed) {
+    loaded.config.version = 2;
+    loaded.config.profiles[loaded.profileName] = profile;
+    writeFileSync(configPath(), `${JSON.stringify(loaded.config, null, 2)}\n`, { mode: 0o600 });
+  }
+  return { profile: loaded.profileName, changed,
+    maxPerOrderUsdc: profile.maxPerOrderUsdc, sessionCapUsdc: profile.sessionCapUsdc,
+    requireApprovalAboveUsdc: profile.requireApprovalAboveUsdc };
+}

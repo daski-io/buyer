@@ -61,6 +61,11 @@ test("an identifier the gateway lists nothing for is absent: nothing settled und
   assert.match(outcome.evidence, /lists no order for payment identifier daski-e1f3/);
 });
 
+test("unidentified legacy rows do not establish absence", () => {
+  assert.equal(reconcileIdentifierRows("intent", [{ orderHandle: "old", providerAgentId: "1", outcomeId: "form",
+    grossAmount: "27100000", createdAt: new Date().toISOString(), state: "FULFILLED" }]).status, "ambiguous");
+});
+
 test("a listed order settles the record by the gateway's state", () => {
   const row = {
     orderHandle: "handle-1",
