@@ -17,6 +17,7 @@ import { callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
 import { reconcileByIdentifier } from "../gateway/purchase.js";
 import { activeReadCapability, findOrder, updateOrder, type OrderRecord } from "../store/orders.js";
 import type { OrderAction } from "@daski/x402-scheme";
+import type { ConfirmationOptions } from "./confirmation.js";
 
 export interface OrderOptions extends ContextOptions {
   handle: string;
@@ -96,8 +97,9 @@ export async function orderArtifact(
   });
 }
 
-export async function orderConfirm(options: OrderOptions): Promise<Record<string, unknown>> {
-  return mutate(options, "daski_confirm_delivery", "confirmation", {});
+export async function orderConfirm(options: ConfirmationOptions): Promise<Record<string, unknown>> {
+  const { runConfirmation } = await import("./confirmation.js");
+  return runConfirmation(options);
 }
 
 export async function orderCancel(options: OrderOptions): Promise<Record<string, unknown>> {
@@ -156,7 +158,7 @@ async function mutate(
  * lifecycle signing when it does not. The fallback is not a lesser path — it
  * is the same verify-and-sign tier, just paying one signature per read.
  */
-async function readWithCapability(
+export async function readWithCapability(
   context: Awaited<ReturnType<typeof createContext>>,
   record: OrderRecord,
   call: { toolName: string; action: OrderAction; request: Record<string, unknown> },
@@ -180,7 +182,7 @@ async function readWithCapability(
     const result = await context.client.callTool(call.toolName, {
       orderHandle: handle,
       request: call.request,
-      capability: capability.token,
+      readCapability: capability.token,
     });
     const body = (await import("../gateway/client.js")).GatewayClient.json(result);
     if (!result.isError && body) return body;
@@ -194,7 +196,7 @@ async function readWithCapability(
       const result = await context.client.callTool(call.toolName, {
         orderHandle: handle,
         request: call.request,
-        capability: granted.token,
+        readCapability: granted.token,
       });
       const body = (await import("../gateway/client.js")).GatewayClient.json(result);
       if (!result.isError && body) return body;
@@ -238,7 +240,7 @@ async function grantRead(
   }
   const challenge = validateOrderActionChallenge(challengeBody.challenge, {
     orderHandle: handle,
-    action: "status",
+    action: "grant-read",
     gatewayUrl: context.profile.gatewayUrl,
     request: {},
     chainId: context.profile.chainId,
@@ -260,11 +262,10 @@ function capabilityFrom(
   body: Record<string, unknown>,
   record: OrderRecord,
 ): { token: string; expiresAt: number } | undefined {
-  const capability = body.capability as { token?: unknown; expiresAt?: unknown } | undefined;
-  if (typeof capability?.token !== "string" || !Number.isSafeInteger(capability.expiresAt)) {
+  if (typeof body.readCapability !== "string" || !Number.isSafeInteger(body.expiresAt)) {
     return undefined;
   }
-  const stored = { token: capability.token, expiresAt: Number(capability.expiresAt) };
+  const stored = { token: body.readCapability, expiresAt: Number(body.expiresAt) };
   updateOrder(record.intentId, { readCapability: stored });
   return stored;
 }
@@ -315,14 +316,13 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
   });
 }
 
-async function withOrder<T>(
+export async function withOrder<T>(
   options: OrderOptions,
   run: (context: Awaited<ReturnType<typeof createContext>>, record: OrderRecord) => Promise<T>,
 ): Promise<T> {
   const context = await createContext(options);
   try {
-    const record = findOrder(options.handle, context.profileName)
-      ?? findOrder(options.handle);
+    const record = findOrder(options.handle, context.profileName);
     if (!record) {
       throw new CliError({
         code: "DASKI_ORDER_NOT_FOUND",
@@ -332,6 +332,11 @@ async function withOrder<T>(
           "the gateway's own history is the source of truth — but this CLI needs " +
           "the handle in its store to bind a lifecycle signature to it.",
       });
+    }
+    if (record.payer.toLowerCase() !== context.payerAddress.toLowerCase()) {
+      throw new CliError({ code: "DASKI_ORDER_PAYER_MISMATCH",
+        message: "The active signer differs from this order's payer.",
+        remediation: `Select the signer that placed order ${options.handle}.` });
     }
     return await run(context, record);
   } finally {

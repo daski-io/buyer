@@ -1,76 +1,60 @@
 # daski-buyer
 
-The buyer side of Daski: a CLI that pays for outcomes, and the x402 client
-plugin underneath it.
+The buyer side of Daski: a CLI for purchasing service outcomes and the x402 client plugin underneath it.
 
-| Package | What it is |
+| Package | Purpose |
 |---|---|
-| [`@daski/pay`](./packages/pay) | The buyer bridge CLI (`daski`) |
-| [`@daski/x402-scheme`](./packages/x402-scheme) | Composite Exact-EVM client plugin for the modular x402 v2 SDK |
-
-## The one rule
-
-> **Server proposes; buyer bridge validates against its own expectations and
-> recomputes; wallet signs; the gateway never sees the key.**
-
-Blind signing of server-provided material is prohibited in this codebase.
-Every signature goes through the [policy validator](./docs/policy.md), and
-there is no generic typed-data signing command — not as a convenience, not
-behind a flag.
-
-Concretely, before any purchase authorization is signed the bridge asserts the
-chain and token are the profile's pinned values, the typed-data type set is
-the closed 6-field `TransferWithAuthorization` and nothing else, the payer is
-us, the recipient is corroborated by **two** independent catalog sources, the
-amount matches both the challenge and the quote a human approved and fits
-inside human-owned caps, the validity window is sane, and — the load-bearing
-one — the authorization nonce **recomputed locally from the deal document**
-equals the one proposed.
-
-That last check is what makes the rest meaningful. The nonce is a commitment
-to the whole deal, so swapping the recipient while leaving the deal document
-intact changes it. A bridge that skipped the recomputation would sign that
-swap happily.
+| [@daski/pay](./packages/pay) | Buyer CLI: setup, quote approval, payment, and order tracking |
+| [@daski/x402-scheme](./packages/x402-scheme) | Composite Exact-EVM client for the modular x402 v2 SDK |
 
 ## Quick start
 
-```bash
-npx @daski/pay@0.2.0 doctor --json
-```
+Install the release pinned by your gateway, then diagnose the existing configuration before creating a wallet:
 
 ```bash
-daski wallet create                     # interactive; a human must confirm
-daski doctor --json                     # exit 0: signer, funds, gateway, and its MCP results check out
-daski buy --provider 8327 --outcome create-mailbox --request ./request.json
-daski order status <handle>
-daski order artifact <handle> --output ./result.json
-daski order reconcile <handle|intentId>  # the gateway's answer to "did that payment settle?"
+npm install -g @daski/pay@0.3.0
+daski doctor --json
 ```
 
-`doctor` compares this release with the one the gateway pins in its
-`/.well-known/mcp.json` and blocks (`DASKI_CLI_OUTDATED`) when the install is
-older: releases before the pin have known payment defects.
+Reuse a healthy signer. If doctor reports no signer, run `daski wallet create` interactively, or `daski wallet create --yes-human-approved` after the user authorizes wallet setup. Doctor reports `stateDirectory` and `configFile`; these use the CLI's native home directory or `DASKI_HOME`, which can differ from the shell's home.
 
-Every command supports `--json`. Every failure exits non-zero with a stable
-code and a remediation that is a command or a URL.
-
-## Install
+Use the gateway's discovery tools and `daski_get_outcome_requirements` to complete the request from the user's supplied facts. Then obtain the actual quote:
 
 ```bash
-npm install -g @daski/pay
+daski buy --provider <id> --outcome <id> --request ./request.json --json
 ```
 
-Node ≥ 20. Sandbox is Base Sepolia (`eip155:84532`); the mainnet profile is
-scaffolded and **disabled by default**.
+New profiles require approval of every paid quote and have no additional default budget. After the user approves the returned quote, repeat the command with `--approve <approval.id>`. Interactive use prompts directly. The approval identifier binds the request, provider, outcome, payer, gateway, network, token, recipient, amount, and published terms; it survives a quote refresh only when those terms match.
 
-Signers: `local` (the default, verified by the conformance suite), and `cdp`
-and `circle` (implemented, candidates pending conformance). Choose one per
-profile or with `--signer <local|cdp|circle>`; see
-[Signer adapters](./docs/signers.md).
+```bash
+daski order status <handle> --json
+daski order artifact <handle> --output ./result.json --json
+daski order reconcile <intentId> --json
+```
+
+Quotation sends the request for provider pricing and creates or reuses a draft. The paid retry advances the purchase. Funding requirements come from that quote and preflight.
+
+## Spending settings
+
+Existing wallet keys and budgets survive upgrades. View or explicitly change spending settings with `daski budget`:
+
+```bash
+daski budget --json
+daski budget --per-order 30 --total 100 --approval-above 0 --json
+daski budget --per-order none --total none --json
+```
+
+The total covers recorded authorizations across runs. Temporary `--max-per-order` and `--session-cap` limits fit within any configured budget. See [configuration](./docs/config.md).
+
+Node 20 or newer is required. Sandbox uses Base Sepolia; mainnet is disabled until the user chooses to enable it. The local signer is verified; CDP and Circle adapters are candidates pending conformance. See [signer adapters](./docs/signers.md).
+
+## Payment validation and recovery
+
+The bridge validates the profile's chain and token, payer, closed typed-data schema, catalog recipient, approved amount, optional budgets, and validity window. It recomputes the recipe nonce and preserves the payment identifier issued by the gateway.
+
+After an uncertain payment, automatic recovery and `daski order reconcile` query the gateway for that exact identifier. In-flight and ambiguous states remain pending. A definitive no-settlement response permits another purchase after resolving the refusal's cause.
 
 ## Using the scheme directly
-
-If you have your own x402 host, register the composite instead of the CLI:
 
 ```ts
 import { x402Client } from "@x402/core/client";
@@ -81,58 +65,30 @@ const client = new x402Client();
 registerDaskiExactEvmScheme(client, {
   network: "eip155:84532",
   signer, payerAddress, policy,
-  stock: new ExactEvmScheme(account),   // the composite wraps it
+  stock: new ExactEvmScheme(account),
   resolvePurchaseContext,
 });
 ```
 
-It **wraps** the stock handler rather than replacing it: the scheme name stays
-`exact` (the only name the facilitator knows), and a challenge without
-`daski-order-binding` is delegated to the stock handler untouched.
+The composite wraps the stock handler under scheme `exact`. Challenges without a Daski binding delegate to the stock handler. Runnable examples: [fetch](./examples/fetch) and [MCP](./examples/mcp).
 
-Runnable examples: [`examples/fetch`](./examples/fetch) and
-[`examples/mcp`](./examples/mcp).
+## Documentation and development
 
-## Documentation
-
-- [The policy validator](./docs/policy.md) — every check, and why
-- [Configuration and caps](./docs/config.md)
+- [CLI commands](./packages/pay/README.md)
+- [Policy validator](./docs/policy.md)
+- [Configuration](./docs/config.md)
 - [Key storage](./docs/keys.md)
 - [Signer adapters](./docs/signers.md)
-- [Conformance suite](./docs/conformance.md)
-
-## Development
+- [Conformance](./docs/conformance.md)
 
 ```bash
-npm install
+npm ci
 npm run build
 npm test
 npm run typecheck
 ```
 
-The conformance suite runs against the live sandbox and spends real testnet
-USDC, so it refuses to start without `DASKI_CONFORMANCE_SPEND_OK=1`:
-
-```bash
-DASKI_CONFORMANCE_SPEND_OK=1 DASKI_PAYER_PRIVATE_KEY=0x… \
-  npm run conformance -- --profile sandbox --signer local
-```
-
-## Gateway feature staging
-
-Some spec-01 gateway surfaces (`daski_get_payment_challenge`,
-`daski-sign-request`, the `grant-read` capability flow, published recipe test
-vectors) are not on the sandbox yet. The CLI implements and *keeps* the
-fallbacks — an unpaid `daski_buy_outcome` for the challenge, local recipe
-recomputation, per-action lifecycle signing — because those fallbacks are also
-the verify-and-sign tier. They are not a lesser path; they are the path that
-does not require trusting the server's arithmetic.
-
-## Non-goals
-
-No faucet or funding command. No sweep, recovery, or key rotation. No generic
-`sign`. No policy administration commands — humans edit the config file. No
-mainnet enabled by default. No MCP server of its own.
+Unit tests use isolated temporary state and fixture signers. Live conformance uses sandbox USDC and requires explicit spending authorization; see the conformance guide.
 
 ## License
 

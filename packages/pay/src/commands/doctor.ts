@@ -277,7 +277,10 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       sessionCapUsdc: profile.sessionCapUsdc,
       requireApprovalAboveUsdc: profile.requireApprovalAboveUsdc,
       sessionAuthorizedAtomic: spent.toString(),
-      note: "Caps are human-owned: edit the config file. Flags may only lower them.",
+      mode: profile.maxPerOrderUsdc === null && profile.sessionCapUsdc === null
+        ? "quote-approval" : "configured-budgets",
+      configurationVersion: loaded.config.version,
+      note: "Purchases use quote approval. Optional budgets can be viewed or changed with daski budget.",
     },
     gateway: {
       url: profile.gatewayUrl,

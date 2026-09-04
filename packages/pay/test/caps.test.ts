@@ -1,10 +1,4 @@
-/**
- * §4.2 — caps are human-owned.
- *
- * The threat is an agent that talks itself into a bigger budget: a flag, an
- * environment variable, anything reachable at runtime. Lowering is fine.
- * Raising must be impossible.
- */
+/** Temporary purchase limits fit within existing configured budgets. */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { applyCapOverrides, atomicUsdc, type ProfileConfig } from "../src/config.js";

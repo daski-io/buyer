@@ -22,7 +22,7 @@ const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 
 /** Order lifecycle actions, as the gateway names them. */
 export type OrderAction =
-  | "status" | "input" | "cancel" | "artifact" | "support"
+  | "status" | "input" | "cancel" | "artifact" | "support" | "grant-read"
   | "confirmation" | "revoke-confirmation";
 
 /** The closed 9-field order-action family. */

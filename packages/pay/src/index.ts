@@ -8,7 +8,7 @@
 export { runBuy, type BuyOptions } from "./commands/buy.js";
 export { runDoctor, type DoctorIssue, type DoctorOptions, type DoctorReport } from "./commands/doctor.js";
 export {
-  orderArtifact, orderCancel, orderConfirm, orderInput, orderStatus,
+  orderArtifact, orderCancel, orderConfirm, orderInput, orderStatus, orderReconcile,
   type OrderArtifactOptions, type OrderInputOptions, type OrderOptions,
 } from "./commands/order.js";
 export { runSignPayment, type SignPaymentOptions } from "./commands/signPayment.js";
@@ -18,7 +18,7 @@ export { CliError, type CliErrorOptions } from "./cli/errors.js";
 export { redactText, redactValue } from "./cli/redact.js";
 
 export {
-  applyCapOverrides, atomicUsdc, ensureConfig, loadConfig, permissionWarnings,
+  applyCapOverrides, atomicUsdc, configureBudgets, ensureConfig, loadConfig, permissionWarnings,
   type DaskiConfig, type LoadedConfig, type ProfileConfig, type SignerKind,
 } from "./config.js";
 export { createContext, type CommandContext, type ContextOptions } from "./context.js";
@@ -30,7 +30,7 @@ export {
 } from "./gateway/client.js";
 export { callAuthorizedLifecycleTool, callWalletQuery } from "./gateway/lifecycle.js";
 export {
-  authorizePayment, listPayerOrders, newIntentId, reconcileAmbiguousPurchase,
+  authorizePayment, listPayerOrders, newIntentId, reconcileAmbiguousPurchase, reconcileByIdentifier,
   recordIntent, requestChallenge, submitPayment,
   type AuthorizedPayment, type ChallengeResult, type ReconcileOutcome,
 } from "./gateway/purchase.js";

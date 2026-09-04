@@ -64,9 +64,8 @@ export interface SessionLedger {
  * The host-supplied policy. No config, no signing: both packages refuse to
  * construct a signer without one.
  *
- * The three caps are human-owned (§4.2). Nothing at runtime may raise them:
- * `@daski/pay` reads them only from `~/.daski/config.json`, and flags may
- * lower them for a single invocation but never raise them.
+ * Optional budgets come from the caller's configuration, independently of
+ * the challenge. The approved quote is checked for every authorization.
  */
 export interface PolicyConfig {
   /** The address that must appear as `message.from`. */
@@ -75,10 +74,10 @@ export interface PolicyConfig {
   chainId: number;
   /** Pinned canonical token for the active profile (sandbox USDC). */
   canonicalToken: Address;
-  /** Human-owned per-order ceiling, as a decimal USDC string. */
-  maxPerOrderUsdc: string;
-  /** Human-owned session ceiling, as a decimal USDC string. */
-  sessionCapUsdc: string;
+  /** Optional per-order budget, as a decimal USDC string. */
+  maxPerOrderUsdc?: string | null | undefined;
+  /** Optional cumulative budget, as a decimal USDC string. */
+  sessionCapUsdc?: string | null | undefined;
   /** Independent splitter evidence. Required for purchase authorizations. */
   resolveSplitter: SplitterResolver;
   /** Running spend and prior-order lookup. */
@@ -314,29 +313,29 @@ export async function validatePurchaseAuthorization(
         `approve the new quote; see ${DOC}#amount`,
     });
   }
-  const maxPerOrder = atomic(config.maxPerOrderUsdc, "maxPerOrderUsdc");
-  if (value > maxPerOrder) {
+  const maxPerOrder = config.maxPerOrderUsdc == null ? null : atomic(config.maxPerOrderUsdc, "maxPerOrderUsdc");
+  if (maxPerOrder !== null && value > maxPerOrder) {
     refuse({
       check: "amount-and-caps",
       code: "DASKI_POLICY_PER_ORDER_CAP_EXCEEDED",
       expected: `at most ${formatUsdc(maxPerOrder)} per order`,
       actual: formatUsdc(value),
       remediation:
-        "Caps are human-owned: raise `maxPerOrderUsdc` in ~/.daski/config.json " +
-        `by hand, or buy something cheaper. See ${DOC}#caps`,
+        "This quote exceeds the configured per-order budget. To change that budget " +
+        `at the user's request, use daski budget --per-order <usdc|none>. See ${DOC}#amount`,
     });
   }
-  const sessionCap = atomic(config.sessionCapUsdc, "sessionCapUsdc");
+  const sessionCap = config.sessionCapUsdc == null ? null : atomic(config.sessionCapUsdc, "sessionCapUsdc");
   const spent = BigInt(await config.session.spentAtomic());
-  if (spent + value > sessionCap) {
+  if (sessionCap !== null && spent + value > sessionCap) {
     refuse({
       check: "amount-and-caps",
       code: "DASKI_POLICY_SESSION_CAP_EXCEEDED",
       expected: `session total at most ${formatUsdc(sessionCap)}`,
       actual: `${formatUsdc(spent)} already authorized plus ${formatUsdc(value)}`,
       remediation:
-        "Caps are human-owned: raise `sessionCapUsdc` in ~/.daski/config.json " +
-        `by hand. See ${DOC}#caps`,
+        "This quote exceeds the remaining configured total budget. To change it " +
+        `at the user's request, use daski budget --total <usdc|none>. See ${DOC}#amount`,
     });
   }
 

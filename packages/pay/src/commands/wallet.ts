@@ -1,14 +1,4 @@
-/**
- * `daski wallet` — create, address, balance.
- *
- * Creating a key is the one action here that cannot be undone by re-running a
- * command, so it is gated on a human: an interactive terminal and a typed
- * confirmation phrase. `--yes-human-approved` exists for provisioning
- * scripts, and its name is the documentation: whoever passes it is asserting a
- * human approved this. No error message names the flag: on 2026-09-03 an
- * agent read the remediation that did, passed the flag from its own shell,
- * and created the key the guide had reserved for the human.
- */
+/** Wallet creation requires setup authorization and preserves existing profile keys. */
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { getAddress } from "viem";
 import { CliError } from "../cli/errors.js";
@@ -37,9 +27,7 @@ export async function createWallet(options: WalletOptions): Promise<Record<strin
       code: "DASKI_KEY_ALREADY_EXISTS",
       message: `A signing key already exists for the "${profileName}" profile.`,
       remediation:
-        `Use it with \`daski wallet address --profile ${profileName}\`. This CLI ` +
-        "has no rotate or overwrite command: replacing a key is a deliberate " +
-        "manual act, so an accidental re-run can never strand funds.",
+        `Use the existing signer with daski wallet address --profile ${profileName}.`,
     });
   }
 
@@ -48,10 +36,10 @@ export async function createWallet(options: WalletOptions): Promise<Record<strin
       throw new CliError({
         code: "DASKI_KEY_CREATION_NEEDS_HUMAN",
         message:
-          "Creating a signing key requires a human, and this session has no terminal.",
+          "Wallet setup needs authorization; this session has no interactive terminal.",
         remediation:
-          "A human must run `daski wallet create` in their own interactive terminal " +
-          "and type the confirmation phrase. Do not run it from an agent's shell.",
+          "Ask the user to create the wallet interactively, or use " +
+          "`daski wallet create --yes-human-approved` after they authorize wallet setup.",
       });
     }
     const approved = await confirmPhrase(

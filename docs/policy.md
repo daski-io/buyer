@@ -1,216 +1,90 @@
-# The policy validator
+# Payment and lifecycle validation
 
-> Server proposes; buyer bridge validates against its own expectations and
-> recomputes; wallet signs; the gateway never sees the key.
-
-Blind signing of server-provided material is prohibited in this codebase.
-Every signature — purchases and lifecycle actions alike — passes through the
-validator in `@daski/x402-scheme`. There is no generic typed-data signing
-command, and adding one would defeat the point of the package.
-
-A failed check produces a **structured refusal**, never a repaired payload.
-The bridge does not "fix and proceed": if the deal it was shown is not the
-deal it would be signing, the correct outcome is to stop and say which check
-failed.
-
-```jsonc
-{
-  "error": "policy_refusal",
-  "check": "splitter-allowlist",
-  "code": "DASKI_POLICY_SPLITTER_NOT_ALLOWLISTED",
-  "expected": "to 0xE25b… for 8327/create-mailbox",
-  "actual": "to 0x5555…",
-  "remediation": "The challenge pays an address the catalog does not list for this outcome. Do not sign; see …"
-}
-```
+The bridge builds typed data from the purchase's expected values and validates it before invoking the configured signer. A failed check returns a structured code, expected and actual values, and a recovery action.
 
 ## Independent expectations
 
-Every expectation is config- or catalog-sourced. **None of it is read from the
-challenge being validated** — that would be asking the counterparty to grade
-its own homework.
-
 <a id="chain-pinning"></a>
-### 1. Chain pinning
+### 1. Chain and token
 
-`domain.chainId` and `domain.verifyingContract` must equal the active
-profile's pinned values. For `sandbox` that is chain `84532` and USDC at
-`0x036CbD53842c5426634e7929541eC2318f3dCF7e`. The challenge's
-`accepts[].asset` and `accepts[].network` are checked against the same pins.
+The domain chain and verifying contract, challenge network, and challenge asset match the active profile's pins.
 
 <a id="typed-data-shape"></a>
-### 2. A closed type set
+### 2. Typed-data shape
 
-`types` must be *exactly* the 6-field `TransferWithAuthorization`: same field
-names, same types, same order, nothing extra at either level. `primaryType`
-must match, and the message must carry exactly those six keys.
-
-The bridge never signs a server-supplied `types` object. It signs its own
-literal, after confirming the server asked for that one. An extra field is a
-field nobody validated and nobody fed into the recipe recomputation.
+A purchase uses the closed six-field `TransferWithAuthorization` type, with the expected field names, types, and order. The bridge signs its own type definition.
 
 <a id="payer"></a>
-### 3. The payer is us
+### 3. Payer
 
-`message.from` must equal the configured payer address. Run
-`daski doctor --json` to see which address that is.
+The transfer's `from` address matches the configured signer.
 
 <a id="splitter-allowlist"></a>
-### 4. The splitter is allowlisted, twice
+### 4. Recipient
 
-`message.to` must match the `splitterAddress`/`payTo` for this
-provider + outcome as retrieved by a **separate `daski_get_outcome` call**,
-*and* appear in `.well-known/daski-chain.json`. Both are cached with a
-5-minute TTL.
-
-Two sources, because one source that is also the counterparty is not
-evidence. If they disagree, the bridge refuses and says so
-(`DASKI_POLICY_SPLITTER_EVIDENCE_DISAGREES`) rather than picking a winner.
+The transfer's `to` address matches the outcome catalog's splitter and the gateway's chain manifest. Both catalog reads have a five-minute cache lifetime. Disagreement returns `DASKI_POLICY_SPLITTER_EVIDENCE_DISAGREES`.
 
 <a id="amount"></a>
-### 5. The amount
+### 5. Amount and approval
 
-`message.value` must equal the challenge's `accepts[].amount`, equal the quote
-a human approved, and sit at or below `maxPerOrderUsdc`. The running session
-total plus this payment must stay within `sessionCapUsdc`.
+The signed amount matches the challenge and approved quote. Both CLI purchase entry points require approval above the profile's explicit allowance, which defaults to zero.
 
-The running total is read from `~/.daski/orders.json`, so the cap survives the
-process that placed the earlier orders.
+An approval identifier binds the gateway, payer, provider, outcome, request hash, chain/network, token, recipient, amount, listing commitment, and provider terms commitment. Quote expiry, order nonce, and quote hash are excluded so a fresh quote with unchanged material terms can reuse approval. A changed material term returns `DASKI_QUOTE_CHANGED` with the new quote for review.
+
+The identifier also distinguishes successive purchases using the durable ledger. A second identical purchase needs a new approval. An authorized or pending purchase with matching terms is reconciled first.
+
+Optional per-order and cumulative budgets apply when configured. The cumulative amount comes from the profile's durable order ledger.
 
 <a id="window"></a>
-### 6. A sane window
+### 6. Validity window
 
-`validAfter ∈ {0} ∪ [now − 3600, now]`, and `validBefore − now` must be at
-most 900 seconds and more than 15. An authorization may not outlive the
-binding it commits to.
-
-Long-lived authorizations are long-lived liabilities; ones that expire during
-settlement fail in the most confusing way available.
+`validAfter` is zero or between now minus 3,600 seconds and now. `validBefore` is more than 15 and at most 900 seconds ahead, and stays within the binding's expiry.
 
 <a id="reconciliation"></a>
-### 7. The payment identifier
+### 7. Payment identifier and reconciliation
 
-The `payment-identifier` id must be the one the gateway bound to the
-challenge (`payment-identifier.info.id`), and no stored order may already
-have spent it. The gateway looks a paid submission up by that identifier and
-never accepted a proposed one; `buy` and `sign-payment` both adopt the issued
-identifier as the ledger key, so the local record and the gateway's
-`daski_list_my_orders` filter name the same thing.
+Both `buy` and `sign-payment` use the identifier issued in `payment-identifier.info.id` as the submission identifier and ledger key. An existing authorized or paid identifier is reconciled before another signature.
 
-The dangerous moment in a buyer bridge is not the signature — it is the
-silence after it. On a timeout, a transport drop after submit, or any gateway
-error whose `paymentMayHaveSettled` flag is true (the code list is only a
-fallback for gateways without the flag), the bridge **reconciles before any
-re-sign**:
+Automatic recovery and `daski order reconcile <intentId>` use a payer-authorized gateway lookup filtered by that exact identifier. A settled state recovers the order handle. In-flight, ambiguous, unknown, or unidentified legacy rows stay unresolved. Recovery uses no additional payment signature.
 
-1. **Replay the identical signed authorization.** The recipe nonce is
-   deterministic, so the resubmission is byte-identical, and the gateway's
-   published retry policy treats an identical signed authorization as
-   `transport-retry-same-purchase`. This cannot create a second order.
-2. **Corroborate against the payer's own order history**
-   (`daski_list_my_orders`, itself wallet-authorized). Once the gateway echoes
-   `paymentIdentifier` on a row, the filter is exact; until then the intent's
-   other invariants are matched, and an empty result from a field that does not
-   exist is *not* treated as evidence of absence.
-
-Only when both agree no order exists does the CLI report the purchase as
-provably unsettled and safe to retry. A second signature over a fresh
-challenge is a second order, and a second charge.
-
-A refusal that says nothing settled (`paymentMayHaveSettled: false`, for
-example `PAYMENT_IDENTIFIER_UNKNOWN`) is not ambiguous: the intent is recorded
-as `NOT_SETTLED`, consumes no session budget, and may be signed for again
-once the named cause is fixed. For anything left pending, `daski order
-reconcile <intentId>` asks the gateway directly for that identifier's order,
-signing only the wallet-action read; it is the only local answer to "did
-that settle?" — the ledger, a balance reading, and a decoded transaction are
-not.
+A definitive no-settlement response records `NOT_SETTLED`, which consumes no budget. Resolve the original refusal's cause before another purchase. Gateway order state establishes settlement; balances and local handles do not establish absence.
 
 <a id="lifecycle"></a>
 ### 8. Lifecycle actions
 
-Order actions and wallet queries move authority rather than money, so they get
-the same treatment: the family's closed type set, an `orderId`/handle that
-matches the target order, a short expiry, and — crucially — **method and URI
-hash inputs recomputed from what the CLI is about to call**.
-
-The gateway attaches its sign-ready EIP-712 proposal as `signRequest` beside
-each of these challenges. The bridge sets it aside for the closed-shape check,
-recomputes the typed data from the challenge fields, and requires the proposal
-to agree field for field (`DASKI_LIFECYCLE_SIGN_REQUEST_MISMATCH` otherwise).
-It signs only its own recomputation. Any other extra field is still refused.
-
-The gateway derives both deterministically:
+Order actions and wallet queries use their own closed EIP-712 families. The bridge verifies the intended action, gateway, request hash, chain, and expiry, then recomputes the message. A server `signRequest`, when present, must agree with that recomputation.
 
 ```
 absoluteResourceUri = {gateway}/orders/{encodeURIComponent(handle)}/actions/{action}
-requestHash         = keccak256(canonicalJson(request))
+requestHash = keccak256(canonicalJson(request))
 ```
 
-So the bridge recomputes them instead of accepting them. A challenge that
-hashes a different request, or points at a different order or host, is a
-challenge for someone else's call.
+Read access uses the `grant-read` action. The returned `readCapability` permits status and artifact reads until expiry or revocation. Mutations use fresh action authorization. Payer history uses the wallet's `list-orders` action.
 
-Wallet challenges additionally assert the *unbound* variant: a read must not
-smuggle a provider binding past it.
+Delivery reviews use the closed EAS Attest or Revoke type. The CLI reads deployment pins separately from the preparation, verifies the payer and provider against the onchain order, and rebuilds the message from the selected label, order key, schema, recipient, current review UID, and EAS nonce. The message transfers zero value, expires within 330 seconds, and needs explicit final-transition acknowledgment when two transitions have already been used. Pending submissions retain the same EAS signature for retries.
 
 <a id="recipe"></a>
-## Recipe recomputation
-
-The nonce of a Daski EIP-3009 authorization is not random. It is a commitment
-to the whole deal:
+## Nonce recipe
 
 ```
 nonce = keccak256(abi.encode(
-  keccak256(utf8("DaskiStandardExactOrderV2")),   // bytes32
-  chainId,                                        // uint256
-  canonicalToken, payer, splitter,                // address ×3
-  grossAmount,                                    // uint256
-  runtimeCommitmentHash, providerIntentHash,      // bytes32 ×2
-  quoteHash, canonicalRequestHash, orderNonce))   // bytes32 ×3
+  keccak256(utf8("DaskiStandardExactOrderV2")),
+  chainId, canonicalToken, payer, splitter, grossAmount,
+  runtimeCommitmentHash, providerIntentHash,
+  quoteHash, canonicalRequestHash, orderNonce))
 ```
 
-`recipe-bound-v1` uses the identical layout with
-`keccak256(utf8("DaskiStandardExactOrderV1"))` and the
-`listingManifestHash`/`providerOfferHash` slots.
-
-Recomputing this locally is what lets the bridge sign a server-proposed
-authorization without trusting the server. If our nonce and theirs disagree,
-the deal we were shown is not the deal we would be signing —
-`DASKI_POLICY_RECIPE_NONCE_MISMATCH`, and the run stops.
-
-This is not theoretical. Swap the recipient while leaving the deal document
-intact and the recomputed nonce changes, because `splitter` is one of its
-inputs. That case is covered by a test.
+Version 1 uses `DaskiStandardExactOrderV1` and the corresponding `listingManifestHash` and `providerOfferHash` slots.
 
 <a id="sign-request"></a>
-## `daski-sign-request`
+## Sign requests and binding extensions
 
-When the gateway ships a fully-formed typed-data proposal, the bridge treats
-it as an *input*, not an authority: it parses it into a closed shape, runs the
-same §4 checks, recomputes the nonce, and requires equality. A proposal that
-survives all of that is signed; one that does not is reported.
-
-`daski-sign-request` is never echoed back with the payment. Echoing it would
-assert we agreed to a document we only used as an input.
+The bridge recomputes the payment proposal from the challenge binding, validates it against profile and catalog expectations, and signs the resulting authorization. It returns the payment extensions while excluding the instructional `daski-sign-request`.
 
 <a id="daski-order-binding"></a>
-## `daski-order-binding`
-
-Parsed as a closed shape. An extra field is refused rather than trimmed,
-because an unrecognized layout cannot be recomputed, and what cannot be
-recomputed cannot be signed.
+The `daski-order-binding` parser accepts the supported closed version 1 and version 2 shapes. Unsupported fields or profiles return a schema error.
 
 <a id="caps"></a>
-## Caps are human-owned
+## Optional budgets
 
-`maxPerOrderUsdc`, `sessionCapUsdc` and `requireApprovalAboveUsdc` live only
-in `~/.daski/config.json`.
-
-**No CLI flag and no environment variable can raise them.** `--max-per-order`
-and `--session-cap` may *lower* a cap for a single invocation; a value above
-the configured one is refused (`DASKI_CAP_OVERRIDE_WOULD_RAISE`). Raising a
-cap is a documented human action: edit the file.
-
-The CLI warns when the config file or state directory is world-writable, since
-either would let any local process rewrite the caps.
+New profiles have no additional default budgets. Existing configurations retain their selected values during upgrades. `daski budget` provides an explicit way to view, change, or remove stored budgets. Temporary limits fit within any existing budget. See [configuration](./config.md#budgets).

@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.3.0 — unreleased
+
+- New profiles approve each paid quote without default per-order or cumulative budgets. Existing settings survive upgrades; `daski budget` can explicitly change or remove them.
+- `buy` and `sign-payment` share an approval identifier bound to the request, provider, payer, network, token, recipient, amount, and published terms. Use `--approve <approval.id>` after approval; unchanged terms can survive quote refresh. This replaces `buy --yes`.
+- Purchase preflight reports the actual funding shortfall and terms. The full `buy` regression path signs and submits the gateway-issued payment identifier.
+- Automatic reconciliation uses the exact identifier and preserves in-flight or ambiguous states. Similar price/time rows no longer establish settlement or absence.
+- Order reads use the gateway's `grant-read` action and `readCapability` field. Delivery reviews now support explicit labels, final-transition acknowledgment, revocation, and resuming the same signed submission.
+- Setup and command documentation use native doctor paths, reuse existing signers, and describe authorized setup and recoverable errors directly.
+
+Release coordination: publish both buyer packages before deploying the gateway's 0.3.0 pin. Deploy provider intake support before the gateway workflow and refresh the entity service registration so its schema and descriptions stay aligned. A develop push does not perform these release steps.
+
 ## 0.2.0 — 2026-09-04
 
 ### `@daski/pay`

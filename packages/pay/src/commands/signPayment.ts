@@ -17,6 +17,7 @@ import {
   authorizePayment, challengeIntentId, recordIntent,
 } from "../gateway/purchase.js";
 import { updateOrder } from "../store/orders.js";
+import { approvePurchase, nextPurchaseApproval } from "./approval.js";
 
 export interface SignPaymentOptions extends ContextOptions {
   challengeFile: string;
@@ -24,6 +25,7 @@ export interface SignPaymentOptions extends ContextOptions {
   providerAgentId?: string | undefined;
   outcomeId?: string | undefined;
   json: boolean;
+  approved?: string | undefined;
 }
 
 export async function runSignPayment(
@@ -65,6 +67,10 @@ export async function runSignPayment(
     }
 
     const amountAtomic = BigInt(requirement.amount);
+    const approval = nextPurchaseApproval({ gatewayUrl: context.profile.gatewayUrl,
+      payer: context.payerAddress, providerAgentId, outcomeId, requirement, binding }, context.profileName);
+    await approvePurchase({ approval, approved: options.approved,
+      threshold: context.profile.requireApprovalAboveUsdc, json: options.json });
     // The challenge was obtained by the caller, so the gateway has already
     // bound its own payment identifier to it; the local order record and the
     // signed payload both use that identifier. A fresh one would be refused by
@@ -78,6 +84,7 @@ export async function runSignPayment(
       outcomeId,
       payer: context.payerAddress,
       amount: amountAtomic.toString(),
+      approvalTermsHash: approval.termsHash,
       state: "INTENT_RECORDED",
     });
 
@@ -87,8 +94,7 @@ export async function runSignPayment(
       challenge: { challenge, requirement, binding, viaChallengeTool: false },
       providerAgentId,
       outcomeId,
-      // The caller is the human here: presenting a challenge file to this
-      // command is the approval, and the price is the challenge's own.
+      // The approval above is bound to the amount and purchase terms.
       approvedQuoteAtomic: amountAtomic,
       intentId,
     });
