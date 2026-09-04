@@ -1,8 +1,13 @@
 name: Release
+run-name: ${{ inputs.release_attempt || format('Publish {0}', inputs.package) }}
 
 on:
   workflow_dispatch:
     inputs:
+      release_attempt:
+        description: Durable release-coordinator attempt ID
+        required: false
+        type: string
       package:
         description: Package to publish
         required: true
@@ -12,6 +17,10 @@ on:
 permissions:
   contents: read
   id-token: write   # npm trusted publishing (OIDC) and provenance
+
+concurrency:
+  group: publish-${{ inputs.package }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
