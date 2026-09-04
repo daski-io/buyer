@@ -12,7 +12,7 @@ import { applyCapOverrides, loadConfig, type LoadedConfig, type ProfileConfig } 
 import { Catalog } from "./gateway/catalog.js";
 import { GatewayClient, type GatewayCallLog } from "./gateway/client.js";
 import { createSigner } from "./signers/index.js";
-import { authorizedTotalAtomic, findByIntent } from "./store/orders.js";
+import { authorizedTotalAtomic, findByIntent, isUnspent } from "./store/orders.js";
 
 export interface ContextOptions {
   profile?: string | undefined;
@@ -70,7 +70,7 @@ export async function createContext(options: ContextOptions): Promise<CommandCon
       spentAtomic: () => authorizedTotalAtomic(loaded.profileName),
       hasOrderFor: (identifier) => {
         const existing = findByIntent(identifier);
-        return existing !== undefined && existing.state !== "INTENT_RECORDED";
+        return existing !== undefined && !isUnspent(existing);
       },
     },
   };

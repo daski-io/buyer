@@ -15,7 +15,8 @@ import { createContext, type ContextOptions } from "../context.js";
 import { GatewayClient } from "../gateway/client.js";
 import {
   authorizePayment,
-  newIntentId,
+  challengeIntentId,
+  isAmbiguousPurchaseAnswer,
   reconcileAmbiguousPurchase,
   recordIntent,
   requestChallenge,
@@ -33,12 +34,6 @@ export interface BuyOptions extends ContextOptions {
   /** Skips only the interactive prompt, never the policy validator. */
   yes?: boolean;
 }
-
-/** Gateway states that mean "authorized, outcome unknown" rather than "failed". */
-const AMBIGUOUS_CODES = new Set([
-  "PAYMENT_PENDING_RECONCILIATION",
-  "PAYMENT_OUTCOME_PENDING",
-]);
 
 export async function runBuy(options: BuyOptions): Promise<Record<string, unknown>> {
   const request = readRequestFile(options.requestFile);
@@ -118,7 +113,9 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
     }
 
     // -- 3 & 4. validate, recompute, sign ----------------------------------
-    const intentId = newIntentId();
+    // The gateway bound its own payment identifier to the challenge; the
+    // submission must carry that one, so it is the ledger key as well.
+    const intentId = challengeIntentId(challenge.challenge.extensions);
     // Recorded before the signature so an interruption is recoverable.
     recordIntent({
       intentId,
@@ -167,10 +164,10 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
 
     const body = GatewayClient.json(result);
     const code = typeof body?.code === "string" ? body.code : undefined;
-    if (result.isError && code && AMBIGUOUS_CODES.has(code)) {
+    if (result.isError && isAmbiguousPurchaseAnswer(code, body)) {
       return await reconcile(context, {
         intentId, options, request, authorized,
-        cause: `gateway reported ${code}`,
+        cause: `gateway reported ${code ?? "an error"} with the payment outcome unknown`,
       });
     }
     if (GatewayClient.unreadable(result)) {
@@ -183,9 +180,14 @@ export async function runBuy(options: BuyOptions): Promise<Record<string, unknow
       });
     }
     if (result.isError || !body || typeof body.orderHandle !== "string") {
-      updateOrder(intentId, { state: "PENDING_RECONCILIATION" });
+      // The gateway refused the submission and said nothing settled
+      // (`paymentMayHaveSettled: false`): a definitive refusal, not an
+      // unknown outcome. Recording it as pending reconciliation would send
+      // the operator reconciling a payment the gateway says never existed.
+      const refused = result.isError && body?.paymentMayHaveSettled === false;
+      updateOrder(intentId, { state: refused ? "NOT_SETTLED" : "PENDING_RECONCILIATION" });
       const { purchaseFailure } = await import("../gateway/purchase.js");
-      throw purchaseFailure(result, { afterSubmit: true });
+      throw purchaseFailure(result, { afterSubmit: true, refused });
     }
 
     // -- 6 & 7. persist and report ----------------------------------------

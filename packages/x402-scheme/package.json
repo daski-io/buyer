@@ -1,6 +1,6 @@
 {
   "name": "@daski/x402-scheme",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Composite Exact-EVM client plugin for the modular x402 v2 SDK: wraps the stock handler, adds Daski recipe-order binding, and refuses to sign anything its policy validator has not independently checked.",
   "license": "MIT",
   "type": "module",

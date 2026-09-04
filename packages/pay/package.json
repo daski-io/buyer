@@ -1,6 +1,6 @@
 {
   "name": "@daski/pay",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "The Daski buyer bridge CLI. Server proposes, the bridge validates and recomputes, the wallet signs, the gateway never sees the key.",
   "license": "MIT",
   "type": "module",
@@ -44,7 +44,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@daski/x402-scheme": "0.1.2",
+    "@daski/x402-scheme": "0.2.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@x402/core": "2.24.0",
     "viem": "2.21.55"

@@ -22,7 +22,9 @@ export type OrderState =
   | "INPUT_REQUIRED"
   | "PROVIDER_FAILED"
   | "CANCELED"
-  | "PENDING_RECONCILIATION";
+  | "PENDING_RECONCILIATION"
+  /** The gateway said the authorization did not settle; nothing was charged. */
+  | "NOT_SETTLED";
 
 /** A stored read capability, when the gateway issues one (spec 01 §8). */
 export interface ReadCapability {
@@ -125,10 +127,18 @@ export function updateOrder(
   return merged;
 }
 
+/** States under which no USDC was authorized, or the gateway says none settled. */
+const UNSPENT_STATES: ReadonlySet<OrderState> = new Set<OrderState>(["INTENT_RECORDED", "NOT_SETTLED"]);
+
+/** True when the record consumed no session budget and its identifier may be signed for again. */
+export function isUnspent(record: OrderRecord): boolean {
+  return UNSPENT_STATES.has(record.state);
+}
+
 /** Total atomic USDC authorized for a profile: the §4.1.5 session running total. */
 export function authorizedTotalAtomic(profile: string): bigint {
   return listOrders(profile)
-    .filter((order) => order.state !== "INTENT_RECORDED")
+    .filter((order) => !isUnspent(order))
     .reduce((total, order) => total + BigInt(order.amount), 0n);
 }
 

@@ -90,12 +90,18 @@ settlement fail in the most confusing way available.
 <a id="reconciliation"></a>
 ### 7. The payment identifier
 
-The `payment-identifier` id must be the one this purchase created, and no
-stored order may already exist for it.
+The `payment-identifier` id must be the one the gateway bound to the
+challenge (`payment-identifier.info.id`), and no stored order may already
+have spent it. The gateway looks a paid submission up by that identifier and
+never accepted a proposed one; `buy` and `sign-payment` both adopt the issued
+identifier as the ledger key, so the local record and the gateway's
+`daski_list_my_orders` filter name the same thing.
 
 The dangerous moment in a buyer bridge is not the signature — it is the
-silence after it. On a timeout, a `PAYMENT_PENDING_RECONCILIATION`, or a
-transport drop after submit, the bridge **reconciles before any re-sign**:
+silence after it. On a timeout, a transport drop after submit, or any gateway
+error whose `paymentMayHaveSettled` flag is true (the code list is only a
+fallback for gateways without the flag), the bridge **reconciles before any
+re-sign**:
 
 1. **Replay the identical signed authorization.** The recipe nonce is
    deterministic, so the resubmission is byte-identical, and the gateway's
@@ -110,6 +116,15 @@ transport drop after submit, the bridge **reconciles before any re-sign**:
 Only when both agree no order exists does the CLI report the purchase as
 provably unsettled and safe to retry. A second signature over a fresh
 challenge is a second order, and a second charge.
+
+A refusal that says nothing settled (`paymentMayHaveSettled: false`, for
+example `PAYMENT_IDENTIFIER_UNKNOWN`) is not ambiguous: the intent is recorded
+as `NOT_SETTLED`, consumes no session budget, and may be signed for again
+once the named cause is fixed. For anything left pending, `daski order
+reconcile <intentId>` asks the gateway directly for that identifier's order,
+signing only the wallet-action read; it is the only local answer to "did
+that settle?" — the ledger, a balance reading, and a decoded transaction are
+not.
 
 <a id="lifecycle"></a>
 ### 8. Lifecycle actions

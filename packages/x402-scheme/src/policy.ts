@@ -396,7 +396,7 @@ export async function validatePurchaseAuthorization(
         actual: `identifier ${expectations.paymentIdentifier} already has a stored order`,
         remediation:
           "An order already exists for this intent. Reconcile before re-signing: " +
-          `run \`daski order status <handle>\`. See ${DOC}#reconciliation`,
+          `run \`daski order reconcile ${expectations.paymentIdentifier}\`. See ${DOC}#reconciliation`,
       });
     }
   }

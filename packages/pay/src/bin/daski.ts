@@ -13,6 +13,7 @@ import { runBuy } from "../commands/buy.js";
 import { runDoctor } from "../commands/doctor.js";
 import {
   orderArtifact, orderCancel, orderConfirm, orderInput, orderStatus,
+  orderReconcile,
 } from "../commands/order.js";
 import { runSignPayment } from "../commands/signPayment.js";
 import { createWallet, walletAddress, walletBalance } from "../commands/wallet.js";
@@ -43,6 +44,7 @@ Commands
   order input <handle> --request <file.json>
                                       Submit requested customer input
   order cancel <handle>               Request cancellation
+  order reconcile <handle|intentId>   Ask the gateway whether a payment settled; never re-signs
   sign-payment --challenge <file.json> [--provider <id> --outcome <id>]
                                       Validate, recompute, sign; print the paymentPayload
 
@@ -155,9 +157,13 @@ async function main(argv: string[]): Promise<number> {
           assertKnownFlags(flags, [...GLOBAL_FLAGS, "request"]);
           emit(await orderInput({ ...base, requestFile: requireFlag(flags, "request") }), output);
           return 0;
+        case "reconcile":
+          assertKnownFlags(flags, GLOBAL_FLAGS);
+          emit(await orderReconcile(base), output);
+          return 0;
         default:
           throw unknownSubcommand("order", command[1],
-            ["status", "artifact", "confirm", "input", "cancel"]);
+            ["status", "artifact", "confirm", "input", "cancel", "reconcile"]);
       }
     }
 
