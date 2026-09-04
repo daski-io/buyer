@@ -11,7 +11,15 @@ import type { Address } from "viem";
 import { CliError } from "../cli/errors.js";
 import { permissionWarnings, applyCapOverrides, loadConfig, CONFIG_DOC } from "../config.js";
 import { readBalances } from "../gateway/balance.js";
-import { GatewayClient, probeGatewayProtocol, readiness, type GatewayProtocolProbe } from "../gateway/client.js";
+import {
+  GatewayClient,
+  compareReleaseVersions,
+  pinnedBuyerCli,
+  probeGatewayProtocol,
+  readiness,
+  type GatewayProtocolProbe,
+  type PinnedBuyerCli,
+} from "../gateway/client.js";
 import { configPath, daskiHome } from "../paths.js";
 import { createSigner } from "../signers/index.js";
 import { runSignerSelfTest, type SignerSelfTestResult } from "../signers/selfTest.js";
@@ -180,6 +188,30 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     });
   }
 
+  // -- pinned release --------------------------------------------------------
+  // The gateway's setup guide pins the CLI release agents may use, and
+  // publishes it in /.well-known/mcp.json. An older install has known
+  // payment defects (0.1.0 and 0.1.1 minted their own payment identifier and
+  // every purchase was refused), and on 2026-09-04 one ran unnoticed because
+  // the pin lived only in prose. This is the comparison the guide asks for.
+  let pinned: PinnedBuyerCli | null = null;
+  if (health.reachable) {
+    pinned = await pinnedBuyerCli(profile.gatewayUrl);
+    const comparison = pinned ? compareReleaseVersions(CLI_VERSION, pinned.version) : null;
+    if (pinned && comparison !== null && comparison < 0) {
+      issues.push({
+        severity: "blocking",
+        code: "DASKI_CLI_OUTDATED",
+        message:
+          `This is ${pinned.package} ${CLI_VERSION}; the gateway at ${profile.gatewayUrl} ` +
+          `pins ${pinned.version}, and releases before the pin have known payment defects.`,
+        remediation:
+          `${pinned.install ?? `npm install -g ${pinned.package}@${pinned.version}`}, ` +
+          "then re-run: daski doctor --json",
+      });
+    }
+  }
+
   // -- gateway protocol ----------------------------------------------------
   // /health/ready says the process is up; it cannot say whether this CLI can
   // read what the MCP tools return. One read-only round trip settles that,
@@ -252,6 +284,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       reachable: health.reachable,
       status: health.status ?? null,
       version: health.version ?? null,
+      pinnedCli: pinned,
       mcp: protocol
         ? { reachable: protocol.reachable, tools: protocol.tools.length, readableVia: protocol.readableVia }
         : null,

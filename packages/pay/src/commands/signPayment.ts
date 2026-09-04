@@ -14,7 +14,7 @@ import { CliError } from "../cli/errors.js";
 import { createContext, type ContextOptions } from "../context.js";
 import type { PaymentChallenge, PaymentRequirement } from "../gateway/client.js";
 import {
-  authorizePayment, issuedPaymentIdentifier, newIntentId, recordIntent,
+  authorizePayment, challengeIntentId, recordIntent,
 } from "../gateway/purchase.js";
 import { updateOrder } from "../store/orders.js";
 
@@ -70,7 +70,7 @@ export async function runSignPayment(
     // signed payload both use that identifier. A fresh one would be refused by
     // the gateway before settlement (0.1.1, 2026-09-03). A challenge without
     // one gets a fresh identifier, as before.
-    const intentId = issuedPaymentIdentifier(challenge.extensions) ?? newIntentId();
+    const intentId = challengeIntentId(challenge.extensions);
     recordIntent({
       intentId,
       profile: context.profileName,

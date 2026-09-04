@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CliError } from "../src/cli/errors.js";
-import { issuedPaymentIdentifier, newIntentId, resolvePaymentIdentifier } from "../src/gateway/purchase.js";
+import { challengeIntentId, issuedPaymentIdentifier, newIntentId, resolvePaymentIdentifier } from "../src/gateway/purchase.js";
 
 const ISSUED = "int_00000000-0000-4000-8000-000000000002";
 
@@ -51,4 +51,19 @@ test("a challenge bound to a different identifier than the one proposed is refus
     () => resolvePaymentIdentifier(extensions, newIntentId()),
     (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_IDENTIFIER_MISMATCH",
   );
+});
+
+test("buy adopts the identifier the challenge issued, so it can never mismatch its own challenge", () => {
+  // 0.1.2's `buy` minted a fresh identifier after the challenge and then
+  // refused the challenge with DASKI_PAYMENT_IDENTIFIER_MISMATCH: the gateway
+  // never accepted a proposal, so a proposal was never anything but a mismatch
+  // (2026-09-04). The ledger key is now the issued identifier.
+  const extensions = fixtureExtensions();
+  const intentId = challengeIntentId(extensions);
+  assert.equal(intentId, ISSUED);
+  assert.equal(resolvePaymentIdentifier(extensions, intentId), ISSUED);
+  // A challenge without an identifier still gets a fresh reconciliation key.
+  const minted = challengeIntentId({});
+  assert.match(minted, /^daski-[0-9a-f]{32}$/);
+  assert.equal(resolvePaymentIdentifier({}, minted), minted);
 });

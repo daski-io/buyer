@@ -107,6 +107,42 @@ export function resolvePaymentIdentifier(
 }
 
 /**
+ * The reconciliation key for a purchase: the identifier the gateway bound to
+ * the challenge, which is also what the submission must carry, so the local
+ * ledger and the gateway's `daski_list_my_orders` filter agree. A fresh one
+ * is minted only for a challenge that carries none. `buy` in 0.1.2 minted a
+ * fresh identifier after the challenge and then refused its own challenge with
+ * DASKI_PAYMENT_IDENTIFIER_MISMATCH: the gateway never accepted a proposal, so
+ * there is nothing to propose (2026-09-04).
+ */
+export function challengeIntentId(extensions: Record<string, unknown> | undefined): string {
+  return issuedPaymentIdentifier(extensions) ?? newIntentId();
+}
+
+/** Gateway codes that mean "authorized, outcome unknown" on older gateways. */
+const AMBIGUOUS_CODES = new Set([
+  "PAYMENT_PENDING_RECONCILIATION",
+  "PAYMENT_OUTCOME_PENDING",
+]);
+
+/**
+ * Whether a paid submission's error answer leaves the payment outcome unknown.
+ * The gateway says so itself with `paymentMayHaveSettled`; the code list is
+ * the fallback for gateways that predate the flag. A code-only list missed
+ * PAYMENT_IDENTIFIER_CONFLICT (flagged settled-maybe) on 2026-09-04, so the
+ * CLI marked the intent PENDING_RECONCILIATION without reconciling, and the
+ * operator's agent re-signed on the strength of a local ledger message.
+ */
+export function isAmbiguousPurchaseAnswer(
+  code: string | undefined,
+  body: Record<string, unknown> | undefined,
+): boolean {
+  if (body?.paymentMayHaveSettled === true) return true;
+  if (body?.paymentMayHaveSettled === false) return false;
+  return code !== undefined && AMBIGUOUS_CODES.has(code);
+}
+
+/**
  * Step 1: obtain a payment challenge. Prefers `daski_get_payment_challenge`
  * and falls back to an unpaid `daski_buy_outcome`, which is the same challenge
  * by a longer road.
@@ -387,7 +423,13 @@ export async function listPayerOrders(options: {
     toolName: "daski_list_my_orders",
     action: "list-orders",
     payer: options.payer,
-    request: { limit: 25, cursor: null },
+    // The gateway filters by intent id server-side when asked; the wallet
+    // challenge is bound to this exact request, so the filter rides in it.
+    request: {
+      limit: 25,
+      cursor: null,
+      ...(options.intentId ? { paymentIdentifier: options.intentId } : {}),
+    },
     chainId: options.chainId,
     gatewayUrl: options.gatewayUrl,
   });
@@ -399,6 +441,93 @@ export async function listPayerOrders(options: {
   return filtered.length > 0 || rows.some((row) => row.paymentIdentifier !== undefined)
     ? filtered
     : rows;
+}
+
+/** What a gateway order state says about the money. */
+export type SettlementReading = "not_settled" | "in_flight" | "ambiguous" | "settled";
+
+/**
+ * The gateway's order states, read for one question: did the authorization
+ * settle? Unknown states are treated as ambiguous, never as absent.
+ */
+export function readSettlement(state: string): SettlementReading {
+  switch (state) {
+    case "DRAFT":
+    case "CHALLENGE_ISSUED":
+    case "VERIFY_REJECTED":
+    case "SETTLEMENT_FAILED":
+    case "NOT_SETTLED":
+      return "not_settled";
+    case "ATTEMPT_OPENED":
+    case "VERIFIED":
+    case "SETTLE_INVOKED":
+      return "in_flight";
+    case "SETTLEMENT_AMBIGUOUS":
+    case "EXTERNAL_OR_UNPROVEN_DEPOSIT":
+    case "DISPATCH_AMBIGUOUS":
+      return "ambiguous";
+    case "FACILITATOR_CONFIRMED":
+    case "DEPOSIT_FINAL":
+    case "RELEASE_FINAL":
+    case "DISPATCH_STARTED":
+    case "DISPATCHED":
+    case "FULFILLED":
+    case "PROVIDER_FAILED":
+    case "INPUT_REQUIRED":
+    case "LEGAL_HOLD":
+      return "settled";
+    default:
+      return "ambiguous";
+  }
+}
+
+export interface IdentifierReconciliation {
+  status: "settled" | "in_flight" | "ambiguous" | "absent";
+  orderHandle?: string | undefined;
+  gatewayState?: string | undefined;
+  evidence: string;
+}
+
+/**
+ * The gateway's own answer for one payment identifier, with nothing signed
+ * but the read authorization: no replay, no balance reading, no local
+ * ledger. This is the lookup buy.md names for every ambiguous outcome and
+ * for PAYMENT_IDENTIFIER_CONFLICT. An identifier the gateway never issued
+ * (a `daski-` one from 0.1.0/0.1.1) matches nothing, which is the truth:
+ * nothing could have settled under it.
+ */
+export function reconcileIdentifierRows(
+  intentId: string,
+  rows: readonly PayerOrderRow[],
+): IdentifierReconciliation {
+  const matches = rows.filter((row) => row.paymentIdentifier === intentId);
+  if (matches.length === 0) {
+    return {
+      status: "absent",
+      evidence:
+        `the gateway lists no order for payment identifier ${intentId} under this payer`,
+    };
+  }
+  const row = matches[0]!;
+  const reading = readSettlement(row.state);
+  const evidence = `the gateway lists order ${row.orderHandle} for ${intentId} in state ${row.state}`;
+  if (reading === "not_settled") return { status: "absent", gatewayState: row.state, evidence };
+  if (reading === "settled") {
+    return { status: "settled", orderHandle: row.orderHandle, gatewayState: row.state, evidence };
+  }
+  return { status: reading, orderHandle: row.orderHandle, gatewayState: row.state, evidence };
+}
+
+export async function reconcileByIdentifier(options: {
+  client: GatewayClient;
+  signer: SignerAdapter;
+  payer: Address;
+  chainId: number;
+  gatewayUrl: string;
+  intentId: string;
+}): Promise<IdentifierReconciliation> {
+  const rows = await listPayerOrders(options);
+  return reconcileIdentifierRows(options.intentId, rows);
 }
 
 /** Records the intent before signing, so an interruption is recoverable. */
@@ -418,15 +547,24 @@ export { updateOrder };
  */
 export function purchaseFailure(
   result: McpToolResult,
-  options: { afterSubmit?: boolean | undefined } = {},
+  options: {
+    afterSubmit?: boolean | undefined;
+    /** The gateway refused the signed submission and said nothing settled. */
+    refused?: boolean | undefined;
+  } = {},
 ): CliError {
   if (GatewayClient.unreadable(result)) return unreadableResultError(BUY_TOOL, result, options);
   const body = GatewayClient.json(result);
   const code = typeof body?.code === "string" ? body.code : "DASKI_PURCHASE_FAILED";
-  const fallbackRemediation = options.afterSubmit
-    ? "The signature was submitted: do not re-run `daski buy` until the recorded intent " +
-      "is reconciled. The gateway's response is under `gateway` in this error."
-    : "Nothing was signed. The gateway's response is under `gateway` in this error.";
+  const fallbackRemediation = options.refused
+    ? "The gateway refused the signed submission and reports that nothing settled, so " +
+      "there is nothing to reconcile; fix the cause it names before any new purchase. " +
+      "The gateway's response is under `gateway` in this error."
+    : options.afterSubmit
+      ? "The signature was submitted: do not re-run `daski buy` until the recorded intent " +
+        "is reconciled with `daski order reconcile <intentId>`. The gateway's response is " +
+        "under `gateway` in this error."
+      : "Nothing was signed. The gateway's response is under `gateway` in this error.";
   return new CliError({
     code,
     message: typeof body?.message === "string"

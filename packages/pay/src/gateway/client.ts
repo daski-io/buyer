@@ -299,6 +299,66 @@ export async function probeGatewayProtocol(target: ProbeTarget): Promise<Gateway
   }
 }
 
+/** The buyer CLI release a gateway pins, from its `/.well-known/mcp.json`. */
+export interface PinnedBuyerCli {
+  package: string;
+  version: string;
+  install?: string | undefined;
+}
+
+/**
+ * Reads the gateway's pinned buyer CLI. Gateways before 2026-09-04 publish no
+ * `buyerCli`; that reads as `null`, never as an error, because the pin is
+ * advisory to the gateway's own operation and the doctor must not block on a
+ * field the gateway does not have.
+ */
+export async function pinnedBuyerCli(
+  gatewayUrl: string,
+  timeoutMs = 10_000,
+): Promise<PinnedBuyerCli | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${gatewayUrl.replace(/\/$/, "")}/.well-known/mcp.json`, {
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const body = await response.json() as { buyerCli?: unknown };
+    const pin = body.buyerCli as Partial<PinnedBuyerCli> | undefined;
+    if (!pin || typeof pin !== "object") return null;
+    if (typeof pin.package !== "string" || typeof pin.version !== "string") return null;
+    return {
+      package: pin.package,
+      version: pin.version,
+      install: typeof pin.install === "string" ? pin.install : undefined,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Compares two `major.minor.patch` versions. Returns a negative number when
+ * `installed` is older than `pinned`, zero when equal, positive when newer,
+ * and `null` when either is not a plain release version (a build from source
+ * reports `0.0.0-unknown`; a pre-release is not compared).
+ */
+export function compareReleaseVersions(installed: string, pinned: string): number | null {
+  const parse = (value: string): number[] | null => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value.trim());
+    return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+  };
+  const a = parse(installed);
+  const b = parse(pinned);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index]! !== b[index]!) return a[index]! - b[index]!;
+  }
+  return 0;
+}
+
 /** Health and version, for `doctor`. Plain HTTP; no MCP session needed. */
 export async function readiness(gatewayUrl: string, timeoutMs = 10_000): Promise<{
   reachable: boolean;

@@ -102,3 +102,18 @@ test("a capability about to expire is treated as already expired", async () => {
     );
   });
 });
+
+test("an intent the gateway refused before settlement consumes no session budget and may be signed for again", () => {
+  withHome(() => {
+    store.upsertOrder({ ...BASE, intentId: "int_paid", state: "SUBMITTED", handle: "ord_paid" });
+    store.upsertOrder({ ...BASE, intentId: "int_pending", state: "PENDING_RECONCILIATION" });
+    store.upsertOrder({ ...BASE, intentId: "int_refused", state: "NOT_SETTLED" });
+    store.upsertOrder({ ...BASE, intentId: "int_unsigned", state: "INTENT_RECORDED" });
+    // Paid and pending count; a definitive refusal and an unsigned intent do not.
+    assert.equal(store.authorizedTotalAtomic("sandbox"), 2n * BigInt(BASE.amount));
+    assert.equal(store.isUnspent(store.findByIntent("int_refused")!), true);
+    assert.equal(store.isUnspent(store.findByIntent("int_unsigned")!), true);
+    assert.equal(store.isUnspent(store.findByIntent("int_pending")!), false);
+    assert.equal(store.isUnspent(store.findByIntent("int_paid")!), false);
+  });
+});

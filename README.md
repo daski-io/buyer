@@ -44,7 +44,12 @@ daski doctor --json                     # exit 0: signer, funds, gateway, and it
 daski buy --provider 8327 --outcome create-mailbox --request ./request.json
 daski order status <handle>
 daski order artifact <handle> --output ./result.json
+daski order reconcile <handle|intentId>  # the gateway's answer to "did that payment settle?"
 ```
+
+`doctor` compares this release with the one the gateway pins in its
+`/.well-known/mcp.json` and blocks (`DASKI_CLI_OUTDATED`) when the install is
+older: releases before the pin have known payment defects.
 
 Every command supports `--json`. Every failure exits non-zero with a stable
 code and a remediation that is a command or a URL.

@@ -3,6 +3,51 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## Unreleased
+
+### `@daski/pay`
+
+- **`buy` carries the gateway's payment identifier.** 0.1.2 fixed
+  `sign-payment` but left `buy` minting a fresh identifier after the
+  challenge; its own mismatch check then refused every challenge with
+  `DASKI_PAYMENT_IDENTIFIER_MISMATCH` before signing. The 0.1.2 changelog
+  claimed `buy` proposed its identifier at challenge time and the gateway
+  echoed it: the gateway never accepted a proposal, and `buy` never sent one.
+  Neither published release could complete a purchase through `buy`; the
+  harness proves the CLI through `sign-payment` only, which is why this was
+  not caught (2026-09-04). Both commands now take the issued identifier as
+  the ledger key, so the local record and `daski_list_my_orders` agree.
+- **Reconciliation follows the gateway's `paymentMayHaveSettled` flag.** The
+  ambiguous-code list (`PAYMENT_PENDING_RECONCILIATION`,
+  `PAYMENT_OUTCOME_PENDING`) is now only the fallback for gateways without
+  the flag. A `PAYMENT_IDENTIFIER_CONFLICT` flagged settled-maybe was recorded
+  as `PENDING_RECONCILIATION` without reconciling, and `order status` on that
+  intent told the operator to re-run `daski buy`, which an agent did against
+  a gateway answer that said "do not re-sign" (2026-09-04). A refusal that
+  says nothing settled (`paymentMayHaveSettled: false`, for example the
+  gateway's new `PAYMENT_IDENTIFIER_UNKNOWN`) records the intent as
+  `NOT_SETTLED`: it consumes no session budget and may be signed for again
+  once the cause is fixed.
+- **`order reconcile <handle|intentId>`.** The gateway's own answer for one
+  payment identifier through `daski_list_my_orders` (filtered server-side,
+  signing only the wallet-action read): the order's handle and state when it
+  exists, `NOT_SETTLED` when the gateway lists nothing for the identifier,
+  and "in flight" or "ambiguous" when the money is still moving. This is the
+  remediation `order status` now names for an intent without a handle; the
+  old text told the operator to re-run `daski buy`.
+- **`doctor` blocks on an outdated release.** It reads the gateway's pinned
+  buyer CLI from `/.well-known/mcp.json` (`buyerCli`, gateway 2026-09-04 and
+  later) and reports `DASKI_CLI_OUTDATED` when this install is older; the
+  report carries the pin under `gateway.pinnedCli`. A 0.1.0 install ran
+  against a 0.1.2 pin unnoticed on 2026-09-04 because the pin lived only in
+  the setup guide's prose. A gateway without the field reads as no pin.
+
+### `@daski/x402-scheme`
+
+- The `DASKI_POLICY_IDENTIFIER_ALREADY_ORDERED` remediation names
+  `daski order reconcile <identifier>` instead of `order status <handle>`,
+  which cannot run for an intent that never received a handle.
+
 ## 0.1.2 — 2026-09-03
 
 ### `@daski/pay`
@@ -15,10 +60,13 @@ share a version.
   published-CLI acceptance lane on its first live run against gateway v0.31.0
   (2026-09-03). The signed payload and the local order record now use the
   issued identifier; a fresh one is minted only for a challenge without one.
-  `buy` is unaffected: it proposes its identifier at challenge time and the
-  gateway echoes it. A challenge bound to a different identifier than the one
-  a purchase proposed is refused (`DASKI_PAYMENT_IDENTIFIER_MISMATCH`), never
-  signed.
+  A challenge bound to a different identifier than the one a purchase
+  proposed is refused (`DASKI_PAYMENT_IDENTIFIER_MISMATCH`), never signed.
+  *Correction (2026-09-04): this entry originally said `buy` was unaffected
+  because it proposed its identifier at challenge time and the gateway echoed
+  it. `buy` never sent a proposal and the gateway never accepted one, so
+  0.1.2's `buy` refuses every gateway challenge with that mismatch before
+  signing; see Unreleased.*
 
 ### `@daski/x402-scheme`
 

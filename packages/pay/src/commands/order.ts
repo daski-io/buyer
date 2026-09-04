@@ -14,6 +14,7 @@ import { writeFileSync } from "node:fs";
 import { CliError } from "../cli/errors.js";
 import { createContext, type ContextOptions } from "../context.js";
 import { callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
+import { reconcileByIdentifier } from "../gateway/purchase.js";
 import { activeReadCapability, findOrder, updateOrder, type OrderRecord } from "../store/orders.js";
 import type { OrderAction } from "@daski/x402-scheme";
 
@@ -162,12 +163,15 @@ async function readWithCapability(
 ): Promise<Record<string, unknown>> {
   const handle = record.handle;
   if (!handle) {
+    // This is the local ledger speaking, not the gateway: it cannot say
+    // whether the signed authorization settled. Until 0.1.2 this told the
+    // operator to re-run `daski buy`, and on 2026-09-04 an agent re-signed on
+    // that advice against a gateway answer that said "do not re-sign".
     throw new CliError({
       code: "DASKI_ORDER_HAS_NO_HANDLE",
-      message: `Intent ${record.intentId} never received an order handle.`,
+      message: `Intent ${record.intentId} never received an order handle (local state ${record.state}).`,
       remediation:
-        "The purchase did not complete. Re-run `daski buy` with the same request; " +
-        "the bridge reconciles before it re-signs.",
+        `Ask the gateway before signing anything again: daski order reconcile ${record.intentId}`,
     });
   }
 
@@ -263,6 +267,52 @@ function capabilityFrom(
   const stored = { token: capability.token, expiresAt: Number(capability.expiresAt) };
   updateOrder(record.intentId, { readCapability: stored });
   return stored;
+}
+
+/**
+ * `daski order reconcile <handle|intentId>` — the gateway's own answer for one
+ * payment identifier. Signs only the wallet-action read; never a payment.
+ * Settles the local record either way: a handle and state when the order
+ * exists, NOT_SETTLED when the gateway lists nothing for the identifier.
+ */
+export async function orderReconcile(options: OrderOptions): Promise<Record<string, unknown>> {
+  return withOrder(options, async (context, record) => {
+    const outcome = await reconcileByIdentifier({
+      client: context.client,
+      signer: context.signer,
+      payer: context.payerAddress,
+      chainId: context.profile.chainId,
+      gatewayUrl: context.profile.gatewayUrl,
+      intentId: record.intentId,
+    });
+    let updated = record;
+    if (outcome.status === "absent") {
+      updated = updateOrder(record.intentId, { state: "NOT_SETTLED" }) ?? record;
+    } else if (outcome.orderHandle) {
+      updated = updateOrder(record.intentId, {
+        handle: outcome.orderHandle,
+        state: outcome.status === "settled" && outcome.gatewayState
+          ? normalize(outcome.gatewayState)
+          : "PENDING_RECONCILIATION",
+      }) ?? record;
+    }
+    return {
+      intentId: record.intentId,
+      reconciled: outcome.status !== "ambiguous" && outcome.status !== "in_flight",
+      status: outcome.status,
+      orderHandle: updated.handle ?? null,
+      gatewayState: outcome.gatewayState ?? null,
+      state: updated.state,
+      evidence: outcome.evidence,
+      next: outcome.status === "absent"
+        ? "Nothing settled under this identifier. A fresh purchase is safe once the " +
+          "gateway's refusal, if any, is understood; nothing needs a second signature."
+        : outcome.status === "settled"
+          ? `The order exists: daski order status ${updated.handle ?? record.intentId}`
+          : "The payment is still in flight or ambiguous on the gateway's side. Do not " +
+            "sign again; re-run this command later.",
+    };
+  });
 }
 
 async function withOrder<T>(
