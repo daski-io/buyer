@@ -6,7 +6,7 @@
   "description": "Registers the Daski composite Exact-EVM scheme on an @x402/mcp host against the sandbox gateway.",
   "scripts": { "start": "node --experimental-strip-types index.ts" },
   "dependencies": {
-    "@daski/x402-scheme": "0.1.2",
+    "@daski/x402-scheme": "0.2.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@x402/core": "2.24.0",
     "@x402/evm": "2.24.0",

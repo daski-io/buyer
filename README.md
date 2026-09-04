@@ -35,7 +35,7 @@ swap happily.
 ## Quick start
 
 ```bash
-npx @daski/pay@0.1.2 doctor --json
+npx @daski/pay@0.2.0 doctor --json
 ```
 
 ```bash

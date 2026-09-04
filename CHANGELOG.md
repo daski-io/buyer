@@ -3,7 +3,7 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
-## Unreleased
+## 0.2.0 — 2026-09-04
 
 ### `@daski/pay`
 
