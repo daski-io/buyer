@@ -15,7 +15,7 @@
   "scripts": {
     "build": "npm run build --workspace @daski/x402-scheme && npm run build --workspace @daski/pay",
     "typecheck": "tsc --build --force",
-    "test": "npm run test --workspace @daski/x402-scheme && npm run test --workspace @daski/pay",
+    "test": "node --test scripts/*.test.mjs && npm run test --workspace @daski/x402-scheme && npm run test --workspace @daski/pay",
     "lint": "tsc --build --force",
     "conformance": "npm run --silent conformance --workspace @daski/pay --"
   },
