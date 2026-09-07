@@ -22,10 +22,17 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm run build
+      # npm test starts with a clean build, tarball proof and packed CLI smoke.
       - run: npm test
       - name: Typecheck the examples
         run: npx tsc -p examples/tsconfig.json
+      - name: Confirm package proof after all checks
+        run: node scripts/package-artifacts.mjs --verify .scratch/package-proof/proof.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buyer-package-proof-node-${{ matrix.node }}
+          path: .scratch/package-proof/
+          if-no-files-found: error
 
   # The conformance suite spends real testnet USDC against the live sandbox,
   # so it is never part of CI. It is run deliberately, by a human, with a

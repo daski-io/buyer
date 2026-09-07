@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
 import { canonicalHash, type OrderBindingV2, type TypedDataRequest } from "@daski/x402-scheme";
+import { runSignPayment } from "../src/commands/signPayment.js";
 import { runBuy, type BuyOptions } from "../src/commands/buy.js";
 import { approvePurchase, nextPurchaseApproval, purchaseApproval } from "../src/commands/approval.js";
 import { DEFAULT_CONFIG, loadConfig } from "../src/config.js";
@@ -143,4 +144,42 @@ test("approval survives expiry refresh but changes with every material purchase 
     await assert.rejects(approvePurchase({ approval: next, approved: approval.id, threshold: "0", json: true }),
       (error: unknown) => error instanceof CliError && error.code === "DASKI_QUOTE_CHANGED");
   }
+});
+
+// The helper identifier tests cannot prove that the externally supplied
+// challenge command actually uses that identifier when it signs and records.
+test("sign-payment uses an externally issued identifier through the actual file, policy and signer path", async () => {
+  await withFixture(async ({ options, context, signatures, submissions }) => {
+    const challengeFile = options.requestFile + ".challenge.json";
+    const challenge = { x402Version: 2, resource, accepts: [requirement],
+      extensions: { "daski-order-binding": binding, "payment-identifier": { info: { required: true, id: intentId } } } };
+    writeFileSync(challengeFile, JSON.stringify({ paymentRequired: challenge, preflight: { sufficient: true } }));
+    const signOptions = { challengeFile, json: true, approved: purchaseApproval(approvedTerms).id };
+    const result = await runSignPayment(signOptions, async () => context);
+    assert.equal(result.signed, true);
+    assert.equal(result.intentId, intentId);
+    assert.deepEqual((result.paymentPayload as PaymentSubmission).extensions?.["payment-identifier"], challenge.extensions["payment-identifier"]);
+    assert.equal(findByIntent(intentId)?.state, "AUTHORIZED");
+    assert.equal(signatures.length, 1);
+    assert.equal(submissions.length, 0, "sign-payment never submits the payment");
+    assert.equal(signatures[0]!.message.nonce, result.authorizationNonce);
+    await assert.rejects(runSignPayment(signOptions, async () => context));
+    assert.equal(signatures.length, 1, "the original identifier cannot produce a second authorization");
+  });
+});
+
+test("sign-payment refuses a wrong route or unsupported challenge before constructing a signer context", async () => {
+  await withFixture(async ({ options, context, signatures }) => {
+    const challengeFile = options.requestFile + ".challenge.json";
+    const challenge = { x402Version: 2, resource, accepts: [requirement], extensions: { "daski-order-binding": binding } };
+    writeFileSync(challengeFile, JSON.stringify(challenge));
+    let contexts = 0;
+    const factory = async () => { contexts++; return context; };
+    await assert.rejects(runSignPayment({ challengeFile, json: true, providerAgentId: "2" }, factory),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_SIGN_PAYMENT_TARGET_MISMATCH");
+    writeFileSync(challengeFile, JSON.stringify({ ...challenge, accepts: [{ ...requirement, network: "solana:wrong" }] }));
+    await assert.rejects(runSignPayment({ challengeFile, json: true }, factory),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_CHALLENGE_UNSUPPORTED_RAIL");
+    assert.equal(contexts, 0); assert.equal(signatures.length, 0);
+  });
 });

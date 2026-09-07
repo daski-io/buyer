@@ -30,6 +30,7 @@ export interface SignPaymentOptions extends ContextOptions {
 
 export async function runSignPayment(
   options: SignPaymentOptions,
+  contextFactory: typeof createContext = createContext,
 ): Promise<Record<string, unknown>> {
   const challenge = readChallenge(options.challengeFile);
   const requirement = challenge.accepts[0]!;
@@ -51,7 +52,7 @@ export async function runSignPayment(
   }
 
   const { providerAgentId, outcomeId } = resolveTarget(challenge, options);
-  const context = await createContext(options);
+  const context = await contextFactory(options);
   try {
     // The splitter evidence resolves through the catalog, so the same §4.1.4
     // two-source check applies here as in `buy`.

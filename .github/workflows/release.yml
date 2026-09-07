@@ -13,6 +13,11 @@ on:
         required: true
         type: choice
         options: ["@daski/x402-scheme", "@daski/pay"]
+      prepared_publication:
+        description: Coordinator may overlap preparation; exact dependency publication barrier remains mandatory
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,8 +39,12 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
-      - run: npm run build
+      # The offline test entrypoint produces a clean, packed candidate proof.
       - run: npm test
+      - run: node scripts/package-artifacts.mjs --verify .scratch/package-proof/proof.json
+      - name: Prove the exact scheme dependency before CLI publication
+        if: inputs.package == '@daski/pay'
+        run: node scripts/wait-for-scheme.mjs
 
       # Trusted publishing: npm exchanges this job's OIDC token for a short-lived
       # publish credential, so no registry token exists anywhere. Each package
