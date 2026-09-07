@@ -17,7 +17,8 @@
     "typecheck": "tsc --build --force",
     "test": "node --test scripts/*.test.mjs && npm run test --workspace @daski/x402-scheme && npm run test --workspace @daski/pay",
     "lint": "tsc --build --force",
-    "conformance": "npm run --silent conformance --workspace @daski/pay --"
+    "conformance": "npm run --silent conformance --workspace @daski/pay --",
+    "verify:packages": "node scripts/package-artifacts.mjs"
   },
   "devDependencies": {
     "@types/node": "22.10.2",

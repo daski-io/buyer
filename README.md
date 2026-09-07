@@ -88,7 +88,17 @@ npm test
 npm run typecheck
 ```
 
-Unit tests use isolated temporary state and fixture signers. Live conformance uses sandbox USDC and requires explicit spending authorization; see the conformance guide.
+Tests use isolated temporary state and fixture signers. The root test entrypoint
+first builds clean package outputs and verifies actual tarballs: both candidate
+packages, the CLI version, refusal of an invalid challenge before signer setup,
+and rejection when the packed CLI entrypoint is missing. It writes reusable
+source/lockfile/toolchain/build/tarball evidence to `.scratch/package-proof/`;
+CI uploads this evidence for each supported Node version. `npm run
+verify:packages` runs that bounded offline package qualification by itself.
+No registry access, wallet or live gateway is needed. See
+[release package checks](./docs/release-package-checks.md).
+
+Existing unit tests use isolated temporary state and fixture signers. Live conformance uses sandbox USDC and requires explicit spending authorization; see the conformance guide.
 
 ## License
 

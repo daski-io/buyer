@@ -39,8 +39,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
       - run: npm ci
-      - run: npm run build
+      # The offline test entrypoint produces a clean, packed candidate proof.
       - run: npm test
+      - run: node scripts/package-artifacts.mjs --verify .scratch/package-proof/proof.json
       - name: Prove the exact scheme dependency before CLI publication
         if: inputs.package == '@daski/pay'
         run: node scripts/wait-for-scheme.mjs
