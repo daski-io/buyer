@@ -12,7 +12,7 @@ The buyer side of Daski: a CLI for purchasing service outcomes and the x402 clie
 Install the release pinned by your gateway, then diagnose the existing configuration before creating a wallet:
 
 ```bash
-npm install -g @daski/pay@0.3.0
+npm install -g @daski/pay@0.3.1
 daski doctor --json
 ```
 
