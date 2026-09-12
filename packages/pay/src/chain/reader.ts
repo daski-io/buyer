@@ -47,6 +47,8 @@ export interface ChainReader {
   call(args: { to: Address; data: Hex; gas: bigint }): Promise<ChainCallResult>;
   /** The receipt for a hash, or `null` while the transaction is not mined. */
   getTransactionReceipt(hash: Hex): Promise<TransactionReceiptLike | null>;
+  /** The number of the newest block the chain reports as finalized. */
+  getFinalizedBlockNumber(): Promise<bigint>;
   readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }): Promise<T>;
 }
 
@@ -100,6 +102,13 @@ export function createChainReader(rpcUrl: string, timeoutMs = ERC1271_CALL_TIMEO
         if (error instanceof BaseError && error.name === "TransactionReceiptNotFoundError") return null;
         if (error instanceof BaseError &&
             error.walk((cause) => (cause as Error).name === "TransactionReceiptNotFoundError") !== null) return null;
+        throw rpcUnavailable(rpcUrl, error);
+      }
+    },
+    async getFinalizedBlockNumber() {
+      try {
+        return (await client.getBlock({ blockTag: "finalized" })).number;
+      } catch (error) {
         throw rpcUnavailable(rpcUrl, error);
       }
     },

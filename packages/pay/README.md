@@ -36,9 +36,9 @@ The command returns the actual quote and an approval identifier. After the user 
 | `order confirm <handle> --choice <Confirmed\|NotConfirmed> [--submission <sponsored\|direct>]` | Prepare and validate the user's review; sponsored: sign and submit; direct: print the validated call |
 | `order revoke-confirmation <handle>` | Withdraw the active review, in the same mode |
 | `order confirm <handle> --resume` | Reconcile a stored sponsored submission without another EAS signature |
-| `order confirm <handle> --tx <hash>` | Direct mode: record the hash the wallet's tool reported (unverified) |
-| `order confirm <handle> --check` | Direct mode: verify the receipt, the EAS event, the attestation, and the finalized state |
-| `order confirm <handle> --abandon` | Direct mode: clear a record that has no executable transaction behind it |
+| `order confirm <handle> --tx <hash>` | Direct mode: record the hash the wallet's tool reported (unverified); replaces a finalized, provably unrelated one |
+| `order confirm <handle> --check` | Direct mode: verify the receipt, the EAS event, the attestation, and the finalized state at or past the receipt's block |
+| `order confirm <handle> --abandon` | Direct mode: clear a record whose transaction reverted, was never sent, or is finalized and provably unrelated |
 | `order reconcile <intentId>` | Query settlement for one payment identifier |
 | `order import` | Rehydrate the local order store from the gateway's history for the active payer |
 | `sign-payment --challenge <file.json>` | Advanced payment signer; supports the same --approve flow |
@@ -53,7 +53,7 @@ Artifacts are saved to a file with their envelope metadata reported separately. 
 
 Reviews require the user's choice for the selected order. The mode follows the signer: a plain wallet is sponsored by Daski's relayer, a contract wallet submits directly through its own tool, and `--submission direct` lets a plain wallet with a tool do the same; the reverse is refused. Review messages and direct calls are reconstructed from deployment pins, chain state, and the selected label, and a call that does not re-encode identically is refused before it is shown (`DASKI_CONFIRMATION_PREPARATION_INVALID`). Up to three attestations can be submitted per order; the third is final and requires `--acknowledge-final-transition` after the user accepts the warning "this is the last confirmation you can submit; it can still be revoked". The current confirmation can be revoked at any time.
 
-Pending sponsorship keeps the preparation and signature for `--resume`. A direct submission is tracked in the order store as `prepared`, `submitted` (a hash recorded, unverified), `observed` (the receipt succeeded, the pinned EAS emitted the matching event with the payer as attester, the attestation binds to the prepared call, and the gateway's finalized read shows the result), or `abandoned`. A new preparation is refused while one is prepared or submitted; `--abandon` clears local tracking only when no hash is recorded or the receipt reverted, and cancels nothing at the wallet. Finality on Base takes minutes to tens of minutes.
+Pending sponsorship keeps the preparation and signature for `--resume`; a gateway refusal raised before any sponsorship is reserved (`CONFIRMATION_SPONSORSHIP_LIMIT`, an invalid or stale preparation) clears it so `--submission direct` can proceed, while an ambiguous failure keeps it. A direct submission is tracked in the order store as `prepared`, `submitted` (a hash recorded, unverified), `observed` (the receipt succeeded, the pinned EAS emitted the matching event with the payer as attester, the attestation binds to the prepared call, and the gateway's finalized read, at or past the receipt's block, shows the result), or `abandoned`. A new preparation is refused while one is prepared or submitted, and one order's record is updated under a per-order lock so two processes cannot both prepare it. A hash recorded by mistake is replaced (`--tx`) or cleared (`--abandon`) only once its transaction is finalized and carries no matching EAS event (`DASKI_CONFIRMATION_TX_UNFINALIZED` until then); a missing, pending, or matching receipt keeps the record. Neither cancels anything at the wallet. Finality on Base takes minutes to tens of minutes.
 
 ## Documentation
 

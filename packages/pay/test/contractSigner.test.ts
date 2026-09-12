@@ -40,6 +40,7 @@ function chain(overrides: Partial<ChainReader> = {}) {
     getCode: async (address) => { calls.push({ method: "getCode", args: address }); return "0x6080"; },
     call: async (args) => { calls.push({ method: "call", args }); return { data: MAGIC, reverted: false }; },
     getTransactionReceipt: async () => null,
+    getFinalizedBlockNumber: async () => 0n,
     readContract: async () => { throw new Error("unexpected contract read"); },
     ...overrides,
   };

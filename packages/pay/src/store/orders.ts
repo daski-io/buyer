@@ -13,7 +13,9 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Address, Hex } from "viem";
+import { CliError } from "../cli/errors.js";
 import { ordersPath } from "../paths.js";
+import { withFileLock } from "./lock.js";
 
 export type OrderState =
   | "INTENT_RECORDED"
@@ -167,6 +169,32 @@ export function updateOrder(
   file.orders[index] = merged;
   write(file);
   return merged;
+}
+
+/** How long a command waits for another process's update of the same order. */
+const ORDER_LOCK_WAIT_MS = 10_000;
+/** A confirmation preparation spans gateway and chain calls; older than this is abandoned. */
+const ORDER_LOCK_STALE_MS = 120_000;
+
+/**
+ * Serializes one order's confirmation journal across processes. The
+ * read-check-write of a preparation spans gateway and chain calls; without
+ * the lock two preparations both find nothing pending and the later write
+ * drops the earlier validated call's tracking.
+ */
+export function withOrderLock<T>(intentId: string, run: () => Promise<T>): Promise<T> {
+  const name = intentId.replace(/[^A-Za-z0-9._-]/g, "_");
+  return withFileLock(`${ordersPath()}.${name}.lock`, {
+    waitMs: ORDER_LOCK_WAIT_MS,
+    staleMs: ORDER_LOCK_STALE_MS,
+    locked: () => new CliError({
+      code: "DASKI_ORDER_LOCKED",
+      message: "Another daski command is updating this order's confirmation record.",
+      remediation:
+        "Wait for it to finish, then re-run. If no daski process is running, remove the " +
+        "stale .lock file next to orders.json.",
+    }),
+  }, run);
 }
 
 /** States under which no USDC was authorized, or the gateway says none settled. */

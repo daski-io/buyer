@@ -17,7 +17,12 @@ that can be triggered by accident is a suite that drains a wallet by accident.
 
 `doctor passes` → `prepare` → `policy-validate + recompute + sign` → `buy` →
 grant-read (when available) → `status` → `artifact` → optionally `confirm`
-(`--confirm`). A signer is *supported* once this suite has passed with it
+(`--confirm`: a `Confirmed` review, waiting up to five minutes for the order's
+on-chain reputation record; a plain wallet's review is sponsored and
+submitted, a contract wallet's ends at the validated direct call, which the
+wallet's own tool submits outside the suite). The intent recorded before
+signing is the payment identifier the gateway pinned in the challenge. A
+signer is *supported* once this suite has passed with it
 against the sandbox and the run is recorded with the release; `local` is the
 regression baseline, `circle-agent` is required before contract accounts are
 enabled on mainnet, and `cdp` and `circle` remain candidates.

@@ -17,9 +17,16 @@
  * loses the association; `--check` advances it to `observed` only when the
  * receipt succeeded, the pinned EAS emitted the matching event with the payer
  * as attester, `getAttestation` binds the attestation to what was prepared,
- * and the gateway's finalized read shows the result. `--abandon` clears the
- * local record when no hash is recorded or the receipt is a revert, and
- * cancels nothing at the wallet.
+ * and the gateway's finalized read, anchored at or past the receipt's block,
+ * shows the result. `--abandon` clears the local record when no hash is
+ * recorded or the receipt is a revert, and cancels nothing at the wallet. A
+ * hash recorded by mistake is corrected (replaced with `--tx`, or cleared
+ * with `--abandon`) only once its transaction is finalized and provably not
+ * this call; a missing, pending, or matching receipt keeps the record.
+ *
+ * One order's journal is updated under a per-order lock: the read-check-write
+ * of a preparation spans gateway and chain calls, and two concurrent
+ * preparations must not both find nothing pending.
  */
 import { canonicalHash, type SignerDescription, type TypedDataRequest } from "@daski/x402-scheme";
 import {
@@ -32,7 +39,8 @@ import type { CommandContext } from "../context.js";
 import { callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
 import { easAddressMismatch } from "../gateway/metadata.js";
 import {
-  updateOrder, type ConfirmationTxExpected, type ConfirmationTxRecord, type OrderRecord,
+  findByIntent, updateOrder, withOrderLock,
+  type ConfirmationTxExpected, type ConfirmationTxRecord, type OrderRecord,
 } from "../store/orders.js";
 import { readWithCapability, type OrderOptions } from "./order.js";
 
@@ -260,11 +268,31 @@ export async function runConfirmation(options: ConfirmationOptions): Promise<Rec
   return withOrder(options, (context, record) => confirmOrder(context, record, options));
 }
 
+/**
+ * Gateway refusals the submit phase raises before any sponsorship is reserved
+ * (request shape, mode, signature, stale preparation, exhausted budget): the
+ * signed request was never admitted, so the retained submission is cleared and
+ * another mode can be prepared. Anything else (an unavailable chain read, a
+ * transport failure) may have been admitted and keeps the record for --resume.
+ */
+const REFUSED_BEFORE_ADMISSION: ReadonlySet<string> = new Set([
+  "CONFIRMATION_REQUEST_INVALID",
+  "CONFIRMATION_SPONSORED_REQUIRES_EOA",
+  "CONFIRMATION_SIGNATURE_INVALID",
+  "CONFIRMATION_PREPARATION_STALE",
+  "CONFIRMATION_SPONSORSHIP_LIMIT",
+]);
+
+/** The record as the store holds it now; the caller's copy may predate another process's write. */
+function latest(record: OrderRecord): OrderRecord {
+  return findByIntent(record.intentId) ?? record;
+}
+
 export async function confirmOrder(context: CommandContext, record: OrderRecord, options: ConfirmationOptions,
   factsReader = readConfirmationFacts): Promise<Record<string, unknown>> {
   const handle = record.handle ?? options.handle;
   if (options.tx !== undefined || options.check || options.abandon) {
-    return manageDirectRecord(context, record, options);
+    return withOrderLock(record.intentId, () => manageDirectRecord(context, latest(record), options));
   }
   const choice: Choice | undefined = options.revoke ? "revoke"
     : options.confirmation === "Confirmed" || options.confirmation === "NotConfirmed" ? options.confirmation : undefined;
@@ -272,83 +300,88 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
     throw new CliError({ code: "DASKI_CONFIRMATION_CHOICE_REQUIRED", message: "Choose the delivery confirmation for this order.",
       remediation: "After the user's choice, pass --choice Confirmed or --choice NotConfirmed. Leaving it Pending requires no action." });
   }
-  if (record.confirmationSubmission && !options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_PENDING",
-    message: "A review submission for this order is awaiting reconciliation.", remediation: `Run daski order confirm ${options.handle} --resume.` });
   const call = (action: "confirmation" | "revoke-confirmation", request: Record<string, unknown>) => callAuthorizedLifecycleTool({
     client: context.client, signer: context.signer, toolName: action === "confirmation" ? "daski_confirm_delivery" : "daski_revoke_delivery_confirmation",
     action, orderHandle: handle, request, chainId: context.profile.chainId, gatewayUrl: context.profile.gatewayUrl });
 
-  let submission = record.confirmationSubmission;
-  if (!submission) {
-    if (options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING", message: "There is no pending review submission.",
-      remediation: "Check order status, then supply the user's review choice if a new review is wanted." });
-    const action = options.revoke ? "revoke-confirmation" : "confirmation";
-    const signer = await context.resolveSigner();
-    const mode = selectConfirmationMode(signer.describe(), options.submission);
-    if (mode === "direct" && isPendingDirect(record.confirmationTx)) throw directPending(handle, record.confirmationTx!);
-    const facts = await factsReader(context, record);
-    assertCapacity(facts, choice!, handle);
-    const acknowledged = options.acknowledgeFinalTransition === true;
-    // Revocation preparation carries no acknowledgement: only an attestation
-    // can be final, and the gateway's closed request shape rejects the key.
-    const prepared = await call(action, { phase: "prepare", submission: mode,
-      ...(options.revoke ? {} : { confirmation: options.confirmation, acknowledgeFinalTransition: acknowledged }) });
-    const summary = {
-      submissionsUsed: prepared.submissionsUsed ?? null,
-      revocationAvailable: prepared.revocationAvailable ?? null,
-      finalAttestation: prepared.finalAttestation === true,
-    };
-    const withheld = mode === "sponsored" ? !prepared.signableTypedData : !prepared.call;
-    if (withheld) {
-      // The gateway withholds the signable only for the final attestation without acknowledgment.
-      if (prepared.finalAttestation !== true || acknowledged || choice === "revoke") throw invalidPreparation();
-      return { orderHandle: record.handle, mode, ...summary,
-        warning: { code: "FINAL_ATTESTATION", message: FINAL_ATTESTATION_WARNING },
-        next: "Show the warning to the user. After explicit acceptance, repeat with --acknowledge-final-transition." };
-    }
-    if (prepared.finalAttestation === true && !acknowledged) throw invalidPreparation();
-    const warning = prepared.finalAttestation === true ? { code: "FINAL_ATTESTATION", message: FINAL_ATTESTATION_WARNING } : undefined;
+  return withOrderLock(record.intentId, async () => {
+    record = latest(record);
+    if (record.confirmationSubmission && !options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_PENDING",
+      message: "A review submission for this order is awaiting reconciliation.", remediation: `Run daski order confirm ${options.handle} --resume.` });
+    let submission = record.confirmationSubmission;
+    if (!submission) {
+      if (options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING", message: "There is no pending review submission.",
+        remediation: "Check order status, then supply the user's review choice if a new review is wanted." });
+      const action = options.revoke ? "revoke-confirmation" : "confirmation";
+      const signer = await context.resolveSigner();
+      const mode = selectConfirmationMode(signer.describe(), options.submission);
+      if (mode === "direct" && isPendingDirect(record.confirmationTx)) throw directPending(handle, record.confirmationTx!);
+      const facts = await factsReader(context, record);
+      assertCapacity(facts, choice!, handle);
+      const acknowledged = options.acknowledgeFinalTransition === true;
+      // Revocation preparation carries no acknowledgement: only an attestation
+      // can be final, and the gateway's closed request shape rejects the key.
+      const prepared = await call(action, { phase: "prepare", submission: mode,
+        ...(options.revoke ? {} : { confirmation: options.confirmation, acknowledgeFinalTransition: acknowledged }) });
+      // Whether this attestation is the final one is a chain fact, decided here
+      // for both modes; the gateway's count and flag must agree with it, and
+      // the signable or call is withheld only for the unacknowledged final one.
+      const final = choice !== "revoke" && facts.submissionsUsed === ATTESTATION_CAP - 1;
+      if (prepared.submissionsUsed !== facts.submissionsUsed || Boolean(prepared.finalAttestation) !== final) {
+        throw invalidPreparation();
+      }
+      const summary = { submissionsUsed: facts.submissionsUsed, revocationAvailable: facts.currentUid !== ZERO_UID, finalAttestation: final };
+      const withheld = mode === "sponsored" ? !prepared.signableTypedData : !prepared.call;
+      if (withheld) {
+        if (!final || acknowledged) throw invalidPreparation();
+        return { orderHandle: record.handle, mode, ...summary,
+          warning: { code: "FINAL_ATTESTATION", message: FINAL_ATTESTATION_WARNING },
+          next: "Show the warning to the user. After explicit acceptance, repeat with --acknowledge-final-transition." };
+      }
+      if (final && !acknowledged) throw invalidPreparation();
+      const warning = final ? { code: "FINAL_ATTESTATION", message: FINAL_ATTESTATION_WARNING } : undefined;
 
-    if (mode === "direct") {
-      const validated = validateDirectCall(prepared.call, facts, choice!, context.profile.easAddress);
-      const expected = await expectedBinding(context, facts, validated, signer);
-      const tracked: ConfirmationTxRecord = {
-        action: validated.action,
-        callHash: canonicalHash(validated.call),
-        expected,
-        state: "prepared",
-        preparedAt: new Date().toISOString(),
-      };
-      updateOrder(record.intentId, { confirmationTx: tracked });
-      return { orderHandle: record.handle, mode, action: validated.action, ...summary,
-        ...(warning ? { warning } : {}),
-        call: validated.call,
-        callHash: tracked.callHash,
-        note: "This CLI validated the call against chain facts and sends no transaction.",
-        next: "Submit the call with the wallet's own tool (for the Circle agent wallet, the circle CLI). " +
-          `Then record the hash: daski order confirm ${handle} --tx <hash>, and verify it: ` +
-          `daski order confirm ${handle} --check.` };
-    }
+      if (mode === "direct") {
+        const validated = validateDirectCall(prepared.call, facts, choice!, context.profile.easAddress);
+        const expected = await expectedBinding(context, facts, validated, signer);
+        const tracked: ConfirmationTxRecord = {
+          action: validated.action,
+          callHash: canonicalHash(validated.call),
+          expected,
+          state: "prepared",
+          preparedAt: new Date().toISOString(),
+        };
+        updateOrder(record.intentId, { confirmationTx: tracked });
+        return { orderHandle: record.handle, mode, action: validated.action, ...summary,
+          ...(warning ? { warning } : {}),
+          call: validated.call,
+          callHash: tracked.callHash,
+          note: "This CLI validated the call against chain facts and sends no transaction.",
+          next: "Submit the call with the wallet's own tool (for the Circle agent wallet, the circle CLI). " +
+            `Then record the hash: daski order confirm ${handle} --tx <hash>, and verify it: ` +
+            `daski order confirm ${handle} --check.` };
+      }
 
-    const typedData = validateConfirmationPreparation(prepared, facts, choice!, acknowledged);
-    if (typeof prepared.preparationId !== "string") throw invalidPreparation();
-    const signature = await signer.signTypedData(typedData);
-    submission = { action, request: { phase: "submit", submission: "sponsored", preparationId: prepared.preparationId, signature } };
-    updateOrder(record.intentId, { confirmationSubmission: submission, readCapability: undefined });
-  }
-  try {
-    const result = await call(submission.action, submission.request);
-    updateOrder(record.intentId, { confirmationSubmission: undefined, readCapability: undefined });
-    return { orderHandle: record.handle, mode: "sponsored", ...result };
-  } catch (error) {
-    if (error instanceof CliError && error.code === "CONFIRMATION_SUBMISSION_PENDING") return {
-      orderHandle: record.handle, mode: "sponsored", status: "pending", preparationId: submission.request.preparationId,
-      next: `Run daski order confirm ${options.handle} --resume to check the same submission.` };
-    if (error instanceof CliError && error.code === "CONFIRMATION_PREPARATION_STALE") {
-      updateOrder(record.intentId, { confirmationSubmission: undefined });
+      const typedData = validateConfirmationPreparation(prepared, facts, choice!, acknowledged);
+      if (typeof prepared.preparationId !== "string") throw invalidPreparation();
+      const signature = await signer.signTypedData(typedData);
+      submission = { action, request: { phase: "submit", submission: "sponsored", preparationId: prepared.preparationId, signature } };
+      updateOrder(record.intentId, { confirmationSubmission: submission, readCapability: undefined });
     }
-    throw error;
-  }
+    try {
+      const result = await call(submission.action, submission.request);
+      updateOrder(record.intentId, { confirmationSubmission: undefined, readCapability: undefined });
+      return { orderHandle: record.handle, mode: "sponsored", ...result };
+    } catch (error) {
+      if (error instanceof CliError && error.code === "CONFIRMATION_SUBMISSION_PENDING") return {
+        orderHandle: record.handle, mode: "sponsored", status: "pending", preparationId: submission.request.preparationId,
+        next: `Run daski order confirm ${options.handle} --resume to check the same submission.` };
+      if (error instanceof CliError && REFUSED_BEFORE_ADMISSION.has(error.code)) {
+        updateOrder(record.intentId, { confirmationSubmission: undefined });
+      }
+      throw error;
+    }
+  });
 }
 
 function assertCapacity(facts: ConfirmationFacts, choice: Choice, handle: string): void {
@@ -425,6 +458,7 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
       remediation: `Prepare one first: daski order confirm ${handle} --choice Confirmed|NotConfirmed (or daski order revoke-confirmation ${handle}).` });
   }
   const base = { orderHandle: record.handle, mode: "direct", action: tracked.action, callHash: tracked.callHash };
+  const cancelsNothing = "This cancels nothing at the wallet: a transaction already sent is unaffected.";
 
   if (options.tx !== undefined) {
     if (!HEX32.test(options.tx)) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MALFORMED",
@@ -434,33 +468,74 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
     if (tracked.state === "observed") throw new CliError({ code: "DASKI_CONFIRMATION_TX_ALREADY_RECORDED",
       message: `This confirmation was already observed as ${tracked.txHash}.`,
       remediation: "Nothing to record. Prepare a new confirmation if another submission is wanted." });
-    if (tracked.state === "submitted" && tracked.txHash !== txHash) throw new CliError({ code: "DASKI_CONFIRMATION_TX_ALREADY_RECORDED",
-      message: `Transaction ${tracked.txHash} is already recorded for this confirmation.`,
-      remediation: `Verify it with daski order confirm ${handle} --check; if it reverted, --abandon clears it before another hash can be recorded.` });
+    let corrected: { previousTxHash: Hex; reason: string } | undefined;
+    if (tracked.state === "submitted" && tracked.txHash !== txHash) {
+      // Replacing a recorded hash is a journal correction, allowed only once the
+      // recorded transaction is finalized and provably not the prepared call.
+      const unrelated = await provenUnrelated(context, tracked, handle);
+      if (!unrelated) throw new CliError({ code: "DASKI_CONFIRMATION_TX_ALREADY_RECORDED",
+        message: `Transaction ${tracked.txHash} is already recorded for this confirmation.`,
+        remediation: `Verify it with daski order confirm ${handle} --check. A recorded hash is replaced only once its ` +
+          "transaction is finalized and carries no matching EAS event; if it reverted, --abandon clears it first." });
+      corrected = { previousTxHash: tracked.txHash!, reason: unrelated };
+    }
     updateOrder(record.intentId, { confirmationTx: { ...tracked, txHash, state: "submitted" } });
     return { ...base, txHash, state: "submitted", verification: "recorded, not yet verified",
+      ...(corrected ? { corrected, note: `The previously recorded transaction is finalized and unrelated to the prepared call (${corrected.reason}); the record now tracks the new hash. ${cancelsNothing}` } : {}),
       next: `Run daski order confirm ${handle} --check once the transaction is mined. Finality on Base takes minutes to tens of minutes.` };
   }
 
   if (options.check) return checkDirectRecord(context, record, tracked, handle, base);
 
-  // --abandon: only when nothing recorded can still execute.
+  // --abandon: only when nothing recorded can still execute, or the recorded
+  // transaction is finalized and provably not this call.
+  let unrelatedReceipt: string | undefined;
   if (tracked.txHash) {
     const receipt = await context.chain.getTransactionReceipt(tracked.txHash);
-    if (!receipt || receipt.status === "success") throw new CliError({
-      code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
-      message: receipt
-        ? `Transaction ${tracked.txHash} executed; the record cannot be abandoned.`
-        : `Transaction ${tracked.txHash} has no receipt yet and may still execute.`,
-      remediation: receipt
-        ? `Verify it with daski order confirm ${handle} --check.`
-        : `Wait for it to be mined, then run daski order confirm ${handle} --check. Abandon is allowed only when the receipt is a revert.`,
-    });
+    if (!receipt) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
+      message: `Transaction ${tracked.txHash} has no receipt yet and may still execute.`,
+      remediation: `Wait for it to be mined, then run daski order confirm ${handle} --check. Abandon is allowed only when the receipt is a revert or the transaction is finalized and unrelated to this call.` });
+    if (receipt.status === "success") {
+      const unrelated = await provenUnrelated(context, tracked, handle, receipt);
+      if (!unrelated) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
+        message: `Transaction ${tracked.txHash} executed; the record cannot be abandoned.`,
+        remediation: `Verify it with daski order confirm ${handle} --check.` });
+      unrelatedReceipt = unrelated;
+    }
   }
   updateOrder(record.intentId, { confirmationTx: { ...tracked, state: "abandoned" } });
   return { ...base, ...(tracked.txHash ? { txHash: tracked.txHash } : {}), state: "abandoned",
-    note: "Local tracking was cleared. This cancels nothing at the wallet: a transaction already sent is unaffected.",
+    ...(unrelatedReceipt ? { unrelatedReceipt } : {}),
+    note: `Local tracking was cleared. ${cancelsNothing}` +
+      (unrelatedReceipt ? " If the prepared call was sent under another hash, prepare nothing new: record that hash instead." : ""),
     next: `Prepare again when ready: daski order confirm ${handle} --choice Confirmed|NotConfirmed.` };
+}
+
+/**
+ * The reason a recorded, successful, finalized transaction is provably not
+ * the prepared call, or null when it is (or may be) this call. A related
+ * receipt keeps the record; an unrelated one that is not yet finalized is
+ * refused until it is, so a reorg cannot turn a correction into a lost call.
+ */
+async function provenUnrelated(context: CommandContext, tracked: ConfirmationTxRecord, handle: string,
+  known?: TransactionReceiptLike): Promise<string | null> {
+  if (!tracked.txHash) return null;
+  const receipt = known ?? await context.chain.getTransactionReceipt(tracked.txHash);
+  if (!receipt || receipt.status !== "success") return null;
+  let reason: string;
+  try {
+    const uid = confirmationEventUid(receipt, context.profile.easAddress, tracked, context.payerAddress);
+    assertAttestationBinding(await readAttestation(context.chain, context.profile.easAddress, uid), tracked, uid);
+    return null;
+  } catch (error) {
+    if (!(error instanceof CliError) || error.code !== "DASKI_CONFIRMATION_RECEIPT_UNRELATED") throw error;
+    reason = error.message;
+  }
+  const finalized = await context.chain.getFinalizedBlockNumber();
+  if (receipt.blockNumber > finalized) throw new CliError({ code: "DASKI_CONFIRMATION_TX_UNFINALIZED",
+    message: `Transaction ${tracked.txHash} carries no matching EAS event but is not finalized yet (block ${receipt.blockNumber}, finalized ${finalized}).`,
+    remediation: `Wait for finality (minutes to tens of minutes on Base), then repeat the same daski order confirm ${handle} command.` });
+  return reason;
 }
 
 async function checkDirectRecord(context: CommandContext, record: OrderRecord, tracked: ConfirmationTxRecord,
@@ -492,7 +567,7 @@ async function checkDirectRecord(context: CommandContext, record: OrderRecord, t
     orderHandle: handle, request: { phase: "check", submission: "direct" },
     chainId: context.profile.chainId, gatewayUrl: context.profile.gatewayUrl,
   });
-  if (!finalizedReflects(check, tracked, uid)) {
+  if (!finalizedReflects(check, tracked, uid, receipt.blockNumber)) {
     return { ...base, txHash: tracked.txHash, uid, state: "submitted", receipt: "success",
       verification: "the receipt, the EAS event and the attestation match the prepared call; the gateway's finalized read does not show it yet",
       check,
@@ -508,9 +583,9 @@ function unrelatedReceipt(reason: string): CliError {
     code: "DASKI_CONFIRMATION_RECEIPT_UNRELATED",
     message: `The recorded transaction does not carry this confirmation: ${reason}.`,
     remediation:
-      "The record stays submitted. If the hash was recorded by mistake and the transaction " +
-      "reverted, --abandon clears it; otherwise check the wallet's tool for the transaction " +
-      "that carried the prepared call.",
+      "The record stays submitted. If the hash was recorded by mistake, record the right one with " +
+      "--tx <hash> or clear the record with --abandon once this transaction is finalized; a reverted " +
+      "one can be abandoned at once. Otherwise check the wallet's tool for the transaction that carried the prepared call.",
   });
 }
 
@@ -549,12 +624,21 @@ function assertAttestationBinding(attestation: Attestation, tracked: Confirmatio
   if (tracked.action === "revoke" && attestation.revocationTime === 0n) throw unrelatedReceipt("the attestation is not revoked");
 }
 
-/** The gateway's finalized read shows the result of the transaction. */
-function finalizedReflects(check: Record<string, unknown>, tracked: ConfirmationTxRecord, uid: Hex): boolean {
+/**
+ * The gateway's finalized read shows the transaction's effect: its finalized
+ * block is at or past the receipt's block, and the current uid is the new
+ * attestation (attest) or no longer the revoked one (revoke). A finalized
+ * read from before the receipt proves nothing, whatever uid it carries.
+ */
+function finalizedReflects(check: Record<string, unknown>, tracked: ConfirmationTxRecord, uid: Hex, receiptBlock: bigint): boolean {
   const finalized = check.confirmedCurrent;
   if (!finalized || typeof finalized !== "object" || Array.isArray(finalized)) return false;
   const current = (finalized as { currentUid?: unknown }).currentUid;
   if (typeof current !== "string") return false;
+  const anchor = check.finalizedBlock;
+  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) return false;
+  const number = (anchor as { number?: unknown }).number;
+  if (typeof number !== "string" || !/^\d+$/.test(number) || BigInt(number) < receiptBlock) return false;
   return tracked.action === "attest" ? sameHex(current, uid) : !sameHex(current, tracked.expected.uid ?? "");
 }
 

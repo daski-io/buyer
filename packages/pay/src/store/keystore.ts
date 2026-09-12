@@ -40,6 +40,7 @@ import {
   HOSTED_BACKENDS, type HostEnvironment, type KeyBackend, type KeyDurability,
 } from "../host.js";
 import { keystorePath } from "../paths.js";
+import { withFileLock } from "./lock.js";
 
 const scrypt = promisify(scryptCallback) as (
   password: string, salt: Buffer, keylen: number,
@@ -284,50 +285,20 @@ function replaceKeystoreFile(path: string, file: KeystoreFile): void {
   fsyncDirectory(directory);
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 /** Serializes store updates across processes with an exclusive lock file. */
-async function withKeystoreLock<T>(path: string, run: () => Promise<T>): Promise<T> {
+function withKeystoreLock<T>(path: string, run: () => Promise<T>): Promise<T> {
   const lock = `${path}.lock`;
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      const fd = openSync(lock, "wx", 0o600);
-      try {
-        writeSync(fd, `${process.pid}\n`);
-      } finally {
-        closeSync(fd);
-      }
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lock, { force: true });
-          continue;
-        }
-      } catch {
-        // The holder released it between our attempts; try again.
-        continue;
-      }
-      if (Date.now() > deadline) {
-        throw new CliError({
-          code: "DASKI_KEYSTORE_LOCKED",
-          message: `Another process holds the keystore lock ${lock}.`,
-          remediation:
-            "Wait for the other daski command to finish, then re-run. If no daski process " +
-            `is running, remove the stale lock file. See ${DOC}`,
-        });
-      }
-      await sleep(25);
-    }
-  }
-  try {
-    return await run();
-  } finally {
-    rmSync(lock, { force: true });
-  }
+  return withFileLock(lock, {
+    waitMs: LOCK_WAIT_MS,
+    staleMs: LOCK_STALE_MS,
+    locked: () => new CliError({
+      code: "DASKI_KEYSTORE_LOCKED",
+      message: `Another process holds the keystore lock ${lock}.`,
+      remediation:
+        "Wait for the other daski command to finish, then re-run. If no daski process " +
+        `is running, remove the stale lock file. See ${DOC}`,
+    }),
+  }, run);
 }
 
 async function encrypt(privateKey: Hex, passphrase: string): Promise<EncryptedEntry> {

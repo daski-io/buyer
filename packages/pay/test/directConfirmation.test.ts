@@ -74,7 +74,7 @@ const attestation = (overrides: Partial<Attestation> = {}): Attestation => ({
 interface Fixture {
   context: CommandContext;
   calls: { name: string; request: Record<string, unknown> }[];
-  chain: { receipt: TransactionReceiptLike | null; attestation: Attestation; record?: Record<string, unknown> };
+  chain: { receipt: TransactionReceiptLike | null; attestation: Attestation; record?: Record<string, unknown>; finalized: bigint };
   gateway: { prepared: Record<string, unknown>; check: Record<string, unknown>; eas: Address };
 }
 
@@ -83,13 +83,14 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
   const signer = { getAddress: async () => payer.address, describe: () => description(accountType),
     signTypedData: async (data: TypedDataRequest) => payer.signTypedData(data as never) };
   const calls: Fixture["calls"] = [];
-  const chainState: Fixture["chain"] = { receipt: null, attestation: attestation() };
+  const chainState: Fixture["chain"] = { receipt: null, attestation: attestation(), finalized: 100n };
   const gateway: Fixture["gateway"] = { prepared: { submissionsUsed: 0, revocationAvailable: false, finalAttestation: false, call: attestCall() },
     check: { lastObserved: null, confirmedCurrent: null, submissionsUsed: 0, observedBlock: null, finalizedBlock: null }, eas: EAS_PREDEPLOY };
   const reader: ChainReader = {
     getCode: async () => "0x6080",
     call: async () => ({ data: undefined, reverted: true }),
     getTransactionReceipt: async (hash) => { assert.equal(hash, TX); return chainState.receipt; },
+    getFinalizedBlockNumber: async () => chainState.finalized,
     readContract: async <T,>(args: { functionName: string; args: readonly unknown[] }): Promise<T> => {
       if (args.functionName === "getAttestation") return chainState.attestation as T;
       if (args.functionName === "getNonce") return 0n as T;
@@ -133,6 +134,8 @@ async function withStore(run: (record: OrderRecord) => Promise<void>): Promise<v
 }
 
 const current = () => findByIntent("intent")!;
+/** The gateway's block view: a decimal string and a hash. */
+const block = (number: number) => ({ number: String(number), hash: canonicalHash(`block-${number}`) });
 const factsReader = (f: ConfirmationFacts = facts) => async () => f;
 const options = { handle: "handle", json: true };
 
@@ -228,7 +231,10 @@ test("a contract signer walks prepared → submitted → observed on matching ev
     assert.equal(check.name, "daski_confirm_delivery");
 
     gateway.check = { lastObserved: { state: "Confirmed", currentUid: UID }, confirmedCurrent: { state: "Confirmed", currentUid: UID, submissionsUsed: 1 },
-      submissionsUsed: 1, observedBlock: 50, finalizedBlock: 45 };
+      submissionsUsed: 1, observedBlock: block(50), finalizedBlock: block(41) };
+    assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "submitted",
+      "a finalized read from before the receipt's block proves nothing, even with the new uid");
+    gateway.check = { ...gateway.check, finalizedBlock: block(42) };
     const observed = await confirmOrder(context, current(), { ...options, check: true });
     assert.equal(observed.state, "observed");
     assert.equal(current().confirmationTx?.state, "observed");
@@ -277,9 +283,15 @@ test("a revocation binds to the attestation it revokes and is observed only once
     chain.receipt = receipt({ event: "Revoked" });
     await assert.rejects(confirmOrder(context, current(), { ...options, check: true }), code("DASKI_CONFIRMATION_RECEIPT_UNRELATED"), "not revoked on chain");
     chain.attestation = attestation({ revocationTime: 7n });
-    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID } };
+    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID }, finalizedBlock: block(60) };
     assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "submitted", "still current on the finalized read");
-    gateway.check = { confirmedCurrent: { state: "Pending", currentUid: ZERO_UID } };
+    // A finalized read from before the attestation existed carries the zero uid,
+    // which differs from the revoked one; without the block anchor it would pass.
+    gateway.check = { confirmedCurrent: { state: "Pending", currentUid: ZERO_UID, submissionsUsed: 0 }, finalizedBlock: block(1) };
+    assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "submitted", "a pre-attestation finalized state is not evidence");
+    gateway.check = { confirmedCurrent: { state: "Pending", currentUid: ZERO_UID, submissionsUsed: 1 } };
+    assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "submitted", "no finalized anchor at all");
+    gateway.check = { confirmedCurrent: { state: "Pending", currentUid: ZERO_UID, submissionsUsed: 1 }, finalizedBlock: block(42) };
     assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "observed");
   });
 });
@@ -332,5 +344,135 @@ test("chain facts refuse a gateway whose EAS pin differs from the profile's befo
     await assert.rejects(readConfirmationFacts(context, record), code("DASKI_EAS_ADDRESS_MISMATCH"));
     await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }), code("DASKI_EAS_ADDRESS_MISMATCH"));
     assert.equal(calls.length, 0);
+  });
+});
+
+test("a wrong successful hash can be corrected or abandoned only once it is finalized and provably not this call", async () => {
+  await withStore(async (record) => {
+    const { context, chain } = fixture("contract");
+    const prepared = await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    // The recorded transaction succeeded but another contract emitted its logs; not finalized yet.
+    chain.receipt = receipt({ emitter: REPUTATION });
+    chain.finalized = 41n;
+    await assert.rejects(confirmOrder(context, current(), { ...options, check: true }), code("DASKI_CONFIRMATION_RECEIPT_UNRELATED"));
+    const other = `0x${"bb".repeat(32)}` as Hex;
+    await assert.rejects(confirmOrder(context, current(), { ...options, tx: other }), code("DASKI_CONFIRMATION_TX_UNFINALIZED"), "replacement waits for finality");
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_UNFINALIZED"), "abandon waits for finality");
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed" }, factsReader()), code("DASKI_CONFIRMATION_TX_PENDING"));
+    assert.equal(current().confirmationTx?.txHash, TX);
+    // A related successful receipt is never replaced or abandoned, finalized or not.
+    chain.receipt = receipt();
+    chain.attestation = attestation();
+    await assert.rejects(confirmOrder(context, current(), { ...options, tx: other }), code("DASKI_CONFIRMATION_TX_ALREADY_RECORDED"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"));
+    chain.finalized = 42n;
+    await assert.rejects(confirmOrder(context, current(), { ...options, tx: other }), code("DASKI_CONFIRMATION_TX_ALREADY_RECORDED"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"));
+    // Finalized and unrelated: the journal can be corrected; the reviewed call is preserved.
+    chain.receipt = receipt({ emitter: REPUTATION });
+    const replaced = await confirmOrder(context, current(), { ...options, tx: other });
+    assert.equal(replaced.state, "submitted");
+    assert.deepEqual((replaced.corrected as { previousTxHash: Hex }).previousTxHash, TX);
+    assert.match(String(replaced.note), /cancels nothing at the wallet/);
+    assert.equal(current().confirmationTx?.txHash, other);
+    assert.equal(current().confirmationTx?.callHash, prepared.callHash, "the prepared call and its binding survive the correction");
+    assert.deepEqual(current().confirmationTx?.expected, { schema: facts.schemaUid, recipient: RECIPIENT, refUID: ZERO_UID,
+      dataHash: keccak256(confirmationData(facts.orderKey, "Confirmed")) });
+  });
+  await withStore(async (record) => {
+    // Abandon of a finalized unrelated receipt clears tracking and says so.
+    const { context, chain } = fixture("contract");
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    chain.receipt = receipt({ emitter: REPUTATION });
+    chain.finalized = 42n;
+    const abandoned = await confirmOrder(context, current(), { ...options, abandon: true });
+    assert.equal(abandoned.state, "abandoned");
+    assert.match(String(abandoned.unrelatedReceipt), /no log was emitted by the pinned EAS/);
+    assert.match(String(abandoned.note), /record that hash instead/);
+    assert.equal(current().confirmationTx?.state, "abandoned");
+  });
+});
+
+test("two concurrent direct preparations for one order yield exactly one tracked call", async () => {
+  await withStore(async (record) => {
+    const { context } = fixture("contract");
+    const original = context.client.callTool;
+    context.client.callTool = async (name: string, args: Record<string, unknown>) => {
+      const request = (args.request ?? {}) as Record<string, unknown>;
+      if (args.authorization && request.phase === "prepare") {
+        return { content: [], structuredContent: { submissionsUsed: 0, finalAttestation: false, call: attestCall(facts, request.confirmation as "Confirmed" | "NotConfirmed") } };
+      }
+      return original(name, args);
+    };
+    const results = await Promise.allSettled([
+      confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader()),
+      confirmOrder(context, record, { ...options, confirmation: "NotConfirmed" }, factsReader()),
+    ]);
+    const fulfilled = results.filter((result): result is PromiseFulfilledResult<Record<string, unknown>> => result.status === "fulfilled");
+    const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    assert.equal(fulfilled.length, 1, "the second preparation is refused, not silently overwritten");
+    assert.equal(rejected.length, 1);
+    assert.ok(code("DASKI_CONFIRMATION_TX_PENDING")(rejected[0]!.reason));
+    assert.equal(current().confirmationTx?.callHash, fulfilled[0]!.value.callHash, "the tracked record is the call that was returned");
+    assert.equal(current().confirmationTx?.state, "prepared");
+  });
+});
+
+test("direct mode derives the final attestation and the count from chain facts, not from the gateway", async () => {
+  await withStore(async (record) => {
+    const { context, gateway } = fixture("contract");
+    const last = { ...facts, submissionsUsed: 2, currentUid: UID };
+    // Two submissions used on chain: this call is final. A gateway that says otherwise is refused.
+    gateway.prepared = { submissionsUsed: 2, finalAttestation: false, call: attestCall(last) };
+    await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(last)), code("DASKI_CONFIRMATION_MISMATCH"));
+    await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed", acknowledgeFinalTransition: true }, factsReader(last)),
+      code("DASKI_CONFIRMATION_MISMATCH"));
+    assert.equal(current().confirmationTx, undefined, "nothing is tracked");
+    // A gateway count that disagrees with the chain is refused too.
+    gateway.prepared = { submissionsUsed: 1, finalAttestation: false, call: attestCall() };
+    await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader()), code("DASKI_CONFIRMATION_MISMATCH"));
+    // The truthful final preparation carries the warning and needs the acknowledgement.
+    gateway.prepared = { submissionsUsed: 2, finalAttestation: true, call: attestCall(last) };
+    await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(last)), code("DASKI_CONFIRMATION_MISMATCH"));
+    const accepted = await confirmOrder(context, record, { ...options, confirmation: "Confirmed", acknowledgeFinalTransition: true }, factsReader(last));
+    assert.equal(accepted.finalAttestation, true);
+    assert.deepEqual(accepted.warning, { code: "FINAL_ATTESTATION", message: FINAL_ATTESTATION_WARNING });
+  });
+});
+
+test("a sponsorship refusal raised before admission clears the journal so direct mode can proceed; an ambiguous failure keeps it", async () => {
+  await withStore(async (record) => {
+    const { context, gateway } = fixture("eoa");
+    const deadline = String(Math.floor(Date.now() / 1000) + 300);
+    gateway.prepared = { preparationId: "prep", orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 0, finalAttestation: false,
+      signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
+        types: { Attest: [{ name: "schema", type: "bytes32" }, { name: "recipient", type: "address" }, { name: "expirationTime", type: "uint64" },
+          { name: "revocable", type: "bool" }, { name: "refUID", type: "bytes32" }, { name: "data", type: "bytes" }, { name: "value", type: "uint256" },
+          { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint64" }] },
+        primaryType: "Attest", message: { schema: facts.schemaUid, recipient: facts.recipient, expirationTime: "0", revocable: true,
+          refUID: facts.currentUid, data: confirmationData(facts.orderKey, "Confirmed"), value: "0", nonce: facts.nonce, deadline } } };
+    const original = context.client.callTool;
+    let refusal: Record<string, unknown> = { code: "CONFIRMATION_SPONSORSHIP_UNAVAILABLE" };
+    context.client.callTool = async (name: string, args: Record<string, unknown>) => {
+      if (args.authorization && (args.request as Record<string, unknown> | undefined)?.phase === "submit") {
+        return { content: [], isError: true, structuredContent: refusal };
+      }
+      return original(name, args);
+    };
+    // Ambiguous: the chain read failed; the signed request may be admitted later, so it is kept for --resume.
+    await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader()), code("CONFIRMATION_SPONSORSHIP_UNAVAILABLE"));
+    assert.ok(current().confirmationSubmission, "kept for --resume");
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader()), code("DASKI_CONFIRMATION_PENDING"));
+    // Definitive, raised before any reservation: cleared, and direct mode proceeds at once.
+    refusal = { code: "CONFIRMATION_SPONSORSHIP_LIMIT", chainEligible: true };
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()), code("CONFIRMATION_SPONSORSHIP_LIMIT"));
+    assert.equal(current().confirmationSubmission, undefined, "nothing was admitted, nothing is retained");
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()), code("DASKI_CONFIRMATION_NOT_PENDING"));
+    gateway.prepared = { submissionsUsed: 0, revocationAvailable: false, finalAttestation: false, call: attestCall() };
+    const direct = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader());
+    assert.equal(direct.mode, "direct");
+    assert.equal(current().confirmationTx?.state, "prepared");
   });
 });

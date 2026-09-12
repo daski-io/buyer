@@ -29,8 +29,9 @@ import { createContext } from "../src/context.js";
 import { GatewayClient, type GatewayCallLog } from "../src/gateway/client.js";
 import { orderArtifact, orderConfirm, orderStatus } from "../src/commands/order.js";
 import {
-  authorizePayment, newIntentId, recordIntent, requestChallenge, submitPayment,
+  authorizePayment, challengeIntentId, recordIntent, requestChallenge, submitPayment,
 } from "../src/gateway/purchase.js";
+import { CliError } from "../src/cli/errors.js";
 import { updateOrder } from "../src/store/orders.js";
 
 interface Step {
@@ -49,6 +50,24 @@ interface Step {
  */
 const SPEC01_CALL_BUDGET = 6;
 const FALLBACK_CALL_BUDGET = 12;
+
+/** Codes that mean the order's on-chain reputation record is not there yet. */
+const NOT_READY = new Set(["DASKI_CONFIRMATION_MISMATCH", "REPUTATION_NOT_READY"]);
+const READY_WAIT_MS = 5 * 60_000;
+const READY_POLL_MS = 15_000;
+
+async function retryUntilReady<T>(run: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + READY_WAIT_MS;
+  for (;;) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof CliError) || !NOT_READY.has(error.code) || Date.now() + READY_POLL_MS > deadline) throw error;
+      process.stderr.write(`       waiting for the order's reputation record (${error.code})\n`);
+      await new Promise((resolve) => setTimeout(resolve, READY_POLL_MS));
+    }
+  }
+}
 
 async function main(): Promise<number> {
   const { flags } = parseArgs(process.argv.slice(2));
@@ -139,7 +158,9 @@ async function main(): Promise<number> {
       process.stderr.write(`       price ${formatUsdc(amountAtomic)}\n`);
 
       // -- policy-validate + sign ------------------------------------------
-      const intentId = newIntentId();
+      // The gateway pins the payment identifier in the challenge; the intent
+      // recorded here must be that one, or reconciliation cannot find the order.
+      const intentId = challengeIntentId(challenge.challenge.extensions);
       recordIntent({
         intentId, profile: context.profileName, providerAgentId: provider,
         outcomeId: outcome, payer: context.payerAddress,
@@ -186,9 +207,22 @@ async function main(): Promise<number> {
         output: join(runDirectory, "artifact.bin"),
       }));
       if (withConfirm) {
-        await step("confirm delivery", () => orderConfirm({
-          ...selection, handle: orderHandle!, json: true,
-        }));
+        // The order's reputation record appears on chain after fulfillment;
+        // until then the chain facts do not match and the gateway is not ready.
+        await step("confirm delivery", async () => {
+          const result = await retryUntilReady(() => orderConfirm({
+            ...selection, handle: orderHandle!, json: true, confirmation: "Confirmed",
+          }));
+          if (result.mode === "direct") {
+            // A contract signer ends at the validated call: this CLI never sends
+            // a transaction, and the wallet's own tool submits it outside the suite.
+            process.stderr.write(
+              `       direct call validated (${String(result.callHash)}); submit it with the wallet's tool, ` +
+              `then: daski order confirm ${orderHandle} --tx <hash> and --check\n`,
+            );
+          }
+          return result;
+        });
       }
     } finally {
       await context.close();
