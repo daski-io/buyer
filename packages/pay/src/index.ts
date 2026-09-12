@@ -30,7 +30,7 @@ export {
   detectLegacyKeyringEntry, keyBackendFor, resolveHost,
   type HostClass, type HostEnvironment, type KeyBackend, type KeyDurability,
 } from "./host.js";
-export { createChainReader, type ChainReader } from "./chain/reader.js";
+export { createChainReader, finalityTagFor, type ChainReader, type FinalityTag } from "./chain/reader.js";
 
 export { Catalog, CATALOG_TTL_SECONDS, type OutcomeSummary } from "./gateway/catalog.js";
 export {

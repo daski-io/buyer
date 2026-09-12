@@ -42,6 +42,18 @@ export interface ChainCallResult {
   reverted: boolean;
 }
 
+/** The block tag a profile's chain treats as final. */
+export type FinalityTag = "safe" | "finalized";
+
+/**
+ * Base mainnet waits for L1 finality; the sandbox (Base Sepolia) treats the
+ * `safe` tag (the batch is posted to L1) as final, the same rule the gateway
+ * applies through CHAIN_FINALITY_TAG (owner decision 2026-08-28).
+ */
+export function finalityTagFor(chainId: number): FinalityTag {
+  return chainId === 8453 ? "finalized" : "safe";
+}
+
 export interface ChainReader {
   /** Code at `address` at the latest block; `undefined` or `0x` for an EOA. */
   getCode(address: Address): Promise<Hex | undefined>;
@@ -49,8 +61,8 @@ export interface ChainReader {
   call(args: { to: Address; data: Hex; gas: bigint }): Promise<ChainCallResult>;
   /** The receipt for a hash, or `null` while the transaction is not mined. */
   getTransactionReceipt(hash: Hex): Promise<TransactionReceiptLike | null>;
-  /** The number of the newest block the chain reports as finalized. */
-  getFinalizedBlockNumber(): Promise<bigint>;
+  /** The number of the newest block at the profile chain's finality tag. */
+  getFinalBlockNumber(): Promise<bigint>;
   /** The hash of the canonical block at a height, as this RPC reports the chain now. */
   getBlockHash(blockNumber: bigint): Promise<Hex>;
   /** A contract read, at the latest state or pinned to a block number. */
@@ -74,7 +86,7 @@ function isTransportFailure(error: unknown): boolean {
 }
 
 /** A viem-backed reader for one RPC endpoint, with one deadline per request. */
-export function createChainReader(rpcUrl: string, timeoutMs = ERC1271_CALL_TIMEOUT_MS): ChainReader {
+export function createChainReader(rpcUrl: string, finalityTag: FinalityTag, timeoutMs = ERC1271_CALL_TIMEOUT_MS): ChainReader {
   const client = createPublicClient({ transport: http(rpcUrl, { timeout: timeoutMs, retryCount: 0 }) });
   return {
     async getCode(address) {
@@ -111,9 +123,9 @@ export function createChainReader(rpcUrl: string, timeoutMs = ERC1271_CALL_TIMEO
         throw rpcUnavailable(rpcUrl, error);
       }
     },
-    async getFinalizedBlockNumber() {
+    async getFinalBlockNumber() {
       try {
-        return (await client.getBlock({ blockTag: "finalized" })).number;
+        return (await client.getBlock({ blockTag: finalityTag })).number;
       } catch (error) {
         throw rpcUnavailable(rpcUrl, error);
       }

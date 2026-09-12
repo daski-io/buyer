@@ -44,7 +44,7 @@ function transport(overrides: Partial<DoctorTransport> = {}): DoctorTransport {
     }),
     chain: () => ({
       getCode: async () => "0x", call: async () => ({ data: undefined, reverted: true }),
-      getTransactionReceipt: async () => null, getFinalizedBlockNumber: async () => 0n, getBlockHash: async () => `0x${"00".repeat(32)}`, readContract: async () => { throw new Error("no read expected"); },
+      getTransactionReceipt: async () => null, getFinalBlockNumber: async () => 0n, getBlockHash: async () => `0x${"00".repeat(32)}`, readContract: async () => { throw new Error("no read expected"); },
     }),
     balances: async () => ({ nativeWei: "0", native: "0 ETH", usdcAtomic: "5000000", usdc: "5 USDC" }),
     ...overrides,

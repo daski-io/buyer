@@ -87,7 +87,7 @@ function fixture(accountType: "eoa" | "contract", action: "attest" | "revoke") {
     getCode: async () => "0x6080", call: async () => ({ data: undefined, reverted: true }),
     getTransactionReceipt: async () => ({ status: "success", blockNumber: 42n, blockHash: BLOCK_42, from: payer.address, logs: [{ address: EAS_PREDEPLOY,
       topics: encodeEventTopics({ abi: EAS_ABI, eventName: action === "attest" ? "Attested" : "Revoked", args: { recipient: RECIPIENT, attester: payer.address, schemaUID: facts.schemaUid } }) as Hex[], data: UID }] }),
-    getFinalizedBlockNumber: async () => 100n,
+    getFinalBlockNumber: async () => 100n,
     getBlockHash: async (number) => number === 42n ? BLOCK_42 : BLOCK_50,
     readContract: async <T,>(args: { functionName: string; blockNumber?: bigint }): Promise<T> => {
       if (args.functionName === "getAttestation") return { ...attestation, revocationTime: action === "revoke" ? 7n : 0n } as T;

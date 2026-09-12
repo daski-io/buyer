@@ -15,7 +15,7 @@
  */
 import { getAddress, isAddressEqual, type Address } from "viem";
 import type { SignerAdapter } from "@daski/x402-scheme";
-import { createChainReader, type ChainReader } from "../chain/reader.js";
+import { createChainReader, finalityTagFor, type ChainReader, type FinalityTag } from "../chain/reader.js";
 import { CliError } from "../cli/errors.js";
 import {
   permissionWarnings, applyCapOverrides, loadConfig, CONFIG_DOC, SIGNER_KINDS, type SignerKind,
@@ -60,7 +60,7 @@ export interface DoctorTransport {
   readiness: typeof readiness;
   probe: typeof probeGatewayProtocol;
   metadata: (gatewayUrl: string) => Promise<GatewayMetadata>;
-  chain: (rpcUrl: string) => ChainReader;
+  chain: (rpcUrl: string, finalityTag: FinalityTag) => ChainReader;
   balances: typeof readBalances;
 }
 
@@ -126,7 +126,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   }
   const signerKind = (options.signerOverride ?? profile.signer) as SignerKind;
   const backend = keyBackendFor(host, SIGNER_KINDS.includes(signerKind) ? signerKind : "local");
-  const chain = transport.chain(profile.rpcUrl);
+  const chain = transport.chain(profile.rpcUrl, finalityTagFor(profile.chainId));
 
   // -- local key -------------------------------------------------------------
   let location: KeyLocation | undefined;

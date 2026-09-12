@@ -49,7 +49,7 @@ Commands
   order revoke-confirmation <handle>  Withdraw the active review
   order confirm <handle> --resume     Reconcile a pending sponsored submission
   order confirm <handle> --tx <hash>  Direct mode: record the hash the wallet's tool reported
-  order confirm <handle> --check      Direct mode: verify the receipt, attestation and finalized state
+  order confirm <handle> --check      Direct mode: verify the receipt, attestation and final state
   order confirm <handle> --abandon    Direct mode: drop a record with no executable transaction
   order input <handle> --request <file.json>
                                       Submit requested customer input

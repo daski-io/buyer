@@ -100,7 +100,7 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
     getCode: async () => "0x6080",
     call: async () => ({ data: undefined, reverted: true }),
     getTransactionReceipt: async (hash) => { assert.equal(hash, TX); chainState.log.push("receipt"); return chainState.receipt; },
-    getFinalizedBlockNumber: async () => { chainState.log.push("finalized"); return chainState.finalized; },
+    getFinalBlockNumber: async () => { chainState.log.push("final"); return chainState.finalized; },
     getBlockHash: async (number) => { chainState.log.push(`blockHash:${number}`); return chainState.canonical.get(number) ?? blockHashAt(number); },
     readContract: async <T,>(args: { functionName: string; args: readonly unknown[]; blockNumber?: bigint }): Promise<T> => {
       chainState.log.push(`${args.functionName}${args.blockNumber === undefined ? "" : `@${args.blockNumber}`}`);
@@ -378,7 +378,7 @@ test("a wrong successful hash can be corrected or abandoned only once it is fina
     chain.finalized = 41n;
     const unsettled = await confirmOrder(context, current(), { ...options, check: true });
     assert.equal(unsettled.state, "submitted");
-    assert.match(String(unsettled.verification), /not finalized on the profile's RPC yet/);
+    assert.match(String(unsettled.verification), /not final on the profile's RPC yet/);
     const other = `0x${"bb".repeat(32)}` as Hex;
     await assert.rejects(confirmOrder(context, current(), { ...options, tx: other }), code("DASKI_CONFIRMATION_TX_UNFINALIZED"), "replacement waits for finality");
     await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_UNFINALIZED"), "abandon waits for finality");
@@ -626,7 +626,7 @@ test("the finalized view is established before any canonical read, so a reorgani
     // Block 42 is not finalized on the RPC yet: no canonical read is trusted and the gateway is not asked.
     const early = await confirmOrder(context, current(), { ...options, check: true });
     assert.equal(early.state, "submitted");
-    assert.match(String(early.verification), /not finalized on the profile's RPC yet/);
+    assert.match(String(early.verification), /not final on the profile's RPC yet/);
     assert.equal(calls.filter((call) => call.request.phase === "check").length, 0);
     assert.ok(!chain.log.some((entry) => entry.startsWith("blockHash")), "no canonical read before the RPC reports the height final");
     // Once final on the RPC, the canonical block at 42 is B and the receipt belonged to A.
@@ -670,7 +670,7 @@ test("attestations are read pinned to the RPC's finalized height, after the fina
     chain.log.length = 0;
     const observed = await confirmOrder(context, current(), { ...options, check: true });
     assert.equal(observed.state, "observed");
-    assert.deepEqual(chain.log, ["receipt", "finalized", "blockHash:42", "getAttestation@77", "blockHash:80", "blockHash:42"]);
+    assert.deepEqual(chain.log, ["receipt", "final", "blockHash:42", "getAttestation@77", "blockHash:80", "blockHash:42"]);
   });
   await withStore(async (record) => {
     // The correction predicate follows the same order: finality, canonical block, then the pinned binding.
@@ -682,7 +682,7 @@ test("attestations are read pinned to the RPC's finalized height, after the fina
     chain.log.length = 0;
     const abandoned = await confirmOrder(context, current(), { ...options, abandon: true });
     assert.equal(abandoned.state, "abandoned");
-    assert.deepEqual(chain.log, ["receipt", "finalized", "blockHash:42"]);
+    assert.deepEqual(chain.log, ["receipt", "final", "blockHash:42"]);
   });
   await withStore(async (record) => {
     // An unrelated receipt on a fork the RPC still followed when the block was not yet final is refused, not cleared.
@@ -694,7 +694,7 @@ test("attestations are read pinned to the RPC's finalized height, after the fina
     chain.canonical.set(42n, FORK_A);
     chain.finalized = 41n;
     await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }),
-      (error: unknown) => code("DASKI_CONFIRMATION_TX_UNFINALIZED")(error) && /not finalized yet/.test((error as CliError).message));
+      (error: unknown) => code("DASKI_CONFIRMATION_TX_UNFINALIZED")(error) && /not final yet/.test((error as CliError).message));
     chain.canonical.set(42n, FORK_B);
     chain.finalized = 42n;
     await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }),
@@ -714,7 +714,7 @@ test("a reverted transaction is abandoned only once its block is finalized and c
     assert.equal(early.receipt, "reverted");
     assert.equal(early.revertFinal, false);
     await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }),
-      (error: unknown) => code("DASKI_CONFIRMATION_TX_MAY_EXECUTE")(error) && /not finalized yet/.test((error as CliError).message));
+      (error: unknown) => code("DASKI_CONFIRMATION_TX_MAY_EXECUTE")(error) && /not final yet/.test((error as CliError).message));
     assert.equal(current().confirmationTx?.state, "submitted");
     // Finalized, but on a block the RPC no longer holds canonical: still refused.
     chain.finalized = 42n;

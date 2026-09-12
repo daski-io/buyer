@@ -14,7 +14,7 @@
  */
 import type { PolicyConfig, SignerAdapter, TypedDataRequest } from "@daski/x402-scheme";
 import { getAddress, type Address, type Hex } from "viem";
-import { createChainReader, type ChainReader } from "./chain/reader.js";
+import { createChainReader, finalityTagFor, type ChainReader, type FinalityTag } from "./chain/reader.js";
 import { CliError } from "./cli/errors.js";
 import { applyCapOverrides, loadConfig, type LoadedConfig, type ProfileConfig } from "./config.js";
 import { Catalog } from "./gateway/catalog.js";
@@ -36,7 +36,7 @@ export interface ContextOptions {
   /** The resolved host; defaults to this process's environment and platform. */
   host?: HostEnvironment | undefined;
   /** A chain reader factory; defaults to the profile RPC. Injectable for tests. */
-  chain?: ((rpcUrl: string) => ChainReader) | undefined;
+  chain?: ((rpcUrl: string, finalityTag: FinalityTag) => ChainReader) | undefined;
   /** A well-known document reader; defaults to fetching it. Injectable for tests. */
   metadata?: ((gatewayUrl: string) => Promise<GatewayMetadata>) | undefined;
 }
@@ -103,7 +103,7 @@ export async function createContext(
     resolveSigner = async () => built;
   }
 
-  const chain = (options.chain ?? createChainReader)(profile.rpcUrl);
+  const chain = (options.chain ?? createChainReader)(profile.rpcUrl, finalityTagFor(profile.chainId));
   let metadata: Promise<GatewayMetadata> | undefined;
 
   const policy: PolicyConfig = {

@@ -58,7 +58,7 @@ export interface ConfirmationTxExpected {
 /**
  * A direct-mode confirmation the wallet's own tool submits. `submitted` means
  * a hash was recorded and nothing has been verified yet; `observed` means the
- * receipt, the EAS event, the attestation, and the gateway's finalized read
+ * receipt, the EAS event, the attestation, and the gateway's final read
  * all agree.
  */
 export interface ConfirmationTxRecord {
