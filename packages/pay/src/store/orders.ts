@@ -15,7 +15,7 @@ import { dirname } from "node:path";
 import type { Address, Hex } from "viem";
 import { CliError } from "../cli/errors.js";
 import { ordersPath } from "../paths.js";
-import { withFileLock } from "./lock.js";
+import { withFileLock, withFileLockSync } from "./lock.js";
 
 export type OrderState =
   | "INTENT_RECORDED"
@@ -113,6 +113,28 @@ function read(): OrderFile {
   }
 }
 
+/** How long a whole-file update waits for another process's update. */
+const STORE_LOCK_WAIT_MS = 10_000;
+
+/**
+ * Every read-modify-write of the whole file runs under one store-wide lock:
+ * the file holds every order, so two commands updating different orders
+ * would otherwise read the same version and the later rename would drop the
+ * earlier order's update. The rename only protects against truncation.
+ */
+function withStoreLock<T>(run: () => T): T {
+  return withFileLockSync(`${ordersPath()}.lock`, {
+    waitMs: STORE_LOCK_WAIT_MS,
+    locked: () => new CliError({
+      code: "DASKI_ORDER_STORE_LOCKED",
+      message: "Another daski command is updating the order store.",
+      remediation:
+        "Wait for it to finish, then re-run. If no daski process is running, remove the " +
+        "stale orders.json.lock file.",
+    }),
+  }, run);
+}
+
 /** Writes via a temp file and rename, so a crash cannot truncate the store. */
 function write(file: OrderFile): void {
   const path = ordersPath();
@@ -140,53 +162,55 @@ export function findByIntent(intentId: string): OrderRecord | undefined {
 
 /** Inserts or updates by intent id. The intent id is the stable key. */
 export function upsertOrder(record: OrderRecord): OrderRecord {
-  const file = read();
-  const now = new Date().toISOString();
-  const index = file.orders.findIndex((order) => order.intentId === record.intentId);
-  const merged: OrderRecord = { ...record, updatedAt: now };
-  if (index >= 0) {
-    merged.createdAt = file.orders[index]!.createdAt;
-    file.orders[index] = merged;
-  } else {
-    file.orders.push(merged);
-  }
-  write(file);
-  return merged;
+  return withStoreLock(() => {
+    const file = read();
+    const now = new Date().toISOString();
+    const index = file.orders.findIndex((order) => order.intentId === record.intentId);
+    const merged: OrderRecord = { ...record, updatedAt: now };
+    if (index >= 0) {
+      merged.createdAt = file.orders[index]!.createdAt;
+      file.orders[index] = merged;
+    } else {
+      file.orders.push(merged);
+    }
+    write(file);
+    return merged;
+  });
 }
 
 export function updateOrder(
   intentId: string,
   changes: Partial<Omit<OrderRecord, "intentId" | "createdAt">>,
 ): OrderRecord | undefined {
-  const file = read();
-  const index = file.orders.findIndex((order) => order.intentId === intentId);
-  if (index < 0) return undefined;
-  const merged: OrderRecord = {
-    ...file.orders[index]!,
-    ...changes,
-    updatedAt: new Date().toISOString(),
-  };
-  file.orders[index] = merged;
-  write(file);
-  return merged;
+  return withStoreLock(() => {
+    const file = read();
+    const index = file.orders.findIndex((order) => order.intentId === intentId);
+    if (index < 0) return undefined;
+    const merged: OrderRecord = {
+      ...file.orders[index]!,
+      ...changes,
+      updatedAt: new Date().toISOString(),
+    };
+    file.orders[index] = merged;
+    write(file);
+    return merged;
+  });
 }
 
-/** How long a command waits for another process's update of the same order. */
+/** How long a command waits for another live process's work on the same order. */
 const ORDER_LOCK_WAIT_MS = 10_000;
-/** A confirmation preparation spans gateway and chain calls; older than this is abandoned. */
-const ORDER_LOCK_STALE_MS = 120_000;
 
 /**
  * Serializes one order's confirmation journal across processes. The
  * read-check-write of a preparation spans gateway and chain calls; without
  * the lock two preparations both find nothing pending and the later write
- * drops the earlier validated call's tracking.
+ * drops the earlier validated call's tracking. The lock is reclaimed only
+ * when its owner is gone, never by age: the owner may be waiting on a person.
  */
 export function withOrderLock<T>(intentId: string, run: () => Promise<T>): Promise<T> {
   const name = intentId.replace(/[^A-Za-z0-9._-]/g, "_");
   return withFileLock(`${ordersPath()}.${name}.lock`, {
     waitMs: ORDER_LOCK_WAIT_MS,
-    staleMs: ORDER_LOCK_STALE_MS,
     locked: () => new CliError({
       code: "DASKI_ORDER_LOCKED",
       message: "Another daski command is updating this order's confirmation record.",

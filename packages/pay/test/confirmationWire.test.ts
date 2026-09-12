@@ -44,6 +44,8 @@ const ZERO_UID = `0x${"00".repeat(32)}` as Hex;
 const RECIPIENT = "0x4444444444444444444444444444444444444444" as Address;
 const UID = canonicalHash("attestation");
 const TX = `0x${"aa".repeat(32)}` as Hex;
+const BLOCK_42 = canonicalHash("block-42");
+const BLOCK_50 = canonicalHash("block-50");
 const facts: ConfirmationFacts = {
   chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
   orderKey: canonicalHash("order"), recipient: RECIPIENT, currentUid: ZERO_UID, nonce: "0", submissionsUsed: 0,
@@ -83,9 +85,10 @@ function fixture(accountType: "eoa" | "contract", action: "attest" | "revoke") {
     signTypedData: async (data: TypedDataRequest) => payer.signTypedData(data as never) };
   const reader: ChainReader = {
     getCode: async () => "0x6080", call: async () => ({ data: undefined, reverted: true }),
-    getTransactionReceipt: async () => ({ status: "success", blockNumber: 42n, from: payer.address, logs: [{ address: EAS_PREDEPLOY,
+    getTransactionReceipt: async () => ({ status: "success", blockNumber: 42n, blockHash: BLOCK_42, from: payer.address, logs: [{ address: EAS_PREDEPLOY,
       topics: encodeEventTopics({ abi: EAS_ABI, eventName: action === "attest" ? "Attested" : "Revoked", args: { recipient: RECIPIENT, attester: payer.address, schemaUID: facts.schemaUid } }) as Hex[], data: UID }] }),
     getFinalizedBlockNumber: async () => 100n,
+    getBlockHash: async (number) => number === 42n ? BLOCK_42 : BLOCK_50,
     readContract: async <T,>(args: { functionName: string }): Promise<T> => {
       if (args.functionName === "getAttestation") return { ...attestation, revocationTime: action === "revoke" ? 7n : 0n } as T;
       throw new Error(`unexpected read ${args.functionName}`);
@@ -108,7 +111,7 @@ function fixture(accountType: "eoa" | "contract", action: "attest" | "revoke") {
           ? { submissionsUsed: f.submissionsUsed, finalAttestation: false, call: directCall(action, f) }
           : sponsoredPreparation(action, f));
       }
-      if (request.phase === "check") return json({ confirmedCurrent: { state: "Confirmed", currentUid: action === "attest" ? UID : ZERO_UID }, finalizedBlock: { number: "50", hash: canonicalHash("b") } });
+      if (request.phase === "check") return json({ confirmedCurrent: { state: "Confirmed", currentUid: action === "attest" ? UID : ZERO_UID }, finalizedBlock: { number: "50", hash: BLOCK_50 } });
       return json({ operationId: "op", state: "final" });
     } } } as unknown as CommandContext;
   return { context, sent, facts: f };

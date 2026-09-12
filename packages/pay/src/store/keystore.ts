@@ -62,10 +62,8 @@ const SCRYPT = { N: 1 << 17, r: 8, p: 1 } as const;
 const SCRYPT_MAX = { N: 1 << 18, r: 8, p: 2 } as const;
 const scryptMemory = (N: number, r: number): number => 2 * 128 * N * r;
 const MIN_PASSPHRASE_LENGTH = 8;
-/** How long a store update waits for another process's lock before giving up. */
+/** How long a store update waits for another live process's lock before giving up. */
 const LOCK_WAIT_MS = 30_000;
-/** A lock older than this belongs to a process that died holding it. */
-const LOCK_STALE_MS = 60_000;
 
 export type KeySource = "keychain" | "encrypted-file" | "environment";
 
@@ -290,7 +288,6 @@ function withKeystoreLock<T>(path: string, run: () => Promise<T>): Promise<T> {
   const lock = `${path}.lock`;
   return withFileLock(lock, {
     waitMs: LOCK_WAIT_MS,
-    staleMs: LOCK_STALE_MS,
     locked: () => new CliError({
       code: "DASKI_KEYSTORE_LOCKED",
       message: `Another process holds the keystore lock ${lock}.`,

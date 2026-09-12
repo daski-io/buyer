@@ -18,15 +18,22 @@
  * receipt succeeded, the pinned EAS emitted the matching event with the payer
  * as attester, `getAttestation` binds the attestation to what was prepared,
  * and the gateway's finalized read, anchored at or past the receipt's block,
- * shows the result. `--abandon` clears the local record when no hash is
- * recorded or the receipt is a revert, and cancels nothing at the wallet. A
- * hash recorded by mistake is corrected (replaced with `--tx`, or cleared
- * with `--abandon`) only once its transaction is finalized and provably not
+ * shows the result. Evidence is bound to the canonical chain: the receipt's
+ * block must be the chain's block at that height as the profile's RPC
+ * reports it, and the gateway's finalized block must be that RPC's canonical
+ * block at its height, so the receipt's block is a finalized ancestor of the
+ * anchor. A batched receipt may carry other orders' events first; every
+ * candidate event is tried and the one whose attestation binds is taken.
+ * `--abandon` clears the local record when no hash is recorded or the receipt
+ * is a revert, and cancels nothing at the wallet. A hash recorded by mistake
+ * is corrected (replaced with `--tx`, or cleared with `--abandon`) only once
+ * its transaction is canonical and finalized and no candidate event binds to
  * this call; a missing, pending, or matching receipt keeps the record.
  *
  * One order's journal is updated under a per-order lock: the read-check-write
  * of a preparation spans gateway and chain calls, and two concurrent
- * preparations must not both find nothing pending.
+ * preparations must not both find nothing pending. The signer is resolved
+ * before the lock, so no passphrase prompt runs inside it.
  */
 import { canonicalHash, type SignerDescription, type TypedDataRequest } from "@daski/x402-scheme";
 import {
@@ -292,6 +299,9 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
   factsReader = readConfirmationFacts): Promise<Record<string, unknown>> {
   const handle = record.handle ?? options.handle;
   if (options.tx !== undefined || options.check || options.abandon) {
+    // Only --check signs (the gateway's check authorization); the signer is
+    // resolved before the lock so a passphrase prompt never runs inside it.
+    if (options.check) await context.resolveSigner();
     return withOrderLock(record.intentId, () => manageDirectRecord(context, latest(record), options));
   }
   const choice: Choice | undefined = options.revoke ? "revoke"
@@ -303,6 +313,9 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
   const call = (action: "confirmation" | "revoke-confirmation", request: Record<string, unknown>) => callAuthorizedLifecycleTool({
     client: context.client, signer: context.signer, toolName: action === "confirmation" ? "daski_confirm_delivery" : "daski_revoke_delivery_confirmation",
     action, orderHandle: handle, request, chainId: context.profile.chainId, gatewayUrl: context.profile.gatewayUrl });
+  // Every path below signs something; building the signer may prompt a
+  // person, which must not happen while the order's lock is held.
+  const signer = await context.resolveSigner();
 
   return withOrderLock(record.intentId, async () => {
     record = latest(record);
@@ -313,7 +326,6 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
       if (options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING", message: "There is no pending review submission.",
         remediation: "Check order status, then supply the user's review choice if a new review is wanted." });
       const action = options.revoke ? "revoke-confirmation" : "confirmation";
-      const signer = await context.resolveSigner();
       const mode = selectConfirmationMode(signer.describe(), options.submission);
       if (mode === "direct" && isPendingDirect(record.confirmationTx)) throw directPending(handle, record.confirmationTx!);
       const facts = await factsReader(context, record);
@@ -471,12 +483,13 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
     let corrected: { previousTxHash: Hex; reason: string } | undefined;
     if (tracked.state === "submitted" && tracked.txHash !== txHash) {
       // Replacing a recorded hash is a journal correction, allowed only once the
-      // recorded transaction is finalized and provably not the prepared call.
+      // recorded transaction is canonical, finalized, and provably not the
+      // prepared call.
       const unrelated = await provenUnrelated(context, tracked, handle);
       if (!unrelated) throw new CliError({ code: "DASKI_CONFIRMATION_TX_ALREADY_RECORDED",
         message: `Transaction ${tracked.txHash} is already recorded for this confirmation.`,
         remediation: `Verify it with daski order confirm ${handle} --check. A recorded hash is replaced only once its ` +
-          "transaction is finalized and carries no matching EAS event; if it reverted, --abandon clears it first." });
+          "transaction is finalized and carries no event that binds to the prepared call; if it reverted, --abandon clears it first." });
       corrected = { previousTxHash: tracked.txHash!, reason: unrelated };
     }
     updateOrder(record.intentId, { confirmationTx: { ...tracked, txHash, state: "submitted" } });
@@ -488,7 +501,7 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
   if (options.check) return checkDirectRecord(context, record, tracked, handle, base);
 
   // --abandon: only when nothing recorded can still execute, or the recorded
-  // transaction is finalized and provably not this call.
+  // transaction is canonical, finalized, and provably not this call.
   let unrelatedReceipt: string | undefined;
   if (tracked.txHash) {
     const receipt = await context.chain.getTransactionReceipt(tracked.txHash);
@@ -512,10 +525,21 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
 }
 
 /**
- * The reason a recorded, successful, finalized transaction is provably not
- * the prepared call, or null when it is (or may be) this call. A related
- * receipt keeps the record; an unrelated one that is not yet finalized is
- * refused until it is, so a reorg cannot turn a correction into a lost call.
+ * The receipt's block is the chain's canonical block at that height, as the
+ * profile's RPC reports the chain now. A receipt whose block was replaced
+ * proves nothing: the transaction may be re-included or dropped.
+ */
+async function receiptCanonical(context: CommandContext, receipt: TransactionReceiptLike): Promise<boolean> {
+  return sameHex(await context.chain.getBlockHash(receipt.blockNumber), receipt.blockHash);
+}
+
+/**
+ * The reason a recorded, successful transaction is provably not the prepared
+ * call, or null when it is (or may be) this call. Proof requires the receipt
+ * to be canonical and finalized, and no candidate event to bind. A related
+ * receipt keeps the record; an unrelated one that is not yet canonical and
+ * finalized is refused until it is, so a reorg cannot turn a correction into
+ * a lost call.
  */
 async function provenUnrelated(context: CommandContext, tracked: ConfirmationTxRecord, handle: string,
   known?: TransactionReceiptLike): Promise<string | null> {
@@ -524,16 +548,18 @@ async function provenUnrelated(context: CommandContext, tracked: ConfirmationTxR
   if (!receipt || receipt.status !== "success") return null;
   let reason: string;
   try {
-    const uid = confirmationEventUid(receipt, context.profile.easAddress, tracked, context.payerAddress);
-    assertAttestationBinding(await readAttestation(context.chain, context.profile.easAddress, uid), tracked, uid);
+    await boundConfirmationUid(context, receipt, tracked);
     return null;
   } catch (error) {
     if (!(error instanceof CliError) || error.code !== "DASKI_CONFIRMATION_RECEIPT_UNRELATED") throw error;
     reason = error.message;
   }
+  if (!(await receiptCanonical(context, receipt))) throw new CliError({ code: "DASKI_CONFIRMATION_TX_UNFINALIZED",
+    message: `Transaction ${tracked.txHash} carries no event that binds to the prepared call, but the block that carried it is not the chain's canonical block at height ${receipt.blockNumber}.`,
+    remediation: `The transaction may be re-included or dropped. Wait, then repeat the same daski order confirm ${handle} command.` });
   const finalized = await context.chain.getFinalizedBlockNumber();
   if (receipt.blockNumber > finalized) throw new CliError({ code: "DASKI_CONFIRMATION_TX_UNFINALIZED",
-    message: `Transaction ${tracked.txHash} carries no matching EAS event but is not finalized yet (block ${receipt.blockNumber}, finalized ${finalized}).`,
+    message: `Transaction ${tracked.txHash} carries no event that binds to the prepared call but is not finalized yet (block ${receipt.blockNumber}, finalized ${finalized}).`,
     remediation: `Wait for finality (minutes to tens of minutes on Base), then repeat the same daski order confirm ${handle} command.` });
   return reason;
 }
@@ -555,11 +581,12 @@ async function checkDirectRecord(context: CommandContext, record: OrderRecord, t
     return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "reverted",
       next: `The transaction reverted. Clear the record with daski order confirm ${handle} --abandon, then prepare again.` };
   }
-  const payer = context.payerAddress;
-  const easAddress = context.profile.easAddress;
-  const uid = confirmationEventUid(receipt, easAddress, tracked, payer);
-  const attestation = await readAttestation(context.chain, easAddress, uid);
-  assertAttestationBinding(attestation, tracked, uid);
+  if (!(await receiptCanonical(context, receipt))) {
+    return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "reorganized",
+      verification: `the block that carried the transaction is not the chain's canonical block at height ${receipt.blockNumber}`,
+      next: `The transaction may be re-included or dropped. Run daski order confirm ${handle} --check again later.` };
+  }
+  const uid = await boundConfirmationUid(context, receipt, tracked);
   const check = await callAuthorizedLifecycleTool({
     client: context.client, signer: context.signer,
     toolName: tracked.action === "attest" ? "daski_confirm_delivery" : "daski_revoke_delivery_confirmation",
@@ -567,15 +594,25 @@ async function checkDirectRecord(context: CommandContext, record: OrderRecord, t
     orderHandle: handle, request: { phase: "check", submission: "direct" },
     chainId: context.profile.chainId, gatewayUrl: context.profile.gatewayUrl,
   });
-  if (!finalizedReflects(check, tracked, uid, receipt.blockNumber)) {
-    return { ...base, txHash: tracked.txHash, uid, state: "submitted", receipt: "success",
-      verification: "the receipt, the EAS event and the attestation match the prepared call; the gateway's finalized read does not show it yet",
-      check,
-      next: `Finality on Base takes minutes to tens of minutes. Run daski order confirm ${handle} --check again later.` };
+  const notYet = (verification: string) => ({ ...base, txHash: tracked.txHash, uid, state: "submitted", receipt: "success",
+    verification, check,
+    next: `Finality on Base takes minutes to tens of minutes. Run daski order confirm ${handle} --check again later.` });
+  const anchor = finalizedAnchor(check);
+  if (!anchor || anchor.number < receipt.blockNumber) {
+    return notYet("the receipt, the EAS event and the attestation match the prepared call; the gateway's finalized read is not past the receipt's block yet");
+  }
+  // The gateway's finalized block must be this RPC's canonical block at its
+  // height; the receipt's canonical block at a lower or equal height is then
+  // its finalized ancestor, so the receipt's effect is what the anchor shows.
+  if (!sameHex(await context.chain.getBlockHash(anchor.number), anchor.hash)) {
+    return notYet(`the gateway's finalized block ${anchor.number} is not the chain's canonical block at that height as the profile's RPC reports it`);
+  }
+  if (!finalizedReflects(check, tracked, uid)) {
+    return notYet("the receipt, the EAS event and the attestation match the prepared call; the gateway's finalized read does not show it yet");
   }
   updateOrder(record.intentId, { confirmationTx: { ...tracked, uid, state: "observed" }, readCapability: undefined });
   return { ...base, txHash: tracked.txHash, uid, state: "observed", receipt: "success",
-    observedBlock: receipt.blockNumber.toString(), check };
+    observedBlock: receipt.blockNumber.toString(), finalizedBlock: anchor.number.toString(), check };
 }
 
 function unrelatedReceipt(reason: string): CliError {
@@ -589,9 +626,15 @@ function unrelatedReceipt(reason: string): CliError {
   });
 }
 
-/** The uid of the Attested or Revoked event the pinned EAS emitted for this payer and schema. */
-function confirmationEventUid(receipt: TransactionReceiptLike, easAddress: Address, tracked: ConfirmationTxRecord, payer: Address): Hex {
+/**
+ * Every Attested or Revoked event the pinned EAS emitted in the receipt for
+ * this payer and the confirmation schema (for a revocation, of the revoked
+ * uid). A smart-wallet batch can carry several orders' events, so all are
+ * candidates.
+ */
+function candidateEventUids(receipt: TransactionReceiptLike, easAddress: Address, tracked: ConfirmationTxRecord, payer: Address): { uids: Hex[]; sawEas: boolean } {
   const wanted = tracked.action === "attest" ? "Attested" : "Revoked";
+  const uids: Hex[] = [];
   let sawEas = false;
   for (const log of receipt.logs) {
     if (!isAddressEqual(log.address, easAddress)) continue;
@@ -606,39 +649,70 @@ function confirmationEventUid(receipt: TransactionReceiptLike, easAddress: Addre
     const args = decoded.args as { recipient: Address; attester: Address; uid: Hex; schemaUID: Hex };
     if (!sameHex(args.schemaUID, tracked.expected.schema) || !isAddressEqual(args.attester, payer)) continue;
     if (tracked.action === "revoke" && !sameHex(args.uid, tracked.expected.uid ?? "")) continue;
-    return args.uid;
+    uids.push(args.uid);
   }
-  throw unrelatedReceipt(sawEas
-    ? `no ${wanted} event for the confirmation schema with the payer as attester`
-    : `no log was emitted by the pinned EAS ${easAddress}`);
-}
-
-/** Events do not carry refUID, recipient or data; the attestation itself must. */
-function assertAttestationBinding(attestation: Attestation, tracked: ConfirmationTxRecord, uid: Hex): void {
-  const expected = tracked.expected;
-  if (!sameHex(attestation.uid, uid)) throw unrelatedReceipt("the EAS holds no attestation for the event's uid");
-  if (!sameHex(attestation.schema, expected.schema)) throw unrelatedReceipt("the attestation's schema differs");
-  if (!sameHex(attestation.refUID, expected.refUID)) throw unrelatedReceipt("the attestation's refUID differs from the prepared call");
-  if (!isAddressEqual(attestation.recipient, expected.recipient)) throw unrelatedReceipt("the attestation's recipient differs from the prepared call");
-  if (!sameHex(keccak256(attestation.data), expected.dataHash)) throw unrelatedReceipt("the attestation's data differs from the prepared call");
-  if (tracked.action === "revoke" && attestation.revocationTime === 0n) throw unrelatedReceipt("the attestation is not revoked");
+  return { uids, sawEas };
 }
 
 /**
- * The gateway's finalized read shows the transaction's effect: its finalized
- * block is at or past the receipt's block, and the current uid is the new
- * attestation (attest) or no longer the revoked one (revoke). A finalized
- * read from before the receipt proves nothing, whatever uid it carries.
+ * The uid among the receipt's candidate events whose attestation binds to
+ * the prepared call, or DASKI_CONFIRMATION_RECEIPT_UNRELATED when none does.
+ * The attestation is read at the latest state: a uid commits to every field
+ * the binding checks, so the same uid never names different content on any
+ * fork, and a revocation time only ever moves from zero.
  */
-function finalizedReflects(check: Record<string, unknown>, tracked: ConfirmationTxRecord, uid: Hex, receiptBlock: bigint): boolean {
+async function boundConfirmationUid(context: CommandContext, receipt: TransactionReceiptLike, tracked: ConfirmationTxRecord): Promise<Hex> {
+  const easAddress = context.profile.easAddress;
+  const { uids, sawEas } = candidateEventUids(receipt, easAddress, tracked, context.payerAddress);
+  const wanted = tracked.action === "attest" ? "Attested" : "Revoked";
+  if (uids.length === 0) {
+    throw unrelatedReceipt(sawEas
+      ? `no ${wanted} event for the confirmation schema with the payer as attester`
+      : `no log was emitted by the pinned EAS ${easAddress}`);
+  }
+  const mismatches: string[] = [];
+  for (const uid of uids) {
+    const mismatch = bindingMismatch(await readAttestation(context.chain, easAddress, uid), tracked, uid);
+    if (!mismatch) return uid;
+    mismatches.push(mismatch);
+  }
+  throw unrelatedReceipt(mismatches.length === 1
+    ? mismatches[0]!
+    : `none of the ${uids.length} candidate events binds to the prepared call (${mismatches.join("; ")})`);
+}
+
+/** Events do not carry refUID, recipient or data; the attestation itself must. Returns the first mismatch, or null. */
+function bindingMismatch(attestation: Attestation, tracked: ConfirmationTxRecord, uid: Hex): string | null {
+  const expected = tracked.expected;
+  if (!sameHex(attestation.uid, uid)) return "the EAS holds no attestation for the event's uid";
+  if (!sameHex(attestation.schema, expected.schema)) return "the attestation's schema differs";
+  if (!sameHex(attestation.refUID, expected.refUID)) return "the attestation's refUID differs from the prepared call";
+  if (!isAddressEqual(attestation.recipient, expected.recipient)) return "the attestation's recipient differs from the prepared call";
+  if (!sameHex(keccak256(attestation.data), expected.dataHash)) return "the attestation's data differs from the prepared call";
+  if (tracked.action === "revoke" && attestation.revocationTime === 0n) return "the attestation is not revoked";
+  return null;
+}
+
+/** The gateway's finalized block view (`{ number, hash }`, number a decimal string), or null. */
+function finalizedAnchor(check: Record<string, unknown>): { number: bigint; hash: Hex } | null {
+  const anchor = check.finalizedBlock;
+  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) return null;
+  const { number, hash } = anchor as { number?: unknown; hash?: unknown };
+  if (typeof number !== "string" || !/^\d+$/.test(number) || typeof hash !== "string" || !HEX32.test(hash)) return null;
+  return { number: BigInt(number), hash: hash.toLowerCase() as Hex };
+}
+
+/**
+ * The gateway's finalized read shows the transaction's effect: the current
+ * uid is the new attestation (attest) or no longer the revoked one (revoke).
+ * The caller has established that the anchor is at or past the receipt's
+ * block and canonical on the profile's RPC.
+ */
+function finalizedReflects(check: Record<string, unknown>, tracked: ConfirmationTxRecord, uid: Hex): boolean {
   const finalized = check.confirmedCurrent;
   if (!finalized || typeof finalized !== "object" || Array.isArray(finalized)) return false;
   const current = (finalized as { currentUid?: unknown }).currentUid;
   if (typeof current !== "string") return false;
-  const anchor = check.finalizedBlock;
-  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) return false;
-  const number = (anchor as { number?: unknown }).number;
-  if (typeof number !== "string" || !/^\d+$/.test(number) || BigInt(number) < receiptBlock) return false;
   return tracked.action === "attest" ? sameHex(current, uid) : !sameHex(current, tracked.expected.uid ?? "");
 }
 

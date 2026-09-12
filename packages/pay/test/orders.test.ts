@@ -10,18 +10,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as store from "../src/store/orders.js";
 
-/** Each test gets its own DASKI_HOME; the store reads the env on every call. */
+/** Each test gets its own DASKI_HOME; the store reads the env on every call. An async body keeps its home until it settles. */
 function withHome<T>(run: () => T): T {
   const previous = process.env.DASKI_HOME;
   const home = mkdtempSync(join(tmpdir(), "daski-orders-"));
   process.env.DASKI_HOME = home;
-  try {
-    return run();
-  } finally {
+  const cleanup = () => {
     if (previous === undefined) delete process.env.DASKI_HOME;
     else process.env.DASKI_HOME = previous;
     rmSync(home, { recursive: true, force: true });
+  };
+  let result: T;
+  try {
+    result = run();
+  } catch (error) {
+    cleanup();
+    throw error;
   }
+  if (result instanceof Promise) return result.finally(cleanup) as T;
+  cleanup();
+  return result;
 }
 
 const BASE = {
@@ -115,5 +123,40 @@ test("an intent the gateway refused before settlement consumes no session budget
     assert.equal(store.isUnspent(store.findByIntent("int_unsigned")!), true);
     assert.equal(store.isUnspent(store.findByIntent("int_pending")!), false);
     assert.equal(store.isUnspent(store.findByIntent("int_paid")!), false);
+  });
+});
+
+test("updates to different orders from concurrent processes are never lost", async () => {
+  const { spawn } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const { readFileSync } = await import("node:fs");
+  await withHome(async () => {
+    const home = process.env.DASKI_HOME!;
+    const ids = ["one", "two", "three"];
+    for (const id of ids) store.upsertOrder({ ...BASE, intentId: id, state: "SUBMITTED", handle: `ord_${id}` });
+    const module = fileURLToPath(new URL("../src/store/orders.js", import.meta.url));
+    const rounds = 25;
+    // Each child updates only its own order, 25 times; the store holds every
+    // order in one file, so without the store-wide lock a child's rename can
+    // discard another child's update.
+    const script = `const { updateOrder } = await import(${JSON.stringify(module)});
+      const [id, rounds] = process.argv.slice(1);
+      for (let i = 0; i < Number(rounds); i += 1) updateOrder(id, { amount: String(i), handle: "ord_" + id + "_" + i });`;
+    const children = ids.map((id) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script, "--", id, String(rounds)],
+        { env: { ...process.env, DASKI_HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("error", reject);
+      child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`child ${id} exited ${code}: ${stderr}`)));
+    }));
+    await Promise.all(children);
+    const orders = (JSON.parse(readFileSync(join(home, "orders.json"), "utf8")) as { orders: store.OrderRecord[] }).orders;
+    for (const id of ids) {
+      const order = orders.find((candidate) => candidate.intentId === id);
+      assert.equal(order?.amount, String(rounds - 1), `every update to ${id} survived`);
+      assert.equal(order?.handle, `ord_${id}_${rounds - 1}`);
+    }
+    assert.equal(orders.length, ids.length);
   });
 });

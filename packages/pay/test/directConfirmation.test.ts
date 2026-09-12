@@ -35,6 +35,8 @@ const facts: ConfirmationFacts = {
 };
 const TX = `0x${"aa".repeat(32)}` as Hex;
 const UID = canonicalHash("new attestation");
+/** The canonical chain of the fixture RPC: block n has hash canonicalHash("block-n") unless a test overrides it. */
+const blockHashAt = (number: bigint): Hex => canonicalHash(`block-${number}`);
 
 function attestCall(f: ConfirmationFacts = facts, choice: "Confirmed" | "NotConfirmed" = "Confirmed"): DirectCall {
   const data = confirmationData(f.orderKey, choice);
@@ -58,10 +60,10 @@ const description = (accountType: SignerDescription["accountType"]): SignerDescr
   ({ provider: accountType === "contract" ? "circle-agent" : "local", accountType, conformance: "verified" });
 
 /** A receipt carrying one EAS event, optionally from another contract. */
-function receipt(args: { event?: "Attested" | "Revoked"; emitter?: Address; attester?: Address; schema?: Hex; uid?: Hex; status?: "success" | "reverted" } = {}): TransactionReceiptLike {
+function receipt(args: { event?: "Attested" | "Revoked"; emitter?: Address; attester?: Address; schema?: Hex; uid?: Hex; status?: "success" | "reverted"; blockHash?: Hex } = {}): TransactionReceiptLike {
   const topics = encodeEventTopics({ abi: EAS_ABI, eventName: args.event ?? "Attested",
     args: { recipient: RECIPIENT, attester: args.attester ?? payer.address, schemaUID: args.schema ?? facts.schemaUid } });
-  return { status: args.status ?? "success", blockNumber: 42n, from: payer.address,
+  return { status: args.status ?? "success", blockNumber: 42n, blockHash: args.blockHash ?? blockHashAt(42n), from: payer.address,
     logs: [{ address: args.emitter ?? EAS_PREDEPLOY, topics: topics as Hex[], data: args.uid ?? UID }] };
 }
 
@@ -74,7 +76,11 @@ const attestation = (overrides: Partial<Attestation> = {}): Attestation => ({
 interface Fixture {
   context: CommandContext;
   calls: { name: string; request: Record<string, unknown> }[];
-  chain: { receipt: TransactionReceiptLike | null; attestation: Attestation; record?: Record<string, unknown>; finalized: bigint };
+  chain: { receipt: TransactionReceiptLike | null; attestation: Attestation; record?: Record<string, unknown>; finalized: bigint;
+    /** Canonical block hashes the fixture RPC reports, by height; defaults to blockHashAt. */
+    canonical: Map<bigint, Hex>;
+    /** Attestations by uid for batched receipts; falls back to `attestation`. */
+    attestations: Map<Hex, Attestation> };
   gateway: { prepared: Record<string, unknown>; check: Record<string, unknown>; eas: Address };
 }
 
@@ -83,7 +89,7 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
   const signer = { getAddress: async () => payer.address, describe: () => description(accountType),
     signTypedData: async (data: TypedDataRequest) => payer.signTypedData(data as never) };
   const calls: Fixture["calls"] = [];
-  const chainState: Fixture["chain"] = { receipt: null, attestation: attestation(), finalized: 100n };
+  const chainState: Fixture["chain"] = { receipt: null, attestation: attestation(), finalized: 100n, canonical: new Map(), attestations: new Map() };
   const gateway: Fixture["gateway"] = { prepared: { submissionsUsed: 0, revocationAvailable: false, finalAttestation: false, call: attestCall() },
     check: { lastObserved: null, confirmedCurrent: null, submissionsUsed: 0, observedBlock: null, finalizedBlock: null }, eas: EAS_PREDEPLOY };
   const reader: ChainReader = {
@@ -91,8 +97,9 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
     call: async () => ({ data: undefined, reverted: true }),
     getTransactionReceipt: async (hash) => { assert.equal(hash, TX); return chainState.receipt; },
     getFinalizedBlockNumber: async () => chainState.finalized,
+    getBlockHash: async (number) => chainState.canonical.get(number) ?? blockHashAt(number),
     readContract: async <T,>(args: { functionName: string; args: readonly unknown[] }): Promise<T> => {
-      if (args.functionName === "getAttestation") return chainState.attestation as T;
+      if (args.functionName === "getAttestation") return (chainState.attestations.get(args.args[0] as Hex) ?? chainState.attestation) as T;
       if (args.functionName === "getNonce") return 0n as T;
       if (args.functionName === "getRecord") return (chainState.record ?? {}) as T;
       throw new Error(`unexpected read ${args.functionName}`);
@@ -134,8 +141,8 @@ async function withStore(run: (record: OrderRecord) => Promise<void>): Promise<v
 }
 
 const current = () => findByIntent("intent")!;
-/** The gateway's block view: a decimal string and a hash. */
-const block = (number: number) => ({ number: String(number), hash: canonicalHash(`block-${number}`) });
+/** The gateway's block view: a decimal string and the canonical hash at that height. */
+const block = (number: number, hash = blockHashAt(BigInt(number))) => ({ number: String(number), hash });
 const factsReader = (f: ConfirmationFacts = facts) => async () => f;
 const options = { handle: "handle", json: true };
 
@@ -474,5 +481,102 @@ test("a sponsorship refusal raised before admission clears the journal so direct
     const direct = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader());
     assert.equal(direct.mode, "direct");
     assert.equal(current().confirmationTx?.state, "prepared");
+  });
+});
+
+test("a batched receipt with another order's event first is still bound to the prepared call through the event that matches", async () => {
+  await withStore(async (record) => {
+    const { context, chain, gateway } = fixture("contract");
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    const OTHER_UID = canonicalHash("another order's attestation");
+    const batched = receipt();
+    chain.receipt = { ...batched, logs: [...receipt({ uid: OTHER_UID }).logs, ...batched.logs] };
+    chain.attestations.set(OTHER_UID, attestation({ uid: OTHER_UID, data: confirmationData(canonicalHash("another order"), "Confirmed") }));
+    chain.attestations.set(UID, attestation());
+    chain.finalized = 42n;
+    // Related through the second event: neither replacement nor abandonment is a correction.
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, tx: `0x${"bb".repeat(32)}` }), code("DASKI_CONFIRMATION_TX_ALREADY_RECORDED"));
+    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID, submissionsUsed: 1 }, finalizedBlock: block(42) };
+    const observed = await confirmOrder(context, current(), { ...options, check: true });
+    assert.equal(observed.state, "observed");
+    assert.equal(observed.uid, UID, "the binding event, not the first one");
+    // A batch in which no candidate binds is unrelated, naming every candidate's mismatch.
+    const again = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed" }, factsReader({ ...facts, currentUid: UID, submissionsUsed: 1 }))
+      .catch(() => undefined);
+    void again;
+  });
+  await withStore(async (record) => {
+    const { context, chain } = fixture("contract");
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    const A = canonicalHash("a"); const B = canonicalHash("b");
+    const base = receipt();
+    chain.receipt = { ...base, logs: [...receipt({ uid: A }).logs, ...receipt({ uid: B }).logs] };
+    chain.attestations.set(A, attestation({ uid: A, refUID: canonicalHash("x") }));
+    chain.attestations.set(B, attestation({ uid: B, data: confirmationData(canonicalHash("other"), "Confirmed") }));
+    await assert.rejects(confirmOrder(context, current(), { ...options, check: true }),
+      (error: unknown) => code("DASKI_CONFIRMATION_RECEIPT_UNRELATED")(error) && /none of the 2 candidate events/.test((error as CliError).message));
+    chain.finalized = 42n;
+    assert.equal((await confirmOrder(context, current(), { ...options, abandon: true })).state, "abandoned");
+  });
+});
+
+test("evidence is bound to the canonical chain: a replaced receipt block or a non-canonical finalized anchor never marks the record observed", async () => {
+  await withStore(async (record) => {
+    const active = { ...facts, currentUid: UID, submissionsUsed: 1 };
+    const { context, chain, gateway } = fixture("contract");
+    gateway.prepared = { submissionsUsed: 1, revocationAvailable: true, finalAttestation: false, call: revokeCall(active) };
+    await confirmOrder(context, record, { ...options, revoke: true }, factsReader(active));
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    const fork = canonicalHash("fork block 42");
+    // The receipt and the attestation came from a fork the RPC still follows; the gateway's finalized block at the same height differs.
+    chain.receipt = receipt({ event: "Revoked", blockHash: fork });
+    chain.canonical.set(42n, fork);
+    chain.attestation = attestation({ revocationTime: 43n });
+    gateway.check = { confirmedCurrent: { state: "Pending", currentUid: ZERO_UID, submissionsUsed: 0 }, finalizedBlock: block(42, canonicalHash("canonical block 42")) };
+    const forked = await confirmOrder(context, current(), { ...options, check: true });
+    assert.equal(forked.state, "submitted");
+    assert.match(String(forked.verification), /not the chain's canonical block at that height/);
+    // The RPC has moved to the canonical chain: the receipt's block is no longer canonical.
+    chain.canonical.set(42n, canonicalHash("canonical block 42"));
+    const replaced = await confirmOrder(context, current(), { ...options, check: true });
+    assert.equal(replaced.state, "submitted");
+    assert.equal(replaced.receipt, "reorganized");
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"), "a related receipt is never abandoned");
+    // Re-included on the canonical chain: observed.
+    chain.receipt = receipt({ event: "Revoked", blockHash: canonicalHash("canonical block 42") });
+    const observed = await confirmOrder(context, current(), { ...options, check: true });
+    assert.equal(observed.state, "observed");
+    assert.equal(observed.finalizedBlock, "42");
+  });
+  await withStore(async (record) => {
+    // An unrelated receipt whose block is not canonical cannot be used as a correction either.
+    const { context, chain } = fixture("contract");
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    chain.receipt = receipt({ emitter: REPUTATION, blockHash: canonicalHash("orphaned") });
+    chain.finalized = 42n;
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }),
+      (error: unknown) => code("DASKI_CONFIRMATION_TX_UNFINALIZED")(error) && /not the chain's canonical block/.test((error as CliError).message));
+    await assert.rejects(confirmOrder(context, current(), { ...options, tx: `0x${"bb".repeat(32)}` }), code("DASKI_CONFIRMATION_TX_UNFINALIZED"));
+    assert.equal(current().confirmationTx?.txHash, TX);
+  });
+});
+
+test("the signer is resolved before the order lock, so a prompt never holds it", async () => {
+  await withStore(async (record) => {
+    const { context } = fixture("contract");
+    const home = process.env.DASKI_HOME!;
+    const original = context.resolveSigner;
+    let lockSeenDuringResolve: boolean | undefined;
+    context.resolveSigner = async () => {
+      const { existsSync } = await import("node:fs");
+      lockSeenDuringResolve = existsSync(join(home, "orders.json.intent.lock"));
+      return original();
+    };
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    assert.equal(lockSeenDuringResolve, false);
   });
 });

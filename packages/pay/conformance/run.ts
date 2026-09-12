@@ -127,6 +127,8 @@ async function main(): Promise<number> {
   let orderHandle: string | undefined;
   let firstAttemptAccepted = false;
   let specTier: "spec-01" | "fallback" = "fallback";
+  /** What the confirmation step proved: a sponsored submission, or a direct call prepared for the wallet's own tool. */
+  let confirmation: Record<string, unknown> | null = null;
 
   try {
     // -- doctor ------------------------------------------------------------
@@ -215,11 +217,18 @@ async function main(): Promise<number> {
           }));
           if (result.mode === "direct") {
             // A contract signer ends at the validated call: this CLI never sends
-            // a transaction, and the wallet's own tool submits it outside the suite.
+            // a transaction. The call is kept with the run for the wallet's own
+            // tool, and this step is preparation evidence only; conformance for
+            // a contract wallet also needs the --tx record and an observed --check.
+            const kept = join(runDirectory, "direct-call.json");
+            writeFileSync(kept, `${JSON.stringify({ orderHandle, callHash: result.callHash, call: result.call, next: result.next }, null, 2)}\n`, { mode: 0o600 });
+            confirmation = { mode: "direct", evidence: "prepared-only", callHash: String(result.callHash), call: kept };
             process.stderr.write(
-              `       direct call validated (${String(result.callHash)}); submit it with the wallet's tool, ` +
-              `then: daski order confirm ${orderHandle} --tx <hash> and --check\n`,
+              `       direct call validated (${String(result.callHash)}) and written to ${kept}; PREPARATION ONLY. ` +
+              `Submit it with the wallet's tool, then: daski order confirm ${orderHandle} --tx <hash> and --check\n`,
             );
+          } else {
+            confirmation = { mode: "sponsored", evidence: "submitted", state: String(result.state ?? "") };
           }
           return result;
         });
@@ -262,6 +271,7 @@ async function main(): Promise<number> {
     specTier,
     orderHandle: orderHandle ?? null,
     firstAttemptAccepted,
+    confirmation,
     gatewayCalls: calls.length,
     steps,
     passed: failed.length === 0 && exitCode === 0,

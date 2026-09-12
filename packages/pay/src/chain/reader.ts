@@ -30,6 +30,8 @@ export interface ReceiptLog {
 export interface TransactionReceiptLike {
   status: "success" | "reverted";
   blockNumber: bigint;
+  /** The block that carried the transaction, compared with the canonical block at that height. */
+  blockHash: Hex;
   from: Address;
   logs: readonly ReceiptLog[];
 }
@@ -49,6 +51,8 @@ export interface ChainReader {
   getTransactionReceipt(hash: Hex): Promise<TransactionReceiptLike | null>;
   /** The number of the newest block the chain reports as finalized. */
   getFinalizedBlockNumber(): Promise<bigint>;
+  /** The hash of the canonical block at a height, as this RPC reports the chain now. */
+  getBlockHash(blockNumber: bigint): Promise<Hex>;
   readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }): Promise<T>;
 }
 
@@ -95,6 +99,7 @@ export function createChainReader(rpcUrl: string, timeoutMs = ERC1271_CALL_TIMEO
         return {
           status: receipt.status,
           blockNumber: receipt.blockNumber,
+          blockHash: receipt.blockHash,
           from: receipt.from,
           logs: receipt.logs.map((log) => ({ address: log.address, topics: log.topics, data: log.data })),
         };
@@ -108,6 +113,13 @@ export function createChainReader(rpcUrl: string, timeoutMs = ERC1271_CALL_TIMEO
     async getFinalizedBlockNumber() {
       try {
         return (await client.getBlock({ blockTag: "finalized" })).number;
+      } catch (error) {
+        throw rpcUnavailable(rpcUrl, error);
+      }
+    },
+    async getBlockHash(blockNumber) {
+      try {
+        return (await client.getBlock({ blockNumber })).hash;
       } catch (error) {
         throw rpcUnavailable(rpcUrl, error);
       }

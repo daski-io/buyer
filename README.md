@@ -43,7 +43,7 @@ daski order confirm <handle> --choice Confirmed|NotConfirmed --json
 daski order revoke-confirmation <handle> --json
 ```
 
-The CLI picks the mode by signer. Plain wallets are sponsored: the CLI rebuilds the review message from chain facts, the wallet signs, and Daski submits it; on `CONFIRMATION_SUBMISSION_PENDING` run `--resume`. Contract wallets submit directly: the CLI validates the prepared EAS call against chain facts and the profile's pinned EAS address, prints it, and sends nothing; submit it with the wallet's own tool, then `--tx <hash>` records it and `--check` verifies the receipt, the attestation, and the gateway's finalized read at or past the receipt's block. A hash recorded by mistake can be replaced or abandoned once its transaction is finalized and provably unrelated. Up to three confirmations can be submitted per order; the current one can always be revoked.
+The CLI picks the mode by signer. Plain wallets are sponsored: the CLI rebuilds the review message from chain facts, the wallet signs, and Daski submits it; on `CONFIRMATION_SUBMISSION_PENDING` run `--resume`. Contract wallets submit directly: the CLI validates the prepared EAS call against chain facts and the profile's pinned EAS address, prints it, and sends nothing; submit it with the wallet's own tool, then `--tx <hash>` records it and `--check` verifies the receipt in the canonical chain, the attestation that binds to the prepared call, and the gateway's finalized read at or past the receipt's block. A hash recorded by mistake can be replaced or abandoned once its transaction is canonical, finalized, and provably unrelated. Up to three confirmations can be submitted per order; the current one can always be revoked.
 
 ## Spending settings
 
