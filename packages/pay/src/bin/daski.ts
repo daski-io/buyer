@@ -149,8 +149,8 @@ async function main(argv: string[]): Promise<number> {
 
     case "order": {
       if (command[1] === "import") {
-        assertKnownFlags(flags, GLOBAL_FLAGS);
-        emit(await orderImport({ ...shared, json }), output);
+        assertKnownFlags(flags, [...GLOBAL_FLAGS, "cursor"]);
+        emit(await orderImport({ ...shared, json, cursor: stringFlag(flags, "cursor") }), output);
         return 0;
       }
       const handle = command[2];

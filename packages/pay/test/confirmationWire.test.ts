@@ -15,7 +15,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { encodeEventTopics, encodeFunctionData, type Address, type Hex } from "viem";
 import { canonicalHash, type TypedDataRequest } from "@daski/x402-scheme";
 import type { ChainReader } from "../src/chain/reader.js";
-import { confirmOrder, confirmationData, EAS_ABI, type ConfirmationFacts } from "../src/commands/confirmation.js";
+import { confirmOrder, confirmationData, EAS_ABI, validateDirectCall, type ConfirmationFacts } from "../src/commands/confirmation.js";
 import type { CommandContext } from "../src/context.js";
 import { DEFAULT_CONFIG, EAS_PREDEPLOY } from "../src/config.js";
 import { findByIntent, upsertOrder } from "../src/store/orders.js";
@@ -57,9 +57,9 @@ const attestation = { uid: UID, schema: facts.schemaUid, time: 1n, expirationTim
 function directCall(action: "attest" | "revoke", f: ConfirmationFacts) {
   return action === "attest"
     ? { chainId: f.chainId, to: f.eas, function: "attest", request: { schema: f.schemaUid, data: { recipient: f.recipient, expirationTime: "0", revocable: true, refUID: f.currentUid, data: confirmationData(f.orderKey, "Confirmed"), value: "0" } },
-      calldata: encodeFunctionData({ abi: EAS_ABI, functionName: "attest", args: [{ schema: f.schemaUid, data: { recipient: f.recipient, expirationTime: 0n, revocable: true, refUID: f.currentUid, data: confirmationData(f.orderKey, "Confirmed"), value: 0n } }] }) }
+      calldata: encodeFunctionData({ abi: EAS_ABI, functionName: "attest", args: [{ schema: f.schemaUid, data: { recipient: f.recipient, expirationTime: 0n, revocable: true, refUID: f.currentUid, data: confirmationData(f.orderKey, "Confirmed"), value: 0n } }] }), value: "0" }
     : { chainId: f.chainId, to: f.eas, function: "revoke", request: { schema: f.schemaUid, data: { uid: f.currentUid, value: "0" } },
-      calldata: encodeFunctionData({ abi: EAS_ABI, functionName: "revoke", args: [{ schema: f.schemaUid, data: { uid: f.currentUid, value: 0n } }] }) };
+      calldata: encodeFunctionData({ abi: EAS_ABI, functionName: "revoke", args: [{ schema: f.schemaUid, data: { uid: f.currentUid, value: 0n } }] }), value: "0" };
 }
 
 function sponsoredPreparation(action: "attest" | "revoke", f: ConfirmationFacts) {
@@ -173,3 +173,24 @@ for (const action of ["attest", "revoke"] as const) {
     });
   });
 }
+
+/** The direct calls the gateway's own builder emits, vendored byte for byte. */
+const directCalls = JSON.parse(readFileSync(join(fixtureDirectory(), "confirmation-direct-call.json"), "utf8")) as {
+  schemaVersion: number;
+  facts: { chainId: number; eas: Address; schemaUid: Hex; orderKey: Hex; recipient: Address; currentUid: Hex };
+  attest: { confirmation: "Confirmed" | "NotConfirmed"; call: unknown };
+  revoke: { call: unknown };
+};
+
+test("the gateway's actual direct attest and revoke calls pass the validator, and the same call with any other outer field does not", () => {
+  const f: ConfirmationFacts = { ...directCalls.facts, reputationStorage: "0x3333333333333333333333333333333333333333", nonce: "0", submissionsUsed: 1 };
+  const attest = validateDirectCall(directCalls.attest.call, f, directCalls.attest.confirmation, directCalls.facts.eas);
+  assert.equal(attest.action, "attest");
+  assert.deepEqual(attest.call, { ...(directCalls.attest.call as object), calldata: (directCalls.attest.call as { calldata: string }).calldata.toLowerCase() });
+  const revoke = validateDirectCall(directCalls.revoke.call, f, "revoke", directCalls.facts.eas);
+  assert.equal(revoke.action, "revoke");
+  const stripped = { ...(directCalls.attest.call as Record<string, unknown>) };
+  delete stripped.value;
+  assert.throws(() => validateDirectCall(stripped, f, directCalls.attest.confirmation, directCalls.facts.eas), (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_PREPARATION_INVALID");
+  assert.throws(() => validateDirectCall({ ...(directCalls.attest.call as object), value: "1" }, f, directCalls.attest.confirmation, directCalls.facts.eas), (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_PREPARATION_INVALID");
+});

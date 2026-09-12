@@ -129,3 +129,37 @@ test("order import rehydrates the store from the payer's gateway history without
     assert.equal(listOrders("sandbox").length, 4);
   });
 });
+
+test("order import walks every page, returns a partial result with a resume cursor at the cap, and refuses a looping cursor", async () => {
+  await withHome(async () => {
+    const page = (cursor: string | null, id: string) => ({ orders: [
+      { orderHandle: `ord_${id}`, paymentIdentifier: `int_${id}`, providerAgentId: "1", outcomeId: "form", state: "FULFILLED", grossAmount: "1", createdAt: now },
+    ], nextCursor: cursor });
+    const pages: Record<string, Record<string, unknown>> = {
+      first: page("c1", "a"), c1: page("c2", "b"), c2: page("c3", "c"), c3: page(null, "d"),
+    };
+    const requests: Record<string, unknown>[] = [];
+    const context = { profileName: "sandbox", payerAddress: getAddress(PAYER), profile: { chainId: 84532, gatewayUrl: "https://g.example" },
+      signer: { getAddress: async () => getAddress(PAYER), signTypedData: async () => { throw new Error("no signature expected"); }, describe: () => ({ provider: "local", accountType: "eoa" }) },
+      client: { hasTool: async () => true, callTool: async (_name: string, args: Record<string, unknown>) => {
+        requests.push(args);
+        const cursor = ((args.cursor as string | null | undefined) ?? "first");
+        return { content: [], structuredContent: pages[cursor]! };
+      } }, close: async () => {} } as unknown as CommandContext;
+    // Two pages per command: the first run stops with a resume cursor; the resumed run finishes.
+    const partial = await orderImport({ json: true, host }, async () => context, { maxPages: 2 });
+    assert.equal(partial.imported, false);
+    assert.equal(partial.partial, true);
+    assert.equal(partial.resumeCursor, "c2");
+    assert.equal(partial.added, 2);
+    const rest = await orderImport({ json: true, host, cursor: partial.resumeCursor as string }, async () => context, { maxPages: 2 });
+    assert.equal(rest.imported, true);
+    assert.equal(rest.added, 2);
+    assert.deepEqual(requests.map((request) => request.cursor), [null, "c1", "c2", "c3"]);
+    assert.equal(listOrders("sandbox").length, 4);
+    // A cursor that repeats is a history that does not advance, never a silent stop.
+    pages.c3 = page("c1", "e");
+    await assert.rejects(orderImport({ json: true, host }, async () => context, { maxPages: 50 }),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_ORDER_HISTORY_LOOP");
+  });
+});

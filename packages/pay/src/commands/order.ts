@@ -355,10 +355,16 @@ export async function withOrder<T>(
 
 export interface OrderImportOptions extends ContextOptions {
   json: boolean;
+  /** Continue from the cursor a partial import returned. */
+  cursor?: string | undefined;
 }
 
-/** More pages than this is not a payer's history but a loop. */
-const IMPORT_MAX_PAGES = 40;
+/**
+ * Pages one command imports before returning a partial result with a resume
+ * cursor: 10,000 orders. A loop is detected by a repeated cursor, never
+ * inferred from a page count, so a long history is never silently cut.
+ */
+const IMPORT_MAX_PAGES = 400;
 
 /**
  * `daski order import` — rehydrates `orders.json` from `daski_list_my_orders`
@@ -369,15 +375,30 @@ const IMPORT_MAX_PAGES = 40;
 export async function orderImport(
   options: OrderImportOptions,
   contextFactory: (options: ContextOptions) => Promise<CommandContext> = createContext,
+  limits: { maxPages: number } = { maxPages: IMPORT_MAX_PAGES },
 ): Promise<Record<string, unknown>> {
   const context = await contextFactory(options);
   try {
-    let cursor: string | null = null;
+    let cursor: string | null = options.cursor && options.cursor.length > 0 ? options.cursor : null;
     let imported = 0;
     let updated = 0;
     let existing = 0;
     let listed = 0;
-    for (let page = 0; page < IMPORT_MAX_PAGES; page += 1) {
+    let pages = 0;
+    const seen = new Set<string>();
+    for (;;) {
+      if (cursor !== null) {
+        if (seen.has(cursor)) throw new CliError({ code: "DASKI_ORDER_HISTORY_LOOP",
+          message: `The gateway returned the cursor ${cursor} twice; its order history does not advance.`,
+          remediation: "Run daski doctor --json, then retry the import; report the cursor to Daski support if it repeats." });
+        seen.add(cursor);
+      }
+      if (pages >= limits.maxPages) {
+        return { imported: false, partial: true, resumeCursor: cursor, profile: context.profileName, payer: context.payerAddress,
+          listed, added: imported, updated, existing,
+          next: `More history remains. Continue with: daski order import --cursor ${cursor} --json` };
+      }
+      pages += 1;
       const body: Record<string, unknown> = await callWalletQuery({
         client: context.client,
         signer: context.signer,

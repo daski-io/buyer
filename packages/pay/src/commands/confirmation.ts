@@ -123,13 +123,14 @@ interface Attestation {
   refUID: Hex; recipient: Address; attester: Address; revocable: boolean; data: Hex;
 }
 
-/** The closed call the gateway returns in direct mode. */
+/** The closed call the gateway returns in direct mode: exactly these six fields, `value` always "0". */
 export interface DirectCall {
   chainId: number;
   to: Address;
   function: "attest" | "revoke";
   request: Record<string, unknown>;
   calldata: Hex;
+  value: "0";
 }
 
 /** The attestation payload for an order and label. */
@@ -226,8 +227,9 @@ export function validateDirectCall(
   choice: Choice,
   easAddress: Address,
 ): { action: "attest" | "revoke"; call: DirectCall; data: Hex | undefined } {
-  if (!exactKeys(value, ["chainId", "to", "function", "request", "calldata"])) throw invalidCall("unexpected call shape");
+  if (!exactKeys(value, ["chainId", "to", "function", "request", "calldata", "value"])) throw invalidCall("unexpected call shape");
   const call = value;
+  if (call.value !== "0") throw invalidCall(`value ${String(call.value)} is not zero`);
   if (call.chainId !== facts.chainId) throw invalidCall(`chain ${String(call.chainId)} is not ${facts.chainId}`);
   if (typeof call.to !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(call.to) ||
       !isAddressEqual(getAddress(call.to), easAddress) || !isAddressEqual(easAddress, facts.eas)) {
@@ -268,7 +270,7 @@ export function validateDirectCall(
     action,
     call: {
       chainId: facts.chainId, to: easAddress, function: action,
-      request: call.request, calldata: (call.calldata as string).toLowerCase() as Hex,
+      request: call.request, calldata: (call.calldata as string).toLowerCase() as Hex, value: "0",
     },
     data,
   };
@@ -306,7 +308,15 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
     // Only --check signs (the gateway's check authorization); the signer is
     // resolved before the lock so a passphrase prompt never runs inside it.
     if (options.check) await context.resolveSigner();
-    return withOrderLock(record.intentId, () => manageDirectRecord(context, latest(record), options));
+    return withOrderLock(record.intentId, () => {
+      const current = latest(record);
+      // A sponsored review has no local transaction record; its finalized
+      // state is the gateway's to report, and --check asks for it.
+      if (options.check && !options.tx && !options.abandon && !isDirectTracked(current.confirmationTx)) {
+        return checkSponsoredReview(context, current, handle);
+      }
+      return manageDirectRecord(context, current, options);
+    });
   }
   const choice: Choice | undefined = options.revoke ? "revoke"
     : options.confirmation === "Confirmed" || options.confirmation === "NotConfirmed" ? options.confirmation : undefined;
@@ -330,8 +340,11 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
       if (options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING", message: "There is no pending review submission.",
         remediation: "Check order status, then supply the user's review choice if a new review is wanted." });
       const action = options.revoke ? "revoke-confirmation" : "confirmation";
+      // One review journal per order: a direct submission still prepared or
+      // submitted blocks any new preparation, sponsored included, so a second
+      // review cannot be signed while the first is unresolved on chain.
+      if (isPendingDirect(record.confirmationTx)) throw directPending(handle, record.confirmationTx!);
       const mode = selectConfirmationMode(signer.describe(), options.submission);
-      if (mode === "direct" && isPendingDirect(record.confirmationTx)) throw directPending(handle, record.confirmationTx!);
       const facts = await factsReader(context, record);
       assertCapacity(facts, choice!, handle);
       const acknowledged = options.acknowledgeFinalTransition === true;
@@ -420,6 +433,34 @@ function assertCapacity(facts: ConfirmationFacts, choice: Choice, handle: string
 
 function isPendingDirect(tracked: ConfirmationTxRecord | undefined): boolean {
   return tracked !== undefined && (tracked.state === "prepared" || tracked.state === "submitted");
+}
+
+/** A direct record that --tx, --check, or --abandon can act on: anything but none or abandoned. */
+function isDirectTracked(tracked: ConfirmationTxRecord | undefined): boolean {
+  return tracked !== undefined && tracked.state !== "abandoned";
+}
+
+/**
+ * `--check` for a sponsored review: the gateway's finalized read of the
+ * order's confirmation state, which its relayer reconciles after the
+ * submission mined. Nothing is stored locally; the gateway holds that state.
+ */
+async function checkSponsoredReview(context: CommandContext, record: OrderRecord, handle: string): Promise<Record<string, unknown>> {
+  const check = await callAuthorizedLifecycleTool({
+    client: context.client, signer: context.signer, toolName: "daski_confirm_delivery", action: "confirmation",
+    orderHandle: handle, request: { phase: "check", submission: "sponsored" },
+    chainId: context.profile.chainId, gatewayUrl: context.profile.gatewayUrl,
+  });
+  const anchor = finalizedAnchor(check);
+  return { orderHandle: record.handle, mode: "sponsored", state: "checked",
+    confirmedCurrent: check.confirmedCurrent ?? null, lastObserved: check.lastObserved ?? null,
+    submissionsUsed: check.submissionsUsed ?? null,
+    finalizedBlock: anchor ? anchor.number.toString() : null,
+    ...(record.confirmationSubmission ? { pendingSubmission: record.confirmationSubmission.request.preparationId } : {}),
+    note: "confirmedCurrent is the gateway's finalized state; lastObserved is its latest read. Finality on Base takes minutes to tens of minutes.",
+    next: record.confirmationSubmission
+      ? `A sponsored submission is still pending here: daski order confirm ${handle} --resume.`
+      : `Run daski order confirm ${handle} --check again once finality has caught up.` };
 }
 
 function directPending(handle: string, tracked: ConfirmationTxRecord): CliError {
@@ -650,12 +691,19 @@ async function checkDirectRecord(context: CommandContext, record: OrderRecord, t
       verification: `the profile's RPC changed its canonical block at height ${receipt.blockNumber} between reads`,
       next: `Run daski order confirm ${handle} --check again later.` };
   }
-  if (!finalizedReflects(check, tracked, uid)) {
-    return notYet("the receipt, the EAS event and the attestation match the prepared call; the gateway's finalized read does not show it yet");
-  }
+  // Execution is proven: the finalized canonical receipt and the bound EAS
+  // record close the transaction. Whether the review still stands is a
+  // separate fact: the wallet may have revoked or replaced it since, and
+  // that must never leave the journal pending.
+  const review = reviewEffect(check, tracked, uid);
   updateOrder(record.intentId, { confirmationTx: { ...tracked, uid, state: "observed" }, readCapability: undefined });
-  return { ...base, txHash: tracked.txHash, uid, state: "observed", receipt: "success",
-    observedBlock: receipt.blockNumber.toString(), finalizedBlock: anchor.number.toString(), check };
+  return { ...base, txHash: tracked.txHash, uid, state: "observed", receipt: "success", review,
+    observedBlock: receipt.blockNumber.toString(), finalizedBlock: anchor.number.toString(), check,
+    ...(review === "current" ? {} : {
+      note: tracked.action === "attest"
+        ? "The attestation executed but is no longer the order's current review: it was revoked or replaced afterwards."
+        : "The revocation executed; a later review is current.",
+    }) };
 }
 
 function unrelatedReceipt(reason: string): CliError {
@@ -747,17 +795,19 @@ function finalizedAnchor(check: Record<string, unknown>): { number: bigint; hash
 }
 
 /**
- * The gateway's finalized read shows the transaction's effect: the current
- * uid is the new attestation (attest) or no longer the revoked one (revoke).
- * The caller has established that the anchor is at or past the receipt's
- * block and canonical on the profile's RPC.
+ * What the gateway's finalized read says about the executed review now: an
+ * attestation is `current` while it is the order's current uid and
+ * `superseded` once revoked or replaced; a revocation is `current` while the
+ * revoked uid is no longer current. The caller has established that the
+ * anchor is at or past the receipt's block and canonical on the profile's RPC.
  */
-function finalizedReflects(check: Record<string, unknown>, tracked: ConfirmationTxRecord, uid: Hex): boolean {
+function reviewEffect(check: Record<string, unknown>, tracked: ConfirmationTxRecord, uid: Hex): "current" | "superseded" {
   const finalized = check.confirmedCurrent;
-  if (!finalized || typeof finalized !== "object" || Array.isArray(finalized)) return false;
+  if (!finalized || typeof finalized !== "object" || Array.isArray(finalized)) return "superseded";
   const current = (finalized as { currentUid?: unknown }).currentUid;
-  if (typeof current !== "string") return false;
-  return tracked.action === "attest" ? sameHex(current, uid) : !sameHex(current, tracked.expected.uid ?? "");
+  if (typeof current !== "string") return "superseded";
+  const stands = tracked.action === "attest" ? sameHex(current, uid) : !sameHex(current, tracked.expected.uid ?? "");
+  return stands ? "current" : "superseded";
 }
 
 /** Read the deployment pins separately, then verify the selected order and EAS nonce on chain. */
@@ -777,7 +827,11 @@ export async function readConfirmationFacts(context: CommandContext, record: Ord
   ]);
   if (current.orderKey !== orderKey || getAddress(current.payer) !== context.payerAddress ||
       String(current.providerAgentId) !== record.providerAgentId || !current.outcomeRecorded || !current.reputationEligible) throw invalidPreparation();
+  // The record's provider agent wallet is the attestation recipient; the
+  // contract refuses to register a zero wallet, so a zero here is a record
+  // this CLI does not understand.
+  if (current.providerAgentWallet === ZERO_ADDRESS) throw invalidPreparation();
   return { chainId: pins.chainId, eas: pins.eas, schemaUid: pins.schemaUid, reputationStorage: pins.reputationStorage, orderKey,
-    recipient: getAddress(current.providerAgentWallet === ZERO_ADDRESS ? current.providerOwner : current.providerAgentWallet),
+    recipient: getAddress(current.providerAgentWallet),
     currentUid: current.currentConfirmationUid, nonce: nonce.toString(), submissionsUsed: Number(current.confirmationSubmissions) };
 }

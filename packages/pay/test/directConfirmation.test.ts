@@ -45,6 +45,7 @@ function attestCall(f: ConfirmationFacts = facts, choice: "Confirmed" | "NotConf
     request: { schema: f.schemaUid, data: { recipient: f.recipient, expirationTime: "0", revocable: true, refUID: f.currentUid, data, value: "0" } },
     calldata: encodeFunctionData({ abi: EAS_ABI, functionName: "attest", args: [{ schema: f.schemaUid,
       data: { recipient: f.recipient, expirationTime: 0n, revocable: true, refUID: f.currentUid, data, value: 0n } }] }),
+    value: "0",
   };
 }
 
@@ -53,6 +54,7 @@ function revokeCall(f: ConfirmationFacts): DirectCall {
     chainId: f.chainId, to: f.eas, function: "revoke",
     request: { schema: f.schemaUid, data: { uid: f.currentUid, value: "0" } },
     calldata: encodeFunctionData({ abi: EAS_ABI, functionName: "revoke", args: [{ schema: f.schemaUid, data: { uid: f.currentUid, value: 0n } }] }),
+    value: "0",
   };
 }
 
@@ -177,6 +179,8 @@ test("a direct call is accepted only when every field derives from chain facts a
     ["revocable", (call) => ({ ...call, request: { ...call.request, data: { ...(call.request.data as object), revocable: false } } })],
     ["calldata", (call) => ({ ...call, calldata: `${call.calldata.slice(0, -2)}00` })],
     ["extra key", (call) => ({ ...call, gas: "21000" })],
+    ["outer value", (call) => ({ ...call, value: "1" })],
+    ["missing outer value", (call) => { const { value: _value, ...rest } = call; return rest; }],
     ["extra field", (call) => ({ ...call, request: { ...call.request, data: { ...(call.request.data as object), memo: "hi" } } })],
   ];
   for (const [label, tamper] of tampered) {
@@ -247,6 +251,7 @@ test("a contract signer walks prepared → submitted → observed on matching ev
     gateway.check = { ...gateway.check, finalizedBlock: block(42) };
     const observed = await confirmOrder(context, current(), { ...options, check: true });
     assert.equal(observed.state, "observed");
+    assert.equal(observed.review, "current");
     assert.equal(current().confirmationTx?.state, "observed");
     assert.equal(current().confirmationTx?.uid, UID);
     await assert.rejects(confirmOrder(context, current(), { ...options, tx: TX }), code("DASKI_CONFIRMATION_TX_ALREADY_RECORDED"));
@@ -293,8 +298,8 @@ test("a revocation binds to the attestation it revokes and is observed only once
     chain.receipt = receipt({ event: "Revoked" });
     await assert.rejects(confirmOrder(context, current(), { ...options, check: true }), code("DASKI_CONFIRMATION_RECEIPT_UNRELATED"), "not revoked on chain");
     chain.attestation = attestation({ revocationTime: 7n });
-    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID }, finalizedBlock: block(60) };
-    assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "submitted", "still current on the finalized read");
+    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID }, finalizedBlock: block(41) };
+    assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "submitted", "the anchor is behind the receipt");
     // A finalized read from before the attestation existed carries the zero uid,
     // which differs from the revoked one; without the block anchor it would pass.
     gateway.check = { confirmedCurrent: { state: "Pending", currentUid: ZERO_UID, submissionsUsed: 0 }, finalizedBlock: block(1) };
@@ -312,6 +317,8 @@ test("an EOA signer may ask for direct mode; a contract signer cannot be sponsor
     const prepared = await confirmOrder(eoa.context, record, { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader());
     assert.equal(prepared.mode, "direct");
     assert.equal(eoa.calls[0]!.request.submission, "direct");
+    // The prepared direct call blocks every new preparation until it is resolved; clear it for the mode checks below.
+    assert.equal((await confirmOrder(eoa.context, current(), { ...options, abandon: true })).state, "abandoned");
     const contract = fixture("contract");
     await assert.rejects(confirmOrder(contract.context, current(), { ...options, confirmation: "Confirmed", submission: "sponsored" }, factsReader()),
       code("DASKI_CONFIRMATION_SPONSORED_REQUIRES_EOA"));
@@ -345,11 +352,14 @@ test("the final attestation is withheld until acknowledged, then carries the exa
 test("chain facts refuse a gateway whose EAS pin differs from the profile's before any preparation is requested", async () => {
   await withStore(async (record) => {
     const { context, calls, chain, gateway } = fixture("contract");
-    chain.record = { orderKey: facts.orderKey, providerAgentId: 1n, payer: payer.address, providerOwner: RECIPIENT,
-      providerAgentWallet: "0x0000000000000000000000000000000000000000", confirmationSubmissions: 1, outcomeRecorded: true,
+    chain.record = { orderKey: facts.orderKey, providerAgentId: 1n, payer: payer.address, providerOwner: REPUTATION,
+      providerAgentWallet: RECIPIENT, confirmationSubmissions: 1, outcomeRecorded: true,
       reputationEligible: true, currentConfirmationUid: UID };
     const read = await readConfirmationFacts(context, record);
     assert.deepEqual(read, { ...facts, currentUid: UID, submissionsUsed: 1 });
+    chain.record = { ...chain.record, providerAgentWallet: "0x0000000000000000000000000000000000000000" };
+    await assert.rejects(readConfirmationFacts(context, record), code("DASKI_CONFIRMATION_MISMATCH"), "a zero provider wallet is not a record this CLI attests to");
+    chain.record = { ...chain.record, providerAgentWallet: RECIPIENT };
     gateway.eas = REPUTATION;
     await assert.rejects(readConfirmationFacts(context, record), code("DASKI_EAS_ADDRESS_MISMATCH"));
     await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }), code("DASKI_EAS_ADDRESS_MISMATCH"));
@@ -716,5 +726,53 @@ test("a reverted transaction is abandoned only once its block is finalized and c
     const settled = await confirmOrder(context, current(), { ...options, check: true });
     assert.equal(settled.revertFinal, true);
     assert.equal((await confirmOrder(context, current(), { ...options, abandon: true })).state, "abandoned");
+  });
+});
+
+test("a finalized direct attestation closes even after the wallet revoked or replaced it; the review's current effect is reported separately", async () => {
+  await withStore(async (record) => {
+    const { context, chain, gateway } = fixture("contract");
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    chain.receipt = receipt();
+    // The wallet revoked the attestation before the CLI checked: the finalized read no longer shows it as current.
+    gateway.check = { confirmedCurrent: { state: "Pending", currentUid: ZERO_UID, submissionsUsed: 1 }, finalizedBlock: block(60) };
+    const observed = await confirmOrder(context, current(), { ...options, check: true });
+    assert.equal(observed.state, "observed");
+    assert.equal(observed.review, "superseded");
+    assert.match(String(observed.note), /revoked or replaced/);
+    assert.equal(current().confirmationTx?.state, "observed");
+    // The journal is closed: a new preparation is possible.
+    gateway.prepared = { submissionsUsed: 1, revocationAvailable: false, finalAttestation: false, call: attestCall({ ...facts, submissionsUsed: 1 }) };
+    const again = await confirmOrder(context, current(), { ...options, confirmation: "NotConfirmed" }, factsReader({ ...facts, submissionsUsed: 1 }))
+      .catch((error: unknown) => error);
+    assert.ok(!(again instanceof CliError && again.code === "DASKI_CONFIRMATION_TX_PENDING"), "the closed journal no longer blocks");
+  });
+});
+
+test("a pending direct submission blocks a sponsored preparation as well", async () => {
+  await withStore(async (record) => {
+    const { context, calls } = fixture("eoa");
+    const prepared = await confirmOrder(context, record, { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader());
+    assert.equal(prepared.mode, "direct");
+    await confirmOrder(context, current(), { ...options, tx: TX });
+    const before = calls.length;
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "NotConfirmed" }, factsReader()), code("DASKI_CONFIRMATION_TX_PENDING"),
+      "the default sponsored mode may not sign a second review while the direct one is unresolved");
+    assert.equal(calls.length, before, "nothing was prepared at the gateway");
+  });
+});
+
+test("--check without a direct record reports the gateway's finalized state for a sponsored review", async () => {
+  await withStore(async (record) => {
+    const { context, calls, gateway } = fixture("eoa");
+    gateway.check = { lastObserved: { state: "Confirmed", currentUid: UID, submissionsUsed: 1 }, confirmedCurrent: { state: "Confirmed", currentUid: UID, submissionsUsed: 1 },
+      submissionsUsed: 1, observedBlock: block(120), finalizedBlock: block(100) };
+    const checked = await confirmOrder(context, record, { ...options, check: true });
+    assert.equal(checked.mode, "sponsored");
+    assert.equal(checked.state, "checked");
+    assert.deepEqual(checked.confirmedCurrent, { state: "Confirmed", currentUid: UID, submissionsUsed: 1 });
+    assert.equal(checked.finalizedBlock, "100");
+    assert.deepEqual(calls.at(-1)!.request, { phase: "check", submission: "sponsored" });
   });
 });

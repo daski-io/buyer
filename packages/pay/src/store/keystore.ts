@@ -30,7 +30,8 @@ import {
   closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync,
   writeSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { privateKeyToAccount } from "viem/accounts";
 import { getAddress, type Address, type Hex } from "viem";
@@ -506,6 +507,37 @@ function noKey(profile: string): CliError {
 export interface StoreKeyHooks {
   /** Runs after the file has been replaced and before it is read back. */
   afterWrite?: (() => void) | undefined;
+  /** Substitutes the native keychain entry, so the keychain path runs against a double. */
+  keyring?: ((profile: string) => KeyringEntry) | undefined;
+  /** Runs after the keychain existence check and before the write. */
+  beforeKeychainWrite?: (() => Promise<void> | void) | undefined;
+  /** Where the keychain lock lives; defaults to a per-user temporary directory. */
+  lockDirectory?: string | undefined;
+}
+
+/**
+ * Serializes a profile's native keychain setup. The entry is per OS user, not
+ * per DASKI_HOME, so the lock lives outside DASKI_HOME and names the entry:
+ * two setups for the same profile, from any directories, take turns, and the
+ * second finds the first's key instead of overwriting it after a check that
+ * saw nothing.
+ */
+function withKeychainLock<T>(profile: string, directory: string | undefined, run: () => Promise<T>): Promise<T> {
+  const name = `keychain-${SERVICE}-${accountFor(profile)}`.replace(/[^A-Za-z0-9._-]/g, "_");
+  const lock = join(directory ?? join(tmpdir(), "daski-locks"), `${name}.lock`);
+  return withFileLock(lock, {
+    waitMs: LOCK_WAIT_MS,
+    locked: (reason) => new CliError({
+      code: "DASKI_KEYSTORE_LOCKED",
+      message: reason === "orphaned"
+        ? `A daski process died while recovering the keychain lock ${lock}.`
+        : `Another process is setting up the keychain entry for "${profile}".`,
+      remediation: reason === "orphaned"
+        ? `If no daski process is running, remove ${lock} and ${lock}.reclaim, then re-run. See ${DOC}`
+        : "Wait for the other daski command to finish, then re-run. If no daski process " +
+          `is running, remove the stale lock file. See ${DOC}`,
+    }),
+  }, run);
 }
 
 /**
@@ -524,12 +556,17 @@ export async function storeKey(
   const expected = privateKeyToAccount(privateKey).address;
 
   if (store.backend === "keychain") {
-    const entry = await keyring(profile, store.host);
-    if (entry.getPassword()) throw keyAlreadyExists(profile);
-    entry.setPassword(privateKey);
-    const readBack = entry.getPassword();
-    if (readBack !== privateKey) throw readBackMismatch(profile);
-    return keychainLocation(profile);
+    const entry = hooks.keyring ? hooks.keyring(profile) : await keyring(profile, store.host);
+    // Check, write and read-back are one critical section: a read-back alone
+    // cannot tell that another setup will overwrite the entry afterwards.
+    return withKeychainLock(profile, hooks.lockDirectory, async () => {
+      if (entry.getPassword()) throw keyAlreadyExists(profile);
+      await hooks.beforeKeychainWrite?.();
+      entry.setPassword(privateKey);
+      const readBack = entry.getPassword();
+      if (readBack !== privateKey) throw readBackMismatch(profile);
+      return keychainLocation(profile);
+    });
   }
 
   const path = keystorePath();

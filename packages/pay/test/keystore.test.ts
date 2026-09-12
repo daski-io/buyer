@@ -144,3 +144,41 @@ test("a key that does not read back as written is reported as a failure, never a
     assert.deepEqual(leftovers(home), [], "the lock is released on failure too");
   });
 });
+
+test("two concurrent native-keychain setups for one profile serialize: exactly one succeeds and its key is the one stored", async () => {
+  const home = mkdtempSync(join(tmpdir(), "daski-keychain-"));
+  try {
+    // A keyring double shared by both setups, as the OS entry is shared by every process of the user.
+    const entries = new Map<string, string>();
+    const account = (profile: string) => `payer:${profile}`;
+    const keyring = (profile: string) => ({
+      getPassword: () => entries.get(account(profile)) ?? null,
+      setPassword: (value: string) => { entries.set(account(profile), value); },
+      deletePassword: () => entries.delete(account(profile)),
+    });
+    const host: HostEnvironment = { platform: "darwin", hostClass: "durable", declaredBackend: "keychain", passphraseFile: undefined, procKeysPath: "/nonexistent" };
+    const store: KeyStoreSelection = { host, backend: "keychain" };
+    const first = generatePrivateKey();
+    const second = generatePrivateKey();
+    let releaseFirst!: () => void;
+    const firstPastCheck = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let secondStarted!: () => void;
+    const secondHasStarted = new Promise<void>((resolve) => { secondStarted = resolve; });
+    const one = storeKey("sandbox", first, store, {
+      keyring, lockDirectory: home,
+      // The first setup saw no key; it pauses before writing until the second has been started.
+      beforeKeychainWrite: async () => { releaseFirst(); await secondHasStarted; },
+    });
+    await firstPastCheck;
+    const two = storeKey("sandbox", second, store, { keyring, lockDirectory: home, beforeKeychainWrite: () => { throw new Error("the second setup must never reach its write"); } });
+    secondStarted();
+    const [oneOutcome, twoOutcome] = await Promise.allSettled([one, two]);
+    assert.equal(oneOutcome.status, "fulfilled");
+    assert.equal(twoOutcome.status, "rejected");
+    assert.ok(code("DASKI_KEY_ALREADY_EXISTS")((twoOutcome as PromiseRejectedResult).reason));
+    assert.equal(entries.get("payer:sandbox"), first, "the first key is the one the keychain holds");
+    assert.deepEqual(readdirSync(home).filter((name) => name.endsWith(".lock")), [], "the keychain lock is released");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
