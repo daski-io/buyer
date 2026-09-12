@@ -851,4 +851,3 @@ test("--check still verifies a direct record while it is prepared or submitted, 
     assert.equal(fx.calls.length, before);
   });
 });
-

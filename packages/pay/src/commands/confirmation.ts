@@ -493,7 +493,7 @@ async function checkGatewayReview(context: CommandContext, record: OrderRecord, 
         ...(tracked.txHash ? { txHash: tracked.txHash } : {}), ...(tracked.uid ? { uid: tracked.uid } : {}) } }
       : {}),
     note: `confirmedCurrent is the gateway's final state; lastObserved is its latest read. ${finalityNote(context.profile.chainId)}` +
-      (tracked?.state === "observed" ? " The observed direct record is kept as history; --submission direct re-verifies it." : ""),
+      (tracked?.state === "observed" ? " The observed direct record is kept as history; --submission direct returns its recorded evidence." : ""),
     next: record.confirmationSubmission
       ? `A sponsored submission is still pending here: daski order confirm ${handle} --resume.`
       : `Run daski order confirm ${handle} --check again once the chain's final view has caught up.` };
