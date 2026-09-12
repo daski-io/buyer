@@ -24,6 +24,7 @@ Both packages move together with the gateway's buyer CLI pin; there is no compat
 ### `@daski/x402-scheme`
 
 - `SignerDescription.accountType` is `eoa | contract | unknown` (`smart-contract` is gone).
+- The `recipe-bound-v1` binding is retired: `parseOrderBinding` accepts only `recipe-bound-v2` (version 2), `deriveBindingNonce` computes only the V2 nonce, and `OrderBindingV1`, `RecipeNonceV1Input`, `recipeNonce`, and `RECIPE_NONCE_DOMAIN_V1` are removed. Fresh contracts, listings, and databases issue V2 only.
 
 ## 0.3.0 — unreleased
 

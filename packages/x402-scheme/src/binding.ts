@@ -10,17 +10,6 @@ import { refuse } from "./errors.js";
 
 const HEX32 = /^0x[0-9a-fA-F]{64}$/;
 
-export interface OrderBindingV1 {
-  version: 1;
-  profile: "recipe-bound-v1";
-  listingManifestHash: Hex;
-  providerOfferHash: Hex;
-  quoteHash: Hex;
-  canonicalRequestHash: Hex;
-  orderNonce: Hex;
-  expiresAt: number;
-}
-
 /** Catalog-driven checkout: the runtime listing commitment plus the
  *  provider's signed registration intent. */
 export interface OrderBindingV2 {
@@ -34,11 +23,10 @@ export interface OrderBindingV2 {
   expiresAt: number;
 }
 
-export type OrderBinding = OrderBindingV1 | OrderBindingV2;
+export type OrderBinding = OrderBindingV2;
 
 const SHARED_SLOTS = ["quoteHash", "canonicalRequestHash", "orderNonce"] as const;
-const DEAL_SLOTS_V1 = ["listingManifestHash", "providerOfferHash"] as const;
-const DEAL_SLOTS_V2 = ["runtimeCommitmentHash", "providerIntentHash"] as const;
+const DEAL_SLOTS = ["runtimeCommitmentHash", "providerIntentHash"] as const;
 
 const BINDING_DOC =
   "https://github.com/daski-io/buyer/blob/main/docs/policy.md#daski-order-binding";
@@ -59,8 +47,7 @@ export function parseOrderBinding(value: unknown): OrderBinding | undefined {
     });
   }
   const binding = value as Record<string, unknown>;
-  const isV2 = binding.profile === "recipe-bound-v2";
-  const dealSlots = isV2 ? DEAL_SLOTS_V2 : DEAL_SLOTS_V1;
+  const dealSlots = DEAL_SLOTS;
   const expectedKeys = [
     "version", "profile", ...dealSlots, ...SHARED_SLOTS, "expiresAt",
   ].sort();
@@ -76,14 +63,12 @@ export function parseOrderBinding(value: unknown): OrderBinding | undefined {
         `signed. Upgrade @daski/x402-scheme, or see ${BINDING_DOC}`,
     });
   }
-  const versionOk = isV2
-    ? binding.version === 2
-    : binding.version === 1 && binding.profile === "recipe-bound-v1";
+  const versionOk = binding.profile === "recipe-bound-v2" && binding.version === 2;
   if (!versionOk) {
     refuse({
       check: "challenge-shape",
       code: "DASKI_BINDING_UNKNOWN_PROFILE",
-      expected: "recipe-bound-v1 (version 1) or recipe-bound-v2 (version 2)",
+      expected: "recipe-bound-v2 (version 2)",
       actual: `profile=${String(binding.profile)} version=${String(binding.version)}`,
       remediation: `Upgrade @daski/x402-scheme; see ${BINDING_DOC}`,
     });
