@@ -255,7 +255,12 @@ test("a contract signer walks prepared → submitted → observed on matching ev
     assert.equal(current().confirmationTx?.state, "observed");
     assert.equal(current().confirmationTx?.uid, UID);
     await assert.rejects(confirmOrder(context, current(), { ...options, tx: TX }), code("DASKI_CONFIRMATION_TX_ALREADY_RECORDED"));
-    assert.equal((await confirmOrder(context, current(), { ...options, check: true })).state, "observed");
+    // Once observed, a plain --check asks the gateway for the current state and reports the record as history;
+    // --submission direct re-verifies the record itself.
+    const afterwards = await confirmOrder(context, current(), { ...options, check: true });
+    assert.equal(afterwards.state, "checked");
+    assert.equal((afterwards.directRecord as { state: string }).state, "observed");
+    assert.equal((await confirmOrder(context, current(), { ...options, check: true, submission: "direct" })).state, "observed");
 
     // The observed record no longer blocks a new preparation.
     gateway.prepared = { submissionsUsed: 1, revocationAvailable: true, finalAttestation: false, call: attestCall({ ...facts, currentUid: UID, submissionsUsed: 1 }) };
@@ -776,3 +781,74 @@ test("--check without a direct record reports the gateway's finalized state for 
     assert.deepEqual(calls.at(-1)!.request, { phase: "check", submission: "sponsored" });
   });
 });
+
+const LATER_UID = `0x${"77".repeat(32)}` as Hex;
+
+/** Drive a direct review to `observed` through the fixture: prepare, record the hash, verify. */
+async function observeDirect(fx: Fixture, record: OrderRecord, submission?: string): Promise<void> {
+  await confirmOrder(fx.context, record, { ...options, confirmation: "Confirmed", ...(submission ? { submission } : {}) }, factsReader());
+  await confirmOrder(fx.context, current(), { ...options, tx: TX });
+  fx.chain.receipt = receipt();
+  fx.gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID, submissionsUsed: 1 }, finalizedBlock: block(60) };
+  const observed = await confirmOrder(fx.context, current(), { ...options, check: true });
+  assert.equal(observed.state, "observed");
+}
+
+test("once a direct record is observed, --check asks the gateway for the current state and keeps the record as history", async () => {
+  await withStore(async (record) => {
+    const fx = fixture("contract");
+    await observeDirect(fx, record);
+    // A later review replaced the observed one; the gateway knows, the journal does not.
+    fx.gateway.check = { lastObserved: { state: "NotConfirmed", currentUid: LATER_UID, submissionsUsed: 2 },
+      confirmedCurrent: { state: "NotConfirmed", currentUid: LATER_UID, submissionsUsed: 2 }, submissionsUsed: 2,
+      observedBlock: block(130), finalizedBlock: block(120) };
+    const before = fx.calls.length;
+    const checked = await confirmOrder(fx.context, current(), { ...options, check: true });
+    assert.equal(checked.state, "checked");
+    assert.equal(checked.mode, "direct", "a contract signer asks in its own mode");
+    assert.deepEqual(fx.calls.at(-1)!.request, { phase: "check", submission: "direct" });
+    assert.ok(fx.calls.length > before, "the gateway was asked");
+    assert.deepEqual(checked.confirmedCurrent, { state: "NotConfirmed", currentUid: LATER_UID, submissionsUsed: 2 });
+    assert.deepEqual(checked.directRecord, { action: "attest", state: "observed", callHash: current().confirmationTx!.callHash, txHash: TX, uid: UID });
+    assert.match(String(checked.note), /kept as history/);
+    assert.equal(current().confirmationTx?.state, "observed", "the journal is untouched");
+  });
+});
+
+test("--check honors an explicit --submission: sponsored asks the gateway, direct re-verifies the record, and direct without a record is refused", async () => {
+  await withStore(async (record) => {
+    const fx = fixture("eoa");
+    await observeDirect(fx, record, "direct");
+    fx.gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: LATER_UID, submissionsUsed: 2 }, submissionsUsed: 2, finalizedBlock: block(120) };
+    const sponsored = await confirmOrder(fx.context, current(), { ...options, check: true, submission: "sponsored" });
+    assert.equal(sponsored.mode, "sponsored");
+    assert.equal(sponsored.state, "checked");
+    assert.deepEqual(fx.calls.at(-1)!.request, { phase: "check", submission: "sponsored" });
+    assert.deepEqual(sponsored.confirmedCurrent, { state: "Confirmed", currentUid: LATER_UID, submissionsUsed: 2 });
+    const before = fx.calls.length;
+    const direct = await confirmOrder(fx.context, current(), { ...options, check: true, submission: "direct" });
+    assert.equal(direct.mode, "direct");
+    assert.equal(direct.state, "observed");
+    assert.match(String(direct.note), /Already observed/);
+    assert.equal(fx.calls.length, before, "re-verifying the observed record asks the gateway nothing");
+    await assert.rejects(confirmOrder(fx.context, current(), { ...options, check: true, submission: "sponsored-ish" }),
+      code("DASKI_CONFIRMATION_SUBMISSION_INVALID"));
+  });
+  await withStore(async (record) => {
+    const fx = fixture("eoa");
+    await assert.rejects(confirmOrder(fx.context, record, { ...options, check: true, submission: "direct" }),
+      code("DASKI_CONFIRMATION_TX_NOT_PREPARED"), "an explicit direct check needs a tracked record");
+  });
+});
+
+test("--check still verifies a direct record while it is prepared or submitted, without asking the gateway first", async () => {
+  await withStore(async (record) => {
+    const fx = fixture("contract");
+    await confirmOrder(fx.context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    const before = fx.calls.length;
+    const prepared = await confirmOrder(fx.context, current(), { ...options, check: true }).catch((error: unknown) => error);
+    assert.ok(prepared instanceof CliError && prepared.code === "DASKI_CONFIRMATION_TX_NOT_RECORDED", "a prepared record is the check's subject");
+    assert.equal(fx.calls.length, before);
+  });
+});
+

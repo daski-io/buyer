@@ -37,7 +37,7 @@ The command returns the actual quote and an approval identifier. After the user 
 | `order revoke-confirmation <handle>` | Withdraw the active review, in the same mode |
 | `order confirm <handle> --resume` | Reconcile a stored sponsored submission without another EAS signature |
 | `order confirm <handle> --tx <hash>` | Direct mode: record the hash the wallet's tool reported (unverified); replaces a final, provably unrelated one |
-| `order confirm <handle> --check` | Direct mode: verify the receipt, the EAS event, the attestation, and the gateway's final state at or past the receipt's block; sponsored mode: report the gateway's final state of the review |
+| `order confirm <handle> --check [--submission <sponsored\|direct>]` | Verify a pending direct record (the receipt, the EAS event, the attestation, and the gateway's final state at or past the receipt's block); otherwise report the gateway's final state of the review, keeping an observed direct record as history. `--submission direct` re-verifies the record, `--submission sponsored` asks the gateway |
 | `order confirm <handle> --abandon` | Direct mode: clear a record whose transaction reverted, was never sent, or is final and provably unrelated |
 | `order reconcile <intentId>` | Query settlement for one payment identifier |
 | `order import [--cursor <cursor>]` | Rehydrate the local order store from the gateway's history for the active payer; a partial result names the cursor to continue from |

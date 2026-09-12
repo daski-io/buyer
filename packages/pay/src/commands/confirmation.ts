@@ -311,13 +311,12 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
   if (options.tx !== undefined || options.check || options.abandon) {
     // Only --check signs (the gateway's check authorization); the signer is
     // resolved before the lock so a passphrase prompt never runs inside it.
-    if (options.check) await context.resolveSigner();
+    const signer = options.check ? await context.resolveSigner() : undefined;
     return withOrderLock(record.intentId, () => {
       const current = latest(record);
-      // A sponsored review has no local transaction record; its final
-      // state is the gateway's to report, and --check asks for it.
-      if (options.check && !options.tx && !options.abandon && !isDirectTracked(current.confirmationTx)) {
-        return checkSponsoredReview(context, current, handle);
+      if (options.check && !options.tx && !options.abandon) {
+        const target = checkTarget(current.confirmationTx, options.submission, signer!.describe());
+        if (target.kind === "gateway") return checkGatewayReview(context, current, handle, target.submission);
       }
       return manageDirectRecord(context, current, options);
     });
@@ -445,23 +444,56 @@ function isDirectTracked(tracked: ConfirmationTxRecord | undefined): boolean {
 }
 
 /**
- * `--check` for a sponsored review: the gateway's final read of the
- * order's confirmation state, which its relayer reconciles after the
- * submission mined. Nothing is stored locally; the gateway holds that state.
+ * What --check consults. An explicit --submission decides: `direct` verifies
+ * the recorded transaction (refused when none is tracked), `sponsored` asks
+ * the gateway. Otherwise a direct record still prepared or submitted is
+ * verified, and anything else (no record, an abandoned one, or one already
+ * observed) asks the gateway for the order's current state in the signer's
+ * mode, so a review submitted after an observed direct one is never hidden
+ * behind the retained receipt.
  */
-async function checkSponsoredReview(context: CommandContext, record: OrderRecord, handle: string): Promise<Record<string, unknown>> {
+function checkTarget(tracked: ConfirmationTxRecord | undefined, requested: string | undefined,
+  description: SignerDescription): { kind: "record" } | { kind: "gateway"; submission: ConfirmationMode } {
+  if (requested === "direct") return { kind: "record" };
+  if (requested === "sponsored") return { kind: "gateway", submission: "sponsored" };
+  if (requested !== undefined) {
+    throw new CliError({
+      code: "DASKI_CONFIRMATION_SUBMISSION_INVALID",
+      message: `--submission must be sponsored or direct, not "${requested}".`,
+      remediation: "Omit the flag to check the pending direct record or the gateway's state, or pass --submission direct|sponsored.",
+    });
+  }
+  if (isPendingDirect(tracked)) return { kind: "record" };
+  return { kind: "gateway", submission: selectConfirmationMode(description, undefined) };
+}
+
+/**
+ * `--check` against the gateway: its final read of the order's confirmation
+ * state, which its relayer reconciles after a sponsored submission mined and
+ * which a direct submission moves once its receipt is covered. Nothing is
+ * stored locally; an observed direct record is reported next to it as
+ * history.
+ */
+async function checkGatewayReview(context: CommandContext, record: OrderRecord, handle: string,
+  submission: ConfirmationMode): Promise<Record<string, unknown>> {
   const check = await callAuthorizedLifecycleTool({
     client: context.client, signer: context.signer, toolName: "daski_confirm_delivery", action: "confirmation",
-    orderHandle: handle, request: { phase: "check", submission: "sponsored" },
+    orderHandle: handle, request: { phase: "check", submission },
     chainId: context.profile.chainId, gatewayUrl: context.profile.gatewayUrl,
   });
   const anchor = finalizedAnchor(check);
-  return { orderHandle: record.handle, mode: "sponsored", state: "checked",
+  const tracked = record.confirmationTx;
+  return { orderHandle: record.handle, mode: submission, state: "checked",
     confirmedCurrent: check.confirmedCurrent ?? null, lastObserved: check.lastObserved ?? null,
     submissionsUsed: check.submissionsUsed ?? null,
     finalizedBlock: anchor ? anchor.number.toString() : null,
     ...(record.confirmationSubmission ? { pendingSubmission: record.confirmationSubmission.request.preparationId } : {}),
-    note: `confirmedCurrent is the gateway's final state; lastObserved is its latest read. ${finalityNote(context.profile.chainId)}`,
+    ...(tracked && isDirectTracked(tracked)
+      ? { directRecord: { action: tracked.action, state: tracked.state, callHash: tracked.callHash,
+        ...(tracked.txHash ? { txHash: tracked.txHash } : {}), ...(tracked.uid ? { uid: tracked.uid } : {}) } }
+      : {}),
+    note: `confirmedCurrent is the gateway's final state; lastObserved is its latest read. ${finalityNote(context.profile.chainId)}` +
+      (tracked?.state === "observed" ? " The observed direct record is kept as history; --submission direct re-verifies it." : ""),
     next: record.confirmationSubmission
       ? `A sponsored submission is still pending here: daski order confirm ${handle} --resume.`
       : `Run daski order confirm ${handle} --check again once the chain's final view has caught up.` };

@@ -7,14 +7,13 @@
  * if our nonce and theirs disagree, the deal we were shown is not the deal
  * we would be signing, and we refuse.
  *
- * These two functions mirror the gateway's `recipeNonce` / `recipeNonceV2`
- * byte for byte. Changing either is a protocol break, not a refactor.
+ * This function mirrors the gateway's `recipeNonceV2` byte for byte.
+ * Changing it is a protocol break, not a refactor.
  */
 import { encodeAbiParameters, keccak256, stringToHex, type Address, type Hex } from "viem";
 import type { OrderBinding, OrderBindingV2 } from "./binding.js";
 
-/** `keccak256("DaskiStandardExactOrderV1")` — the v1 recipe domain separator. */
-/** `keccak256("DaskiStandardExactOrderV2")` — the v2 recipe domain separator. */
+/** `keccak256("DaskiStandardExactOrderV2")` — the recipe domain separator. */
 export const RECIPE_NONCE_DOMAIN_V2: Hex = keccak256(stringToHex("DaskiStandardExactOrderV2"));
 
 /**
