@@ -16,6 +16,7 @@ import type { PaymentChallenge, PaymentRequirement } from "../gateway/client.js"
 import {
   authorizePayment, challengeIntentId, recordIntent,
 } from "../gateway/purchase.js";
+import { assertContractSignerUsable } from "../signers/contract.js";
 import { updateOrder } from "../store/orders.js";
 import { approvePurchase, nextPurchaseApproval } from "./approval.js";
 
@@ -54,6 +55,10 @@ export async function runSignPayment(
   const { providerAgentId, outcomeId } = resolveTarget(challenge, options);
   const context = await contextFactory(options);
   try {
+    await assertContractSignerUsable({
+      signer: context.signer, chain: context.chain, metadata: context.metadata,
+      gatewayUrl: context.profile.gatewayUrl,
+    });
     // The splitter evidence resolves through the catalog, so the same §4.1.4
     // two-source check applies here as in `buy`.
     const outcome = await context.catalog.getOutcome(providerAgentId, outcomeId);

@@ -18,6 +18,8 @@ import { CliError } from "../cli/errors.js";
 import {
   describeResult,
   GatewayClient,
+  gatewayRefusalRemediation,
+  isRetryableGatewayCode,
   unreadableResultError,
   type McpToolResult,
 } from "./client.js";
@@ -135,9 +137,13 @@ function lifecycleFailure(toolName: string, result: McpToolResult): CliError {
   return new CliError({
     code,
     message,
-    remediation: typeof body?.next_action === "string"
+    remediation: gatewayRefusalRemediation(code, body) ?? (typeof body?.next_action === "string"
       ? body.next_action
-      : `Run \`daski order status <handle>\` to see the order's current state.`,
-    details: { tool: toolName, gateway: body ?? describeResult(result) },
+      : `Run \`daski order status <handle>\` to see the order's current state.`),
+    details: {
+      tool: toolName,
+      gateway: body ?? describeResult(result),
+      ...(isRetryableGatewayCode(code) ? { retryable: true } : {}),
+    },
   });
 }

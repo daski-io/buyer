@@ -3,6 +3,25 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.4.0 — unreleased
+
+Both packages move together with the gateway's buyer CLI pin; there is no compatibility with earlier gateways or request shapes.
+
+### `@daski/pay`
+
+- **Key durability.** A local key is written only to a store whose persistence is known by construction: the OS keychain on macOS and Windows, or the encrypted file. On Linux the keyring wrapper is never loaded; `keychain` is refused there (`DASKI_KEYCHAIN_UNSUPPORTED_ON_LINUX`) and the file backend is named. `DASKI_KEY_BACKEND` (`keychain|file|circle-agent|cdp|none`) replaces `DASKI_DISABLE_KEYCHAIN`, which is removed. `DASKI_HOST_CLASS` (`durable|ephemeral`) declares where the CLI runs; no local key is created on an ephemeral host (`DASKI_LOCAL_KEY_REFUSED_ON_HOST`), and `wallet create` runs only for the `local` signer (`DASKI_WALLET_CREATE_LOCAL_ONLY`).
+- **Encrypted file store.** A missing file is an empty store; an unreadable, malformed, or permission-denied one is `DASKI_KEYSTORE_UNREADABLE` and refuses creation and use. Updates hold an exclusive lock file, write an owner-only temporary file, flush, rename atomically, flush the directory, and read the new entry back to the expected address before reporting success. The passphrase comes from a terminal or `DASKI_KEYSTORE_PASSPHRASE_FILE` (regular, owner-only, never argv). scrypt now sets its memory ceiling from its parameters: the previous store never did, so Node's 32 MiB default refused the N=2^17 KDF on every file-backend use.
+- **Session-keyring detection.** On Linux, `doctor` detects a key an earlier release left in the kernel session keyring (`/proc/keys`, a detector only), reports key durability `session-memory`, and blocks with `DASKI_KEY_NOT_DURABLE`; `buy` and `sign-payment` refuse the same way. There is no override and no migration; create a new wallet with the file backend.
+- **Doctor facts.** The report states host class, key backend, key durability, signer kind, account type, `verifiedVia` (`recovery` or `erc1271`), deployment, and conformance separately, plus the gateway's `payerAccounts`, `confirmation`, `confirmationSigning`, and `signerClis`.
+- **Contract-account signers.** New `circle-agent` adapter for the Circle agent wallet through the pinned `@circle-fin/cli` (argument arrays, 30-second deadline, only the signature retained, nothing logged); `accountType: contract`, candidate pending conformance. Contract signers must be deployed at `doctor` and `buy` (`DASKI_SIGNER_NOT_DEPLOYED`) and are offered only when the gateway lists `contract` under `payerAccounts.types` (`DASKI_GATEWAY_EOA_ONLY`); their self-test verifies the DaskiDoctor vector through a bounded `isValidSignature` call against the profile RPC. Any signature the CLI validates is `0x` plus even hex of at most 4,096 bytes; ERC-6492 wrappers are refused.
+- **Delivery confirmation modes.** Requests carry `submission: sponsored|direct`. Plain wallets keep the sponsored flow with the new semantics (`submissionsUsed`, `revocationAvailable`, `finalAttestation`; `transitionsUsed` is gone): three attestations per order, the third final, revocation of the current one always available. Contract wallets (or `--submission direct`) receive a prepared EAS `attest`/`revoke` call that the CLI validates against chain facts and the profile's pinned EAS, re-encodes, and prints; it never sends a transaction. `--tx <hash>` records a submission immediately as unverified; `--check` advances it to `observed` only on a successful receipt with the matching EAS event, a binding `getAttestation`, and the gateway's finalized read; `--abandon` clears local tracking when nothing can execute. Gateway refusals `CONFIRMATION_SPONSORED_REQUIRES_EOA`, `CONFIRMATION_SPONSORSHIP_LIMIT`, `SIGNATURE_COUNTERFACTUAL_REJECTED`, and `SIGNATURE_VERIFICATION_UNAVAILABLE` (retryable) carry CLI remediations.
+- **Profiles pin `easAddress`** (default `0x4200000000000000000000000000000000000021` on Base and Base Sepolia); the gateway's `confirmationSigning.eas` must equal it (`DASKI_EAS_ADDRESS_MISMATCH`).
+- **Lazy signer on the read path.** Order commands build the signer only for a signature, so a stored, unexpired read capability serves reads without opening the key store; the signer must match the order's recorded payer. `daski order import --json` rehydrates `orders.json` from `daski_list_my_orders`.
+
+### `@daski/x402-scheme`
+
+- `SignerDescription.accountType` is `eoa | contract | unknown` (`smart-contract` is gone).
+
 ## 0.3.0 — unreleased
 
 - New profiles approve each paid quote without default per-order or cumulative budgets. Existing settings survive upgrades; `daski budget` can explicitly change or remove them.

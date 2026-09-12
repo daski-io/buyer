@@ -22,6 +22,8 @@ import {
 import {
   describeResult,
   GatewayClient,
+  gatewayRefusalRemediation,
+  isRetryableGatewayCode,
   unreadableResultError,
   type McpToolResult,
   type PaymentChallenge,
@@ -519,8 +521,12 @@ export function purchaseFailure(
     message: typeof body?.message === "string"
       ? body.message
       : "The gateway rejected the purchase.",
-    remediation: typeof body?.next_action === "string" ? body.next_action : fallbackRemediation,
-    details: { gateway: body ?? describeResult(result) },
+    remediation: gatewayRefusalRemediation(code, body) ??
+      (typeof body?.next_action === "string" ? body.next_action : fallbackRemediation),
+    details: {
+      gateway: body ?? describeResult(result),
+      ...(isRetryableGatewayCode(code) ? { retryable: true } : {}),
+    },
   });
 }
 

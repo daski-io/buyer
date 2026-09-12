@@ -12,6 +12,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import type { Address, Hex } from "viem";
 import { ordersPath } from "../paths.js";
 
 export type OrderState =
@@ -33,6 +34,42 @@ export interface ReadCapability {
   expiresAt: number;
 }
 
+/** A sponsored review submission retained for retries while sponsorship is pending. */
+export interface ConfirmationSubmissionRecord {
+  action: "confirmation" | "revoke-confirmation";
+  request: { phase: "submit"; submission: "sponsored"; preparationId: string; signature: string };
+}
+
+export type ConfirmationTxState = "prepared" | "submitted" | "observed" | "abandoned";
+
+/** What the direct-mode call commits to, so a receipt can be bound to it later. */
+export interface ConfirmationTxExpected {
+  schema: Hex;
+  recipient: Address;
+  refUID: Hex;
+  /** keccak256 of the attestation data. */
+  dataHash: Hex;
+  /** For a revocation: the attestation being revoked. */
+  uid?: Hex | undefined;
+}
+
+/**
+ * A direct-mode confirmation the wallet's own tool submits. `submitted` means
+ * a hash was recorded and nothing has been verified yet; `observed` means the
+ * receipt, the EAS event, the attestation, and the gateway's finalized read
+ * all agree.
+ */
+export interface ConfirmationTxRecord {
+  action: "attest" | "revoke";
+  callHash: Hex;
+  expected: ConfirmationTxExpected;
+  txHash?: Hex | undefined;
+  state: ConfirmationTxState;
+  /** The attestation the observed receipt created or revoked. */
+  uid?: Hex | undefined;
+  preparedAt: string;
+}
+
 export interface OrderRecord {
   /** The gateway's order handle, once known. */
   handle?: string | undefined;
@@ -50,11 +87,9 @@ export interface OrderRecord {
   /** The recomputed authorization nonce; identifies the order on-chain. */
   authorizationNonce?: string | undefined;
   readCapability?: ReadCapability | undefined;
-  /** A review submission retained for retries while sponsorship is pending. */
-  confirmationSubmission?: {
-    action: "confirmation" | "revoke-confirmation";
-    request: { phase: "submit"; preparationId: string; signature: string };
-  } | undefined;
+  confirmationSubmission?: ConfirmationSubmissionRecord | undefined;
+  /** The direct-mode confirmation in flight or last observed, if any. */
+  confirmationTx?: ConfirmationTxRecord | undefined;
   createdAt: string;
   updatedAt: string;
   /** The request body, kept so an interrupted purchase can be replayed byte-identically. */

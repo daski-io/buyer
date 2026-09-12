@@ -6,7 +6,8 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { compareReleaseVersions, pinnedBuyerCli } from "../src/gateway/client.js";
+import { compareReleaseVersions } from "../src/gateway/client.js";
+import { pinnedBuyerCli } from "../src/gateway/metadata.js";
 
 test("release versions compare numerically; anything but a plain release is not compared", () => {
   assert.ok(compareReleaseVersions("0.1.0", "0.1.2")! < 0);

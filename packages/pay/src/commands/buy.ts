@@ -21,6 +21,7 @@ import {
   requestChallenge,
   submitPayment,
 } from "../gateway/purchase.js";
+import { assertContractSignerUsable } from "../signers/contract.js";
 import { updateOrder } from "../store/orders.js";
 
 export interface BuyOptions extends ContextOptions {
@@ -49,6 +50,13 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
           "profiles, or drop --payer.",
       });
     }
+
+    // A contract wallet must be one the gateway verifies and the chain has
+    // seen deployed, or a refusal at settlement would be the first signal.
+    await assertContractSignerUsable({
+      signer: context.signer, chain: context.chain, metadata: context.metadata,
+      gatewayUrl: context.profile.gatewayUrl,
+    });
 
     // -- 1. challenge ------------------------------------------------------
     const challenge = await requestChallenge({

@@ -15,8 +15,9 @@
  *   DASKI_PAYER_PRIVATE_KEY=0x... \
  *   npm run conformance -- --profile sandbox --signer local
  *
- * `--signer cdp --cdp-account <name>` and `--signer circle --circle-wallet <id>`
- * select the other adapters; their credentials come from the environment.
+ * `--signer circle-agent [--circle-wallet <address>]`, `--signer cdp --cdp-account
+ * <name>` and `--signer circle --circle-wallet <id>` select the other adapters;
+ * their credentials come from the environment or the vendor's own login.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

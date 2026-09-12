@@ -17,7 +17,10 @@ that can be triggered by accident is a suite that drains a wallet by accident.
 
 `doctor passes` → `prepare` → `policy-validate + recompute + sign` → `buy` →
 grant-read (when available) → `status` → `artifact` → optionally `confirm`
-(`--confirm`).
+(`--confirm`). A signer is *supported* once this suite has passed with it
+against the sandbox and the run is recorded with the release; `local` is the
+regression baseline, `circle-agent` is required before contract accounts are
+enabled on mainnet, and `cdp` and `circle` remain candidates.
 
 ## Assertions
 
@@ -56,9 +59,9 @@ single call.
 | Flag | Effect |
 |---|---|
 | `--profile <name>` | Config profile (default `sandbox`) |
-| `--signer <local\|cdp\|circle>` | Override the profile's signer |
+| `--signer <local\|circle-agent\|cdp\|circle>` | Override the profile's signer |
 | `--cdp-account <name>` | CDP account for `--signer cdp` (or `DASKI_CDP_ACCOUNT`) |
-| `--circle-wallet <id>` | Circle wallet id for `--signer circle` (or `DASKI_CIRCLE_WALLET`) |
+| `--circle-wallet <id\|address>` | Circle wallet id for `--signer circle` (or `DASKI_CIRCLE_WALLET`); the agent wallet address to select for `--signer circle-agent` |
 | `--provider` / `--outcome` | What to buy (default `8327` / `create-mailbox`) |
 | `--confirm` | Also run the delivery-confirmation step |
 | `--redact-signatures` | Blank signatures in the run log |

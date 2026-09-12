@@ -4,9 +4,9 @@ Doctor reports the resolved `stateDirectory` and `configFile`. The default is `.
 
 | File | Contents |
 |---|---|
-| config.json | Profiles: gateway, chain, canonical token, RPC, spending settings, signer |
-| orders.json | Durable intents, handles, states, and read capabilities |
-| keystore.json | Encrypted fallback when the OS keychain is unavailable |
+| config.json | Profiles: gateway, chain, canonical token, EAS address, RPC, spending settings, signer |
+| orders.json | Durable intents, handles, states, read capabilities, pending sponsored reviews, and direct-mode confirmation records |
+| keystore.json | The encrypted file key store (`DASKI_KEY_BACKEND=file`); `keystore.json.lock` exists only during an update |
 | cache.json | Catalog evidence with an expiry |
 
 POSIX directories use mode 700 and files use 600. Windows uses native ACLs.
@@ -23,6 +23,7 @@ POSIX directories use mode 700 and files use 600. Windows uses native ACLs.
       "network": "eip155:84532",
       "chainId": 84532,
       "usdcAddress": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+      "easAddress": "0x4200000000000000000000000000000000000021",
       "rpcUrl": "https://sepolia.base.org",
       "maxPerOrderUsdc": null,
       "sessionCapUsdc": null,
@@ -34,7 +35,13 @@ POSIX directories use mode 700 and files use 600. Windows uses native ACLs.
 }
 ```
 
-The generated file also includes a disabled mainnet profile. Enable it when the user selects that network. Profiles use separate keychain entries and order records. Select a profile with `--profile` or `DASKI_PROFILE`.
+The generated file also includes a disabled mainnet profile. Enable it when the user selects that network. Profiles use separate key entries and order records. Select a profile with `--profile` or `DASKI_PROFILE`.
+
+`signer` is one of `local`, `circle-agent`, `cdp`, `circle`; see [signers](./signers.md).
+
+`easAddress` pins the EAS contract delivery confirmations are attested through. On Base and Base Sepolia it defaults to the canonical predeploy `0x4200000000000000000000000000000000000021`; on any other chain it must be set. The gateway's `confirmationSigning.eas` must equal it: `doctor` blocks with `DASKI_EAS_ADDRESS_MISMATCH` and no confirmation is prepared or signed while they disagree.
+
+`rpcUrl` is used for reads only: balances, contract code, receipts, attestations, and the ERC-1271 self-test. The CLI never sends a transaction through it.
 
 Version 1 configuration remains readable. Upgrades preserve its values, including old default budgets, because existing files do not record whether the user selected those values. The explicit budget command writes version 2 when changing settings.
 
@@ -63,9 +70,11 @@ Use settings changes when the user requests them. `--max-per-order` and `--sessi
 |---|---|
 | DASKI_HOME | Override the native state directory |
 | DASKI_PROFILE | Default profile |
+| DASKI_HOST_CLASS | `durable` on the user's own machine, `ephemeral` on an agent-managed, shared, or resettable host; no local key is created on an ephemeral host. Unset reads as `undeclared` |
+| DASKI_KEY_BACKEND | `keychain` (macOS, Windows), `file`, `circle-agent`, `cdp`, or `none`; see [keys](./keys.md) |
+| DASKI_KEYSTORE_PASSPHRASE_FILE | A regular, owner-only file holding the encrypted file store's passphrase, for sessions without a terminal |
 | DASKI_PAYER_PRIVATE_KEY | Sandbox development signer; see [keys](./keys.md) |
-| DASKI_DISABLE_KEYCHAIN | Use the encrypted file store |
 | DASKI_CDP_ACCOUNT | CDP account for the CDP signer |
-| CIRCLE_API_KEY / CIRCLE_ENTITY_SECRET | Circle credentials supplied through the protected environment |
-| DASKI_CIRCLE_WALLET | Circle EOA wallet identifier |
+| CIRCLE_API_KEY / CIRCLE_ENTITY_SECRET | Circle developer-controlled wallet credentials supplied through the protected environment |
+| DASKI_CIRCLE_WALLET | Circle developer-controlled EOA wallet identifier |
 | DASKI_CONFORMANCE_SPEND_OK | Explicit opt-in to the live spending test suite |

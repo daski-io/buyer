@@ -11,11 +11,15 @@
  * context, is how "here is your result" becomes "here are your instructions".
  */
 import { writeFileSync } from "node:fs";
+import { getAddress } from "viem";
 import { CliError } from "../cli/errors.js";
-import { createContext, type ContextOptions } from "../context.js";
-import { callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
+import { loadConfig } from "../config.js";
+import { createContext, type CommandContext, type ContextOptions, type OrderBinding } from "../context.js";
+import { callWalletQuery, callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
 import { reconcileByIdentifier } from "../gateway/purchase.js";
-import { activeReadCapability, findOrder, updateOrder, type OrderRecord } from "../store/orders.js";
+import {
+  activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord,
+} from "../store/orders.js";
 import type { OrderAction } from "@daski/x402-scheme";
 import type { ConfirmationOptions } from "./confirmation.js";
 
@@ -316,29 +320,122 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
   });
 }
 
+/** Builds an order-bound context, injectable so the read path can be tested without a signer. */
+export type OrderContextFactory = (options: ContextOptions, binding: OrderBinding) => Promise<CommandContext>;
+
+/**
+ * Resolves the handle from the local store first, then builds a context bound
+ * to the order's recorded payer. The signer inside it is built lazily: a read
+ * served by a stored, unexpired capability never opens the key store, and the
+ * first signature checks that the signer is the payer on record.
+ */
 export async function withOrder<T>(
   options: OrderOptions,
-  run: (context: Awaited<ReturnType<typeof createContext>>, record: OrderRecord) => Promise<T>,
+  run: (context: CommandContext, record: OrderRecord) => Promise<T>,
+  contextFactory: OrderContextFactory = createContext,
 ): Promise<T> {
-  const context = await createContext(options);
+  const profileName = loadConfig(options.profile).profileName;
+  const record = findOrder(options.handle, profileName);
+  if (!record) {
+    throw new CliError({
+      code: "DASKI_ORDER_NOT_FOUND",
+      message: `No order in the local store matches "${options.handle}".`,
+      remediation:
+        "Orders are recorded when you buy. If this order was placed with this wallet " +
+        "elsewhere, rehydrate the store from the gateway's own history: daski order import --json",
+    });
+  }
+  const context = await contextFactory(options, { expectedPayer: record.payer });
   try {
-    const record = findOrder(options.handle, context.profileName);
-    if (!record) {
-      throw new CliError({
-        code: "DASKI_ORDER_NOT_FOUND",
-        message: `No order in the local store matches "${options.handle}".`,
-        remediation:
-          "Orders are recorded when you buy. If this order was placed elsewhere, " +
-          "the gateway's own history is the source of truth — but this CLI needs " +
-          "the handle in its store to bind a lifecycle signature to it.",
-      });
-    }
-    if (record.payer.toLowerCase() !== context.payerAddress.toLowerCase()) {
-      throw new CliError({ code: "DASKI_ORDER_PAYER_MISMATCH",
-        message: "The active signer differs from this order's payer.",
-        remediation: `Select the signer that placed order ${options.handle}.` });
-    }
     return await run(context, record);
+  } finally {
+    await context.close();
+  }
+}
+
+export interface OrderImportOptions extends ContextOptions {
+  json: boolean;
+}
+
+/** More pages than this is not a payer's history but a loop. */
+const IMPORT_MAX_PAGES = 40;
+
+/**
+ * `daski order import` — rehydrates `orders.json` from `daski_list_my_orders`
+ * under a wallet authorization, so a store lost with a host can be rebuilt
+ * for the same payer. Existing records are kept; a record without a handle
+ * gains the gateway's.
+ */
+export async function orderImport(
+  options: OrderImportOptions,
+  contextFactory: (options: ContextOptions) => Promise<CommandContext> = createContext,
+): Promise<Record<string, unknown>> {
+  const context = await contextFactory(options);
+  try {
+    let cursor: string | null = null;
+    let imported = 0;
+    let updated = 0;
+    let existing = 0;
+    let listed = 0;
+    for (let page = 0; page < IMPORT_MAX_PAGES; page += 1) {
+      const body: Record<string, unknown> = await callWalletQuery({
+        client: context.client,
+        signer: context.signer,
+        toolName: "daski_list_my_orders",
+        action: "list-orders",
+        payer: context.payerAddress,
+        request: { limit: 25, cursor },
+        chainId: context.profile.chainId,
+        gatewayUrl: context.profile.gatewayUrl,
+      });
+      if (!Array.isArray(body.orders)) throw new CliError({ code: "DASKI_ORDER_HISTORY_UNREADABLE",
+        message: "The gateway returned no readable order history.",
+        remediation: "Run daski doctor --json, then retry the import." });
+      for (const row of body.orders as Record<string, unknown>[]) {
+        listed += 1;
+        if (typeof row.orderHandle !== "string" || typeof row.providerAgentId !== "string" ||
+            typeof row.outcomeId !== "string") continue;
+        const intentId = typeof row.paymentIdentifier === "string" && row.paymentIdentifier.length > 0
+          ? row.paymentIdentifier : row.orderHandle;
+        const state = normalize(String(row.state ?? ""));
+        const known = findByIntent(intentId) ?? findOrder(row.orderHandle, context.profileName);
+        if (known) {
+          if (!known.handle) {
+            updateOrder(known.intentId, { handle: row.orderHandle, state });
+            updated += 1;
+          } else {
+            existing += 1;
+          }
+          continue;
+        }
+        const now = new Date().toISOString();
+        upsertOrder({
+          intentId,
+          handle: row.orderHandle,
+          profile: context.profileName,
+          providerAgentId: row.providerAgentId,
+          outcomeId: row.outcomeId,
+          payer: getAddress(context.payerAddress),
+          amount: typeof row.grossAmount === "string" && /^\d+$/.test(row.grossAmount) ? row.grossAmount : "0",
+          state,
+          createdAt: typeof row.createdAt === "string" ? row.createdAt : now,
+          updatedAt: now,
+        });
+        imported += 1;
+      }
+      cursor = typeof body.nextCursor === "string" && body.nextCursor.length > 0 ? body.nextCursor : null;
+      if (cursor === null) break;
+    }
+    return {
+      imported: true,
+      profile: context.profileName,
+      payer: context.payerAddress,
+      listed,
+      added: imported,
+      updated,
+      existing,
+      note: "Imported records carry the gateway's handle, state and identifier; pending reviews and read capabilities are not restored.",
+    };
   } finally {
     await context.close();
   }
