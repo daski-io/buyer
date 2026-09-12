@@ -344,7 +344,8 @@ export async function readiness(gatewayUrl: string, timeoutMs = 10_000): Promise
 
 /** Gateway refusals after which the same request may simply be retried. */
 export function isRetryableGatewayCode(code: string | undefined): boolean {
-  return code === "SIGNATURE_VERIFICATION_UNAVAILABLE" || code === "CONFIRMATION_SUBMISSION_PENDING";
+  return code === "SIGNATURE_VERIFICATION_UNAVAILABLE" || code === "SIGNATURE_VERIFICATION_BUSY" ||
+    code === "CONFIRMATION_SUBMISSION_PENDING";
 }
 
 /**
@@ -373,6 +374,12 @@ export function gatewayRefusalRemediation(
     case "SIGNATURE_VERIFICATION_UNAVAILABLE":
       return "The gateway could not reach the chain to verify the signature. Nothing was " +
         "consumed; retry the same command in a moment.";
+    case "SIGNATURE_VERIFICATION_BUSY":
+      return "The gateway is verifying too many contract-account signatures right now. Nothing " +
+        "was consumed; retry the same command in a moment.";
+    case "CONFIRMATION_SUBMISSION_LIMIT":
+      return "This order has used its three confirmation submissions. The current confirmation " +
+        "can still be revoked with --revoke; no further confirmation can be submitted.";
     default:
       return undefined;
   }

@@ -289,8 +289,10 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
     const facts = await factsReader(context, record);
     assertCapacity(facts, choice!, handle);
     const acknowledged = options.acknowledgeFinalTransition === true;
-    const prepared = await call(action, { phase: "prepare", submission: mode, acknowledgeFinalTransition: acknowledged,
-      ...(options.revoke ? {} : { confirmation: options.confirmation }) });
+    // Revocation preparation carries no acknowledgement: only an attestation
+    // can be final, and the gateway's closed request shape rejects the key.
+    const prepared = await call(action, { phase: "prepare", submission: mode,
+      ...(options.revoke ? {} : { confirmation: options.confirmation, acknowledgeFinalTransition: acknowledged }) });
     const summary = {
       submissionsUsed: prepared.submissionsUsed ?? null,
       revocationAvailable: prepared.revocationAvailable ?? null,
