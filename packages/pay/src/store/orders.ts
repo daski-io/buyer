@@ -123,14 +123,18 @@ const STORE_LOCK_WAIT_MS = 10_000;
  * earlier order's update. The rename only protects against truncation.
  */
 function withStoreLock<T>(run: () => T): T {
-  return withFileLockSync(`${ordersPath()}.lock`, {
+  const lock = `${ordersPath()}.lock`;
+  return withFileLockSync(lock, {
     waitMs: STORE_LOCK_WAIT_MS,
-    locked: () => new CliError({
+    locked: (reason) => new CliError({
       code: "DASKI_ORDER_STORE_LOCKED",
-      message: "Another daski command is updating the order store.",
-      remediation:
-        "Wait for it to finish, then re-run. If no daski process is running, remove the " +
-        "stale orders.json.lock file.",
+      message: reason === "orphaned"
+        ? "A daski process died while recovering the order store lock."
+        : "Another daski command is updating the order store.",
+      remediation: reason === "orphaned"
+        ? `If no daski process is running, remove ${lock} and ${lock}.reclaim, then re-run.`
+        : "Wait for it to finish, then re-run. If no daski process is running, remove the " +
+          "stale orders.json.lock file.",
     }),
   }, run);
 }
@@ -209,14 +213,18 @@ const ORDER_LOCK_WAIT_MS = 10_000;
  */
 export function withOrderLock<T>(intentId: string, run: () => Promise<T>): Promise<T> {
   const name = intentId.replace(/[^A-Za-z0-9._-]/g, "_");
-  return withFileLock(`${ordersPath()}.${name}.lock`, {
+  const lock = `${ordersPath()}.${name}.lock`;
+  return withFileLock(lock, {
     waitMs: ORDER_LOCK_WAIT_MS,
-    locked: () => new CliError({
+    locked: (reason) => new CliError({
       code: "DASKI_ORDER_LOCKED",
-      message: "Another daski command is updating this order's confirmation record.",
-      remediation:
-        "Wait for it to finish, then re-run. If no daski process is running, remove the " +
-        "stale .lock file next to orders.json.",
+      message: reason === "orphaned"
+        ? "A daski process died while recovering this order's lock."
+        : "Another daski command is updating this order's confirmation record.",
+      remediation: reason === "orphaned"
+        ? `If no daski process is running, remove ${lock} and ${lock}.reclaim, then re-run.`
+        : "Wait for it to finish, then re-run. If no daski process is running, remove the " +
+          "stale .lock file next to orders.json.",
     }),
   }, run);
 }

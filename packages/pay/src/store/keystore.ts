@@ -288,12 +288,15 @@ function withKeystoreLock<T>(path: string, run: () => Promise<T>): Promise<T> {
   const lock = `${path}.lock`;
   return withFileLock(lock, {
     waitMs: LOCK_WAIT_MS,
-    locked: () => new CliError({
+    locked: (reason) => new CliError({
       code: "DASKI_KEYSTORE_LOCKED",
-      message: `Another process holds the keystore lock ${lock}.`,
-      remediation:
-        "Wait for the other daski command to finish, then re-run. If no daski process " +
-        `is running, remove the stale lock file. See ${DOC}`,
+      message: reason === "orphaned"
+        ? `A daski process died while recovering the keystore lock ${lock}.`
+        : `Another process holds the keystore lock ${lock}.`,
+      remediation: reason === "orphaned"
+        ? `If no daski process is running, remove ${lock} and ${lock}.reclaim, then re-run. See ${DOC}`
+        : "Wait for the other daski command to finish, then re-run. If no daski process " +
+          `is running, remove the stale lock file. See ${DOC}`,
     }),
   }, run);
 }

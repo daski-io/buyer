@@ -18,17 +18,21 @@
  * receipt succeeded, the pinned EAS emitted the matching event with the payer
  * as attester, `getAttestation` binds the attestation to what was prepared,
  * and the gateway's finalized read, anchored at or past the receipt's block,
- * shows the result. Evidence is bound to the canonical chain: the receipt's
- * block must be the chain's block at that height as the profile's RPC
- * reports it, and the gateway's finalized block must be that RPC's canonical
- * block at its height, so the receipt's block is a finalized ancestor of the
- * anchor. A batched receipt may carry other orders' events first; every
+ * shows the result. Evidence is bound to one finalized view: the profile's
+ * RPC must report the receipt's height as finalized before its canonical
+ * block at that height is compared with the receipt's block (a read below
+ * the RPC's own finalized height cannot change afterwards), attestations are
+ * read pinned to that finalized height, and the gateway's finalized block
+ * must be that RPC's canonical block at its height, so the receipt's block is
+ * a finalized ancestor of the anchor. The RPC is taken as one consistent
+ * node. A batched receipt may carry other orders' events first; every
  * candidate event is tried and the one whose attestation binds is taken.
  * `--abandon` clears the local record when no hash is recorded or the receipt
- * is a revert, and cancels nothing at the wallet. A hash recorded by mistake
- * is corrected (replaced with `--tx`, or cleared with `--abandon`) only once
- * its transaction is canonical and finalized and no candidate event binds to
- * this call; a missing, pending, or matching receipt keeps the record.
+ * is a revert in a finalized canonical block, and cancels nothing at the
+ * wallet. A hash recorded by mistake is corrected (replaced with `--tx`, or
+ * cleared with `--abandon`) only once its transaction is finalized and
+ * canonical and no candidate event binds to this call; a missing, pending,
+ * unfinalized, or matching receipt keeps the record.
  *
  * One order's journal is updated under a per-order lock: the read-check-write
  * of a preparation spans gateway and chain calls, and two concurrent
@@ -449,8 +453,9 @@ async function expectedBinding(
     dataHash: keccak256(current.data), uid: facts.currentUid };
 }
 
-async function readAttestation(chain: ChainReader, eas: Address, uid: Hex): Promise<Attestation> {
-  return chain.readContract<Attestation>({ address: eas, abi: EAS_ABI, functionName: "getAttestation", args: [uid] });
+async function readAttestation(chain: ChainReader, eas: Address, uid: Hex, blockNumber?: bigint): Promise<Attestation> {
+  return chain.readContract<Attestation>({ address: eas, abi: EAS_ABI, functionName: "getAttestation", args: [uid],
+    ...(blockNumber === undefined ? {} : { blockNumber }) });
 }
 
 // -- direct record management: --tx, --check, --abandon -------------------------
@@ -500,20 +505,30 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
 
   if (options.check) return checkDirectRecord(context, record, tracked, handle, base);
 
-  // --abandon: only when nothing recorded can still execute, or the recorded
-  // transaction is canonical, finalized, and provably not this call.
+  // --abandon: only when nothing recorded can still execute: no hash, a
+  // revert in a finalized canonical block, or a finalized canonical
+  // transaction provably not this call. A revert in an unfinalized block
+  // settles nothing: a reorganization can re-include the transaction against
+  // different state.
   let unrelatedReceipt: string | undefined;
   if (tracked.txHash) {
     const receipt = await context.chain.getTransactionReceipt(tracked.txHash);
     if (!receipt) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
       message: `Transaction ${tracked.txHash} has no receipt yet and may still execute.`,
-      remediation: `Wait for it to be mined, then run daski order confirm ${handle} --check. Abandon is allowed only when the receipt is a revert or the transaction is finalized and unrelated to this call.` });
+      remediation: `Wait for it to be mined, then run daski order confirm ${handle} --check. Abandon is allowed only when the receipt is a finalized revert or the transaction is finalized and unrelated to this call.` });
     if (receipt.status === "success") {
       const unrelated = await provenUnrelated(context, tracked, handle, receipt);
       if (!unrelated) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
         message: `Transaction ${tracked.txHash} executed; the record cannot be abandoned.`,
         remediation: `Verify it with daski order confirm ${handle} --check.` });
       unrelatedReceipt = unrelated;
+    } else {
+      const view = await receiptView(context, receipt);
+      if (!view.final || !view.canonical) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
+        message: `Transaction ${tracked.txHash} reverted in ${view.final
+          ? "a block that is not the chain's canonical block at its height"
+          : `block ${receipt.blockNumber}, which is not finalized yet (finalized ${view.finalized})`}; it may still be re-included.`,
+        remediation: `Wait for finality (minutes to tens of minutes on Base), then run daski order confirm ${handle} --check and --abandon.` });
     }
   }
   updateOrder(record.intentId, { confirmationTx: { ...tracked, state: "abandoned" } });
@@ -524,44 +539,57 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
     next: `Prepare again when ready: daski order confirm ${handle} --choice Confirmed|NotConfirmed.` };
 }
 
+/** The receipt's block in the profile RPC's finalized view. */
+interface ReceiptView {
+  /** The RPC's own finalized height. */
+  finalized: bigint;
+  /** The receipt's height is at or below that, so the RPC's canonical block at it cannot change. */
+  final: boolean;
+  /** Read only when final: the RPC's canonical block at the receipt's height is the receipt's block. */
+  canonical: boolean;
+}
+
 /**
- * The receipt's block is the chain's canonical block at that height, as the
- * profile's RPC reports the chain now. A receipt whose block was replaced
- * proves nothing: the transaction may be re-included or dropped.
+ * The one finalized view every canonical read uses (R04): the RPC's finalized
+ * height is read first, and the canonical block at the receipt's height is
+ * compared only when that height is already final there, so the comparison
+ * cannot be overtaken by a reorganization. The RPC is one consistent node;
+ * a balancer over unsynchronized nodes is outside this guarantee.
  */
-async function receiptCanonical(context: CommandContext, receipt: TransactionReceiptLike): Promise<boolean> {
-  return sameHex(await context.chain.getBlockHash(receipt.blockNumber), receipt.blockHash);
+async function receiptView(context: CommandContext, receipt: TransactionReceiptLike): Promise<ReceiptView> {
+  const finalized = await context.chain.getFinalizedBlockNumber();
+  if (receipt.blockNumber > finalized) return { finalized, final: false, canonical: false };
+  const canonical = sameHex(await context.chain.getBlockHash(receipt.blockNumber), receipt.blockHash);
+  return { finalized, final: true, canonical };
 }
 
 /**
  * The reason a recorded, successful transaction is provably not the prepared
- * call, or null when it is (or may be) this call. Proof requires the receipt
- * to be canonical and finalized, and no candidate event to bind. A related
- * receipt keeps the record; an unrelated one that is not yet canonical and
- * finalized is refused until it is, so a reorg cannot turn a correction into
- * a lost call.
+ * call, or null when it is (or may be) this call. The finalized view is
+ * established first; only a finalized canonical receipt none of whose
+ * candidate events binds is unrelated. A related receipt keeps the record;
+ * an unrelated one that is not yet finalized and canonical is refused until
+ * it is, so a reorganization cannot turn a correction into a lost call.
  */
 async function provenUnrelated(context: CommandContext, tracked: ConfirmationTxRecord, handle: string,
   known?: TransactionReceiptLike): Promise<string | null> {
   if (!tracked.txHash) return null;
   const receipt = known ?? await context.chain.getTransactionReceipt(tracked.txHash);
   if (!receipt || receipt.status !== "success") return null;
-  let reason: string;
+  const view = await receiptView(context, receipt);
+  if (!view.final) throw new CliError({ code: "DASKI_CONFIRMATION_TX_UNFINALIZED",
+    message: `Transaction ${tracked.txHash} is not finalized yet (block ${receipt.blockNumber}, finalized ${view.finalized}); whether it carried this confirmation cannot be settled.`,
+    remediation: `Wait for finality (minutes to tens of minutes on Base), then repeat the same daski order confirm ${handle} command.` });
+  if (!view.canonical) throw new CliError({ code: "DASKI_CONFIRMATION_TX_UNFINALIZED",
+    message: `Transaction ${tracked.txHash} was carried by a block that is not the chain's canonical block at height ${receipt.blockNumber}.`,
+    remediation: `The transaction may be re-included or dropped. Wait, then repeat the same daski order confirm ${handle} command.` });
   try {
-    await boundConfirmationUid(context, receipt, tracked);
+    await boundConfirmationUid(context, receipt, tracked, view.finalized);
     return null;
   } catch (error) {
     if (!(error instanceof CliError) || error.code !== "DASKI_CONFIRMATION_RECEIPT_UNRELATED") throw error;
-    reason = error.message;
+    return error.message;
   }
-  if (!(await receiptCanonical(context, receipt))) throw new CliError({ code: "DASKI_CONFIRMATION_TX_UNFINALIZED",
-    message: `Transaction ${tracked.txHash} carries no event that binds to the prepared call, but the block that carried it is not the chain's canonical block at height ${receipt.blockNumber}.`,
-    remediation: `The transaction may be re-included or dropped. Wait, then repeat the same daski order confirm ${handle} command.` });
-  const finalized = await context.chain.getFinalizedBlockNumber();
-  if (receipt.blockNumber > finalized) throw new CliError({ code: "DASKI_CONFIRMATION_TX_UNFINALIZED",
-    message: `Transaction ${tracked.txHash} carries no event that binds to the prepared call but is not finalized yet (block ${receipt.blockNumber}, finalized ${finalized}).`,
-    remediation: `Wait for finality (minutes to tens of minutes on Base), then repeat the same daski order confirm ${handle} command.` });
-  return reason;
 }
 
 async function checkDirectRecord(context: CommandContext, record: OrderRecord, tracked: ConfirmationTxRecord,
@@ -577,16 +605,25 @@ async function checkDirectRecord(context: CommandContext, record: OrderRecord, t
     return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "pending",
       next: `The transaction is not mined yet. Run daski order confirm ${handle} --check again shortly.` };
   }
+  const view = await receiptView(context, receipt);
+  const later = `Finality on Base takes minutes to tens of minutes. Run daski order confirm ${handle} --check again later.`;
   if (receipt.status !== "success") {
-    return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "reverted",
-      next: `The transaction reverted. Clear the record with daski order confirm ${handle} --abandon, then prepare again.` };
+    const settled = view.final && view.canonical;
+    return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "reverted", revertFinal: settled,
+      next: settled
+        ? `The transaction reverted in a finalized block. Clear the record with daski order confirm ${handle} --abandon, then prepare again.`
+        : `The transaction reverted, but ${view.final ? "the block that carried it is not the chain's canonical block" : "its block is not finalized yet"}; it may still be re-included. Run daski order confirm ${handle} --check again later, then --abandon.` };
   }
-  if (!(await receiptCanonical(context, receipt))) {
+  if (!view.final) {
+    return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "success",
+      verification: `the receipt's block ${receipt.blockNumber} is not finalized on the profile's RPC yet (finalized ${view.finalized})`, next: later };
+  }
+  if (!view.canonical) {
     return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "reorganized",
       verification: `the block that carried the transaction is not the chain's canonical block at height ${receipt.blockNumber}`,
       next: `The transaction may be re-included or dropped. Run daski order confirm ${handle} --check again later.` };
   }
-  const uid = await boundConfirmationUid(context, receipt, tracked);
+  const uid = await boundConfirmationUid(context, receipt, tracked, view.finalized);
   const check = await callAuthorizedLifecycleTool({
     client: context.client, signer: context.signer,
     toolName: tracked.action === "attest" ? "daski_confirm_delivery" : "daski_revoke_delivery_confirmation",
@@ -595,17 +632,23 @@ async function checkDirectRecord(context: CommandContext, record: OrderRecord, t
     chainId: context.profile.chainId, gatewayUrl: context.profile.gatewayUrl,
   });
   const notYet = (verification: string) => ({ ...base, txHash: tracked.txHash, uid, state: "submitted", receipt: "success",
-    verification, check,
-    next: `Finality on Base takes minutes to tens of minutes. Run daski order confirm ${handle} --check again later.` });
+    verification, check, next: later });
   const anchor = finalizedAnchor(check);
   if (!anchor || anchor.number < receipt.blockNumber) {
     return notYet("the receipt, the EAS event and the attestation match the prepared call; the gateway's finalized read is not past the receipt's block yet");
   }
   // The gateway's finalized block must be this RPC's canonical block at its
-  // height; the receipt's canonical block at a lower or equal height is then
-  // its finalized ancestor, so the receipt's effect is what the anchor shows.
+  // height; the receipt's block, final on this RPC at a lower or equal
+  // height, is then its ancestor, so the receipt's effect is what the anchor
+  // shows. The receipt's block is compared once more against the same view
+  // so an RPC that contradicted itself between the reads cannot pass.
   if (!sameHex(await context.chain.getBlockHash(anchor.number), anchor.hash)) {
     return notYet(`the gateway's finalized block ${anchor.number} is not the chain's canonical block at that height as the profile's RPC reports it`);
+  }
+  if (!sameHex(await context.chain.getBlockHash(receipt.blockNumber), receipt.blockHash)) {
+    return { ...base, txHash: tracked.txHash, uid, state: "submitted", receipt: "reorganized", check,
+      verification: `the profile's RPC changed its canonical block at height ${receipt.blockNumber} between reads`,
+      next: `Run daski order confirm ${handle} --check again later.` };
   }
   if (!finalizedReflects(check, tracked, uid)) {
     return notYet("the receipt, the EAS event and the attestation match the prepared call; the gateway's finalized read does not show it yet");
@@ -621,8 +664,8 @@ function unrelatedReceipt(reason: string): CliError {
     message: `The recorded transaction does not carry this confirmation: ${reason}.`,
     remediation:
       "The record stays submitted. If the hash was recorded by mistake, record the right one with " +
-      "--tx <hash> or clear the record with --abandon once this transaction is finalized; a reverted " +
-      "one can be abandoned at once. Otherwise check the wallet's tool for the transaction that carried the prepared call.",
+      "--tx <hash> or clear the record with --abandon; a reverted transaction can be abandoned once its " +
+      "block is finalized. Otherwise check the wallet's tool for the transaction that carried the prepared call.",
   });
 }
 
@@ -657,11 +700,12 @@ function candidateEventUids(receipt: TransactionReceiptLike, easAddress: Address
 /**
  * The uid among the receipt's candidate events whose attestation binds to
  * the prepared call, or DASKI_CONFIRMATION_RECEIPT_UNRELATED when none does.
- * The attestation is read at the latest state: a uid commits to every field
- * the binding checks, so the same uid never names different content on any
- * fork, and a revocation time only ever moves from zero.
+ * Attestations are read pinned to the RPC's finalized height, the same view
+ * the receipt was placed in; a uid commits to every field the binding checks,
+ * and a revocation time only ever moves from zero, so that view is complete.
  */
-async function boundConfirmationUid(context: CommandContext, receipt: TransactionReceiptLike, tracked: ConfirmationTxRecord): Promise<Hex> {
+async function boundConfirmationUid(context: CommandContext, receipt: TransactionReceiptLike, tracked: ConfirmationTxRecord,
+  finalizedBlock: bigint): Promise<Hex> {
   const easAddress = context.profile.easAddress;
   const { uids, sawEas } = candidateEventUids(receipt, easAddress, tracked, context.payerAddress);
   const wanted = tracked.action === "attest" ? "Attested" : "Revoked";
@@ -672,7 +716,7 @@ async function boundConfirmationUid(context: CommandContext, receipt: Transactio
   }
   const mismatches: string[] = [];
   for (const uid of uids) {
-    const mismatch = bindingMismatch(await readAttestation(context.chain, easAddress, uid), tracked, uid);
+    const mismatch = bindingMismatch(await readAttestation(context.chain, easAddress, uid, finalizedBlock), tracked, uid);
     if (!mismatch) return uid;
     mismatches.push(mismatch);
   }

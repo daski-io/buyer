@@ -53,7 +53,8 @@ export interface ChainReader {
   getFinalizedBlockNumber(): Promise<bigint>;
   /** The hash of the canonical block at a height, as this RPC reports the chain now. */
   getBlockHash(blockNumber: bigint): Promise<Hex>;
-  readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }): Promise<T>;
+  /** A contract read, at the latest state or pinned to a block number. */
+  readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[]; blockNumber?: bigint }): Promise<T>;
 }
 
 function rpcUnavailable(rpcUrl: string, error: unknown): CliError {
@@ -124,7 +125,7 @@ export function createChainReader(rpcUrl: string, timeoutMs = ERC1271_CALL_TIMEO
         throw rpcUnavailable(rpcUrl, error);
       }
     },
-    async readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }) {
+    async readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[]; blockNumber?: bigint }) {
       try {
         return await client.readContract(args as never) as T;
       } catch (error) {

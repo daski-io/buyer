@@ -89,7 +89,7 @@ function fixture(accountType: "eoa" | "contract", action: "attest" | "revoke") {
       topics: encodeEventTopics({ abi: EAS_ABI, eventName: action === "attest" ? "Attested" : "Revoked", args: { recipient: RECIPIENT, attester: payer.address, schemaUID: facts.schemaUid } }) as Hex[], data: UID }] }),
     getFinalizedBlockNumber: async () => 100n,
     getBlockHash: async (number) => number === 42n ? BLOCK_42 : BLOCK_50,
-    readContract: async <T,>(args: { functionName: string }): Promise<T> => {
+    readContract: async <T,>(args: { functionName: string; blockNumber?: bigint }): Promise<T> => {
       if (args.functionName === "getAttestation") return { ...attestation, revocationTime: action === "revoke" ? 7n : 0n } as T;
       throw new Error(`unexpected read ${args.functionName}`);
     },

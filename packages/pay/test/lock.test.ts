@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { CliError } from "../src/cli/errors.js";
 import { processAlive, withFileLock, withFileLockSync } from "../src/store/lock.js";
 
-const locked = () => new CliError({ code: "TEST_LOCKED", message: "locked", remediation: "wait" });
+const locked = (reason: "held" | "orphaned") => new CliError({ code: reason === "orphaned" ? "TEST_ORPHANED" : "TEST_LOCKED", message: reason, remediation: "wait" });
 const options = { waitMs: 150, locked };
 
 async function withDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
@@ -79,5 +79,63 @@ test("concurrent holders serialize: the second waits for the live first and then
     await Promise.all([first, second]);
     assert.deepEqual(order, ["first-in", "first-out", "second"]);
     assert.equal(existsSync(lock), false);
+  });
+});
+
+test("a lock is created populated: no reader ever sees an empty file, and no staging file is left behind", async () => {
+  await withDir(async (dir) => {
+    const lock = join(dir, "store.lock");
+    const { readdirSync, statSync } = await import("node:fs");
+    await withFileLock(lock, options, async () => {
+      assert.match(readFileSync(lock, "utf8"), new RegExp(`^${process.pid} [0-9a-f]{16}$`));
+      assert.ok(statSync(lock).size > 0);
+      assert.deepEqual(readdirSync(dir), ["store.lock"], "the staging file is gone once linked");
+    });
+    assert.deepEqual(readdirSync(dir), []);
+  });
+});
+
+test("reclaiming a dead owner's lock is serialized: a live reclaimer's reclaim lock makes others wait, a dead one fails closed", async () => {
+  await withDir(async (dir) => {
+    const lock = join(dir, "store.lock");
+    const dead = `${2 ** 22 - 1} deadbeefdeadbeef`;
+    writeFileSync(lock, dead);
+    // Another live process is mid-reclaim: nothing is unlinked and the waiter keeps waiting.
+    writeFileSync(`${lock}.reclaim`, `${process.pid} 0123456789abcdef`);
+    assert.throws(() => withFileLockSync(lock, options, () => "must not run"), (error: unknown) => error instanceof CliError && error.code === "TEST_LOCKED");
+    assert.equal(readFileSync(lock, "utf8"), dead, "the dead owner's lock is left to the reclaimer that holds the reclaim lock");
+    assert.equal(existsSync(`${lock}.reclaim`), true);
+    // The reclaimer itself died: recovery needs a person; nothing is unlinked.
+    writeFileSync(`${lock}.reclaim`, `${2 ** 22 - 2} feedfacefeedface`);
+    assert.throws(() => withFileLockSync(lock, options, () => "must not run"), (error: unknown) => error instanceof CliError && error.code === "TEST_ORPHANED");
+    await assert.rejects(withFileLock(lock, options, async () => "must not run"), (error: unknown) => error instanceof CliError && error.code === "TEST_ORPHANED");
+    assert.equal(readFileSync(lock, "utf8"), dead);
+    assert.equal(existsSync(`${lock}.reclaim`), true);
+    // With the reclaim lock gone, the dead owner's lock is reclaimed and both files are cleaned up afterwards.
+    rmSync(`${lock}.reclaim`);
+    assert.equal(withFileLockSync(lock, options, () => "ran"), "ran");
+    assert.equal(existsSync(lock), false);
+    assert.equal(existsSync(`${lock}.reclaim`), false);
+  });
+});
+
+test("many concurrent waiters on a dead owner's lock run one at a time and leave nothing behind", async () => {
+  await withDir(async (dir) => {
+    const lock = join(dir, "store.lock");
+    writeFileSync(lock, `${2 ** 22 - 1} deadbeefdeadbeef`);
+    let inside = 0;
+    let overlaps = 0;
+    const holders = Array.from({ length: 8 }, (_, index) => withFileLock(lock, { waitMs: 5_000, locked }, async () => {
+      inside += 1;
+      if (inside > 1) overlaps += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5 + index));
+      inside -= 1;
+      return index;
+    }));
+    const results = await Promise.all(holders);
+    assert.deepEqual(results, [0, 1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(overlaps, 0, "the critical section never overlapped");
+    const { readdirSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(dir), []);
   });
 });
