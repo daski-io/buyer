@@ -19,7 +19,8 @@ import { getAddress, isAddress, type Address, type Hex } from "viem";
 import type { SignerAdapter, TypedDataRequest } from "@daski/x402-scheme";
 import { CliError } from "../cli/errors.js";
 import { serializeTypedData } from "./circle.js";
-import { isBoundedSignature } from "./signature.js";
+import { NOT_DEPLOYED_REMEDIATION } from "./contract.js";
+import { hasErc6492Suffix, isBoundedSignature } from "./signature.js";
 
 const DOC = "https://github.com/daski-io/buyer/blob/main/docs/signers.md#circle-agent";
 export const CIRCLE_CLI_PACKAGE = "@circle-fin/cli";
@@ -56,10 +57,20 @@ export function circleChainName(chainId: number): "BASE" | "BASE-SEPOLIA" {
   });
 }
 
+/**
+ * The environment the vendor CLI runs with: this process's, minus every
+ * `DASKI_*` variable. The vendor never needs them, and two of them can carry
+ * key material (`DASKI_PAYER_PRIVATE_KEY`, `DASKI_KEYSTORE_PASSPHRASE_FILE`).
+ */
+export function vendorEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("DASKI_")));
+}
+
 /** Spawns the vendor CLI directly from PATH with an argument array. */
 export const spawnCircle: CommandRunner = (args, options) => new Promise((resolve, reject) => {
   const child = spawn("circle", args, {
     stdio: ["ignore", "pipe", "ignore"],
+    env: vendorEnvironment(),
     timeout: options.timeoutMs,
     killSignal: "SIGKILL",
     windowsHide: true,
@@ -213,6 +224,9 @@ export async function createCircleAgentSigner(options: CircleAgentSignerOptions)
       ], "sign typed data");
       const signature = signatureFromOutput(output);
       if (!signature) throw outputInvalid("signing");
+      // An ERC-6492 wrapper means the wallet signed counterfactually; the
+      // gateway and the facilitator refuse it, so it is refused here first.
+      if (hasErc6492Suffix(signature)) throw counterfactualSignature(address);
       return signature;
     },
     describe: () => ({
@@ -221,6 +235,16 @@ export async function createCircleAgentSigner(options: CircleAgentSignerOptions)
       conformance: "candidate-pending-conformance",
     }),
   };
+}
+
+function counterfactualSignature(address: Address): CliError {
+  return new CliError({
+    code: "DASKI_SIGNER_NOT_DEPLOYED",
+    message:
+      `The circle CLI returned an ERC-6492 (counterfactual) signature for ${address}: the wallet ` +
+      "signed as an undeployed account, and Daski refuses ERC-6492 wrappers.",
+    remediation: NOT_DEPLOYED_REMEDIATION,
+  });
 }
 
 /** The signature in `--quiet` output: bare hex, or a JSON object carrying `signature`. */

@@ -6,14 +6,42 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
+import { CliError } from "../src/cli/errors.js";
 import { runDoctor, type DoctorTransport } from "../src/commands/doctor.js";
 import { EAS_PREDEPLOY } from "../src/config.js";
 import { parseGatewayMetadata } from "../src/gateway/metadata.js";
 import { legacyKeyringDescription, type HostEnvironment } from "../src/host.js";
+
+const REQUIRED_TOOLS = ["daski_buy_outcome", "daski_get_payment_challenge", "daski_get_order_access"];
+const ERC1271_MAGIC = `0x1626ba7e${"00".repeat(28)}` as const;
+const CONTRACT_WALLET = "0x161f376d31f7f575e9c4cb865a50c3b0fec6ddc4";
+
+/** A scripted `circle` on PATH: one agent wallet, and a bounded non-6492 signature for anything else. */
+async function withFakeCircle(run: () => Promise<void>): Promise<void> {
+  const directory = mkdtempSync(join(tmpdir(), "daski-doctor-circle-"));
+  const script = join(directory, "circle");
+  writeFileSync(script, [
+    "#!/bin/sh",
+    'if [ "$2" = "list" ]; then',
+    `  printf '%s' '${JSON.stringify({ wallets: [{ address: CONTRACT_WALLET, blockchain: "BASE-SEPOLIA", type: "agent" }] })}'`,
+    "else",
+    `  printf '%s\\n' '0x${"ab".repeat(100)}'`,
+    "fi",
+  ].join("\n"));
+  chmodSync(script, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${directory}${delimiter}${previousPath ?? ""}`;
+  try {
+    await run();
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 const ENV = ["DASKI_HOME", "DASKI_PAYER_PRIVATE_KEY"] as const;
 const account = privateKeyToAccount(`0x${"11".repeat(32)}`);
@@ -34,7 +62,7 @@ async function withHome(run: (home: string) => Promise<void>): Promise<void> {
 function transport(overrides: Partial<DoctorTransport> = {}): DoctorTransport {
   return {
     readiness: async () => ({ reachable: true, status: "ready", version: "0.40.0" }),
-    probe: async (target) => { await target.close(); return { reachable: true, tools: ["daski_buy_outcome"], readableVia: "daski_list_outcomes" }; },
+    probe: async (target) => { await target.close(); return { reachable: true, tools: [...REQUIRED_TOOLS], readableVia: "daski_list_outcomes" }; },
     metadata: async () => parseGatewayMetadata({
       buyerCli: { package: "@daski/pay", version: "0.1.0" },
       confirmationSigning: { chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: `0x${"11".repeat(32)}`, reputationStorage: "0x3333333333333333333333333333333333333333" },
@@ -109,5 +137,80 @@ test("without any key the keychain backend on Linux is refused and the file back
     assert.equal(issue.severity, "blocking");
     assert.match(issue.remediation, /DASKI_KEY_BACKEND=file/);
     assert.equal(report.host.keyDurability, "none");
+  });
+});
+
+const unavailable = (): never => {
+  throw new CliError({ code: "DASKI_GATEWAY_METADATA_UNAVAILABLE", message: "Could not read /.well-known/mcp.json: HTTP 503",
+    remediation: "Check connectivity to the gateway, then re-run. Nothing was signed.", details: { retryable: true } });
+};
+
+test("a contract signer needs the gateway's well-known document: an unreadable one blocks, and for a plain wallet it is a warning",
+  { skip: process.platform === "win32" }, async () => {
+  await withHome(async () => {
+    await withFakeCircle(async () => {
+      const contractHost = host({ declaredBackend: "circle-agent" });
+      const chain = () => ({
+        getCode: async () => "0x6080" as const, call: async () => ({ data: ERC1271_MAGIC, reverted: false }),
+        getTransactionReceipt: async () => null, getFinalBlockNumber: async () => 0n, getBlockHash: async () => `0x${"00".repeat(32)}` as const,
+        readContract: async () => { throw new Error("no read expected"); },
+      });
+      const healthy = await runDoctor({ host: contractHost, signerOverride: "circle-agent", transport: transport({ chain,
+        metadata: async () => parseGatewayMetadata({ payerAccounts: { types: ["eoa", "contract"], counterfactual: false },
+          confirmationSigning: { chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: `0x${"11".repeat(32)}`, reputationStorage: "0x3333333333333333333333333333333333333333" } }) }) });
+      assert.equal(healthy.signer.accountType, "contract");
+      assert.equal(healthy.signer.deployment, "deployed");
+      assert.equal(healthy.signer.verifiedVia, "erc1271");
+      assert.equal(healthy.issues.filter((issue) => issue.severity === "blocking").length, 0, JSON.stringify(healthy.issues));
+
+      const blocked = await runDoctor({ host: contractHost, signerOverride: "circle-agent", transport: transport({ chain, metadata: unavailable }) });
+      const issue = blocked.issues.find((entry) => entry.code === "DASKI_GATEWAY_METADATA_UNAVAILABLE");
+      assert.ok(issue, JSON.stringify(blocked.issues));
+      assert.equal(issue.severity, "blocking");
+      assert.match(issue.remediation, /retryable/);
+      assert.match(issue.remediation, /payerAccounts/);
+      assert.equal(blocked.ok, false);
+    });
+    process.env.DASKI_PAYER_PRIVATE_KEY = `0x${"11".repeat(32)}`;
+    const warned = await runDoctor({ host: host(), transport: transport({ metadata: unavailable }) });
+    const issue = warned.issues.find((entry) => entry.code === "DASKI_GATEWAY_METADATA_UNAVAILABLE");
+    assert.equal(issue?.severity, "warning");
+    assert.equal(warned.ok, true, JSON.stringify(warned.issues));
+  });
+});
+
+test("a document without confirmation pins or payer accounts is named as a warning, and an unreadable order store blocks", async () => {
+  await withHome(async (home) => {
+    process.env.DASKI_PAYER_PRIVATE_KEY = `0x${"11".repeat(32)}`;
+    const accountsOnly = await runDoctor({ host: host(), transport: transport({ metadata: async () => parseGatewayMetadata({
+      payerAccounts: { types: ["eoa"], counterfactual: false } }) }) });
+    const pins = accountsOnly.issues.find((issue) => issue.code === "DASKI_GATEWAY_CONFIRMATION_PINS_MISSING");
+    assert.equal(pins?.severity, "warning");
+    assert.match(pins!.message, /confirmationSigning/);
+    assert.match(pins!.message, /delivery confirmations are refused/);
+    assert.equal(accountsOnly.ok, true, "purchases are unaffected");
+    assert.ok(!accountsOnly.issues.some((issue) => issue.code === "DASKI_GATEWAY_PAYER_ACCOUNTS_MISSING"));
+
+    const pinsOnly = await runDoctor({ host: host(), transport: transport({ metadata: async () => parseGatewayMetadata({
+      confirmationSigning: { chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: `0x${"11".repeat(32)}`, reputationStorage: "0x3333333333333333333333333333333333333333" } }) }) });
+    const accounts = pinsOnly.issues.find((issue) => issue.code === "DASKI_GATEWAY_PAYER_ACCOUNTS_MISSING");
+    assert.equal(accounts?.severity, "warning");
+    assert.match(accounts!.message, /payerAccounts/);
+    assert.ok(!pinsOnly.issues.some((issue) => issue.code === "DASKI_GATEWAY_CONFIRMATION_PINS_MISSING"));
+
+    const missingTool = await runDoctor({ host: host(), transport: transport({ probe: async (target) => {
+      await target.close();
+      return { reachable: true, tools: ["daski_buy_outcome", "daski_get_payment_challenge"], readableVia: "daski_list_outcomes" };
+    } }) });
+    const tools = missingTool.issues.find((issue) => issue.code === "DASKI_GATEWAY_TOOLS_MISSING");
+    assert.equal(tools?.severity, "blocking");
+    assert.match(tools!.message, /daski_get_order_access/);
+
+    writeFileSync(join(home, "orders.json"), "{not json");
+    const store = await runDoctor({ host: host(), transport: transport() });
+    const unreadable = store.issues.find((issue) => issue.code === "DASKI_ORDER_STORE_UNREADABLE");
+    assert.equal(unreadable?.severity, "blocking");
+    assert.equal(store.caps.sessionAuthorizedAtomic, null, "the budget total is never reported as zero for a store that cannot be read");
+    assert.equal(store.ok, false);
   });
 });

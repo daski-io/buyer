@@ -136,6 +136,32 @@ export function easAddressMismatch(gatewayEas: Address, profileEas: Address, cha
   });
 }
 
+/** The document carries no usable `confirmationSigning` block; no delivery confirmation can be prepared. */
+export function confirmationPinsMissing(gatewayUrl: string): CliError {
+  return new CliError({
+    code: "DASKI_GATEWAY_CONFIRMATION_PINS_MISSING",
+    message:
+      `The gateway at ${gatewayUrl} publishes no usable confirmationSigning block (chainId, eas, ` +
+      "schemaUid, reputationStorage) in /.well-known/mcp.json, so delivery confirmations are refused.",
+    remediation:
+      "Purchases are unaffected. Ask the gateway operator to publish confirmationSigning, then re-run; " +
+      "no confirmation is prepared or signed until the pins are readable.",
+  });
+}
+
+/** The document carries no usable `payerAccounts` block; the gateway does not say which account types it verifies. */
+export function payerAccountsMissing(gatewayUrl: string): CliError {
+  return new CliError({
+    code: "DASKI_GATEWAY_PAYER_ACCOUNTS_MISSING",
+    message:
+      `The gateway at ${gatewayUrl} publishes no usable payerAccounts block in /.well-known/mcp.json, ` +
+      "so it does not state which payer account types it verifies.",
+    remediation:
+      "A plain wallet can buy; a contract wallet is refused (DASKI_GATEWAY_EOA_ONLY) until the gateway " +
+      "lists contract under payerAccounts.types. Ask the gateway operator to publish payerAccounts, then re-run.",
+  });
+}
+
 /**
  * Reads and parses the gateway's well-known document. A transport failure or
  * a non-JSON answer is `DASKI_GATEWAY_METADATA_UNAVAILABLE`, retryable.

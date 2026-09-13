@@ -52,7 +52,7 @@ import { finalityTagFor } from "../chain/reader.js";
 import { CliError } from "../cli/errors.js";
 import type { CommandContext } from "../context.js";
 import { callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
-import { easAddressMismatch } from "../gateway/metadata.js";
+import { confirmationPinsMissing, easAddressMismatch } from "../gateway/metadata.js";
 import {
   findByIntent, updateOrder, withOrderLock,
   type ConfirmationTxExpected, type ConfirmationTxRecord, type OrderRecord,
@@ -287,16 +287,18 @@ export async function runConfirmation(options: ConfirmationOptions): Promise<Rec
 
 /**
  * Gateway refusals the submit phase raises before any sponsorship is reserved
- * (request shape, mode, signature, stale preparation, exhausted budget): the
- * signed request was never admitted, so the retained submission is cleared and
- * another mode can be prepared. Anything else (an unavailable chain read, a
- * transport failure) may have been admitted and keeps the record for --resume.
+ * (request shape, mode, signature, exhausted budget): the signed request was
+ * never admitted, so the retained submission is cleared and another mode can
+ * be prepared. Anything else may have been admitted and keeps the record for
+ * --resume: an unavailable chain read, a transport failure, and
+ * CONFIRMATION_PREPARATION_STALE, which the gateway also answers once its
+ * preparation TTL has passed for a submission it admitted earlier, so a stale
+ * answer on --resume says nothing about whether the operation is running.
  */
 const REFUSED_BEFORE_ADMISSION: ReadonlySet<string> = new Set([
   "CONFIRMATION_REQUEST_INVALID",
   "CONFIRMATION_SPONSORED_REQUIRES_EOA",
   "CONFIRMATION_SIGNATURE_INVALID",
-  "CONFIRMATION_PREPARATION_STALE",
   "CONFIRMATION_SPONSORSHIP_LIMIT",
 ]);
 
@@ -410,6 +412,18 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
         next: `Run daski order confirm ${options.handle} --resume to check the same submission.` };
       if (error instanceof CliError && REFUSED_BEFORE_ADMISSION.has(error.code)) {
         updateOrder(record.intentId, { confirmationSubmission: undefined });
+      }
+      if (error instanceof CliError && error.code === "CONFIRMATION_PREPARATION_STALE") {
+        throw new CliError({
+          code: error.code,
+          message: error.message,
+          remediation:
+            "The gateway may already have admitted this submission before its preparation expired, " +
+            `so the signed submission is kept. Keep running daski order confirm ${options.handle} --resume ` +
+            `(or --check) until the gateway reports the operation's state; a new preparation is refused ` +
+            "while this one is pending.",
+          details: error.details,
+        });
       }
       throw error;
     }
@@ -858,7 +872,8 @@ export async function readConfirmationFacts(context: CommandContext, record: Ord
   const status = await readWithCapability(context, record, { toolName: "daski_get_order_status", action: "status", request: {} });
   if (typeof status.orderKey !== "string" || !HEX32.test(status.orderKey)) throw invalidPreparation();
   const pins = (await context.metadata()).confirmationSigning;
-  if (!pins || pins.chainId !== context.profile.chainId) throw invalidPreparation();
+  if (!pins) throw confirmationPinsMissing(context.profile.gatewayUrl);
+  if (pins.chainId !== context.profile.chainId) throw invalidPreparation();
   if (!isAddressEqual(pins.eas, context.profile.easAddress)) throw easAddressMismatch(pins.eas, context.profile.easAddress, context.profile.chainId);
   const orderKey = status.orderKey as Hex;
   const [current, nonce] = await Promise.all([

@@ -126,7 +126,8 @@ export async function callWalletQuery(
   return body;
 }
 
-function lifecycleFailure(toolName: string, result: McpToolResult): CliError {
+/** The gateway's answer to a lifecycle or read call, as an operator-facing error. */
+export function lifecycleFailure(toolName: string, result: McpToolResult): CliError {
   // No payload in a success answer is a shape disagreement, not a refusal.
   if (GatewayClient.unreadable(result)) return unreadableResultError(toolName, result);
   const body = GatewayClient.json(result);

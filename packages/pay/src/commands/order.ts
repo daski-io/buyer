@@ -3,7 +3,8 @@
  *
  * These all follow the same shape: resolve the handle from the local store,
  * use a stored read capability if one is still valid, otherwise run the
- * challenge/validate/sign/retry round trip.
+ * challenge/validate/sign/retry round trip (grant-read for a read, the
+ * action itself for a mutation).
  *
  * The artifact command writes bytes to a file rather than printing them.
  * Provider results are validated but untrusted, and a terminal is an
@@ -15,10 +16,11 @@ import { getAddress } from "viem";
 import { CliError } from "../cli/errors.js";
 import { loadConfig } from "../config.js";
 import { createContext, type CommandContext, type ContextOptions, type OrderBinding } from "../context.js";
-import { callWalletQuery, callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
-import { reconcileByIdentifier } from "../gateway/purchase.js";
+import { GatewayClient, gatewayUnsupported } from "../gateway/client.js";
+import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "../gateway/lifecycle.js";
+import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
 import {
-  activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord,
+  activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord, type ReadCapability,
 } from "../store/orders.js";
 import type { OrderAction } from "@daski/x402-scheme";
 import type { ConfirmationOptions } from "./confirmation.js";
@@ -46,8 +48,8 @@ export async function orderStatus(options: OrderOptions): Promise<Record<string,
       action: "status",
       request: {},
     });
-    const state = typeof body.state === "string" ? body.state : undefined;
-    if (state) updateOrder(record.intentId, { state: normalize(state) });
+    const state = gatewayOrderState(body);
+    if (state !== undefined) updateOrder(record.intentId, { state: localOrderState(state, record.handle) });
     return {
       orderHandle: record.handle ?? options.handle,
       intentId: record.intentId,
@@ -144,9 +146,8 @@ async function mutate(
       chainId: context.profile.chainId,
       gatewayUrl: context.profile.gatewayUrl,
     });
-    if (typeof body.state === "string") {
-      updateOrder(record.intentId, { state: normalize(body.state) });
-    }
+    const state = gatewayOrderState(body);
+    if (state !== undefined) updateOrder(record.intentId, { state: localOrderState(state, record.handle) });
     return {
       orderHandle: record.handle ?? options.handle,
       action,
@@ -157,10 +158,23 @@ async function mutate(
 }
 
 /**
- * Uses a stored, unexpired read capability when one exists; otherwise runs the
- * grant-read flow if the gateway offers it, and falls back to per-action
- * lifecycle signing when it does not. The fallback is not a lesser path — it
- * is the same verify-and-sign tier, just paying one signature per read.
+ * The gateway's own order state in a lifecycle answer. A dispatched order's
+ * answer carries the provider's task state as `state` beside the gateway's
+ * `orderState`; before dispatch only the gateway's `state` exists. The
+ * gateway's is the one the ledger records.
+ */
+export function gatewayOrderState(body: Record<string, unknown>): string | undefined {
+  if (typeof body.orderState === "string") return body.orderState;
+  return typeof body.state === "string" ? body.state : undefined;
+}
+
+/**
+ * Reads through a capability: a stored, unexpired one when it exists,
+ * otherwise one granted now by `daski_get_order_access` (the grant-read
+ * action: one signature, then reads served until it expires). A capability
+ * the gateway rejects is dropped and granted afresh. Grant-read is the only
+ * read path; a gateway without the tool is unsupported, never read around
+ * with a per-action signature.
  */
 export async function readWithCapability(
   context: Awaited<ReturnType<typeof createContext>>,
@@ -180,96 +194,62 @@ export async function readWithCapability(
         `Ask the gateway before signing anything again: daski order reconcile ${record.intentId}`,
     });
   }
+  const read = (token: string) => context.client.callTool(call.toolName, {
+    orderHandle: handle,
+    request: call.request,
+    readCapability: token,
+  });
 
-  const capability = activeReadCapability(record);
-  if (capability) {
-    const result = await context.client.callTool(call.toolName, {
-      orderHandle: handle,
-      request: call.request,
-      readCapability: capability.token,
-    });
-    const body = (await import("../gateway/client.js")).GatewayClient.json(result);
+  const stored = activeReadCapability(record);
+  if (stored) {
+    const result = await read(stored.token);
+    const body = GatewayClient.json(result);
     if (!result.isError && body) return body;
     // A rejected capability is a stale capability; drop it and re-authorize.
     updateOrder(record.intentId, { readCapability: undefined });
   }
 
-  if (await context.client.hasTool(READ_CAPABILITY_TOOL)) {
-    const granted = await grantRead(context, record, handle);
-    if (granted) {
-      const result = await context.client.callTool(call.toolName, {
-        orderHandle: handle,
-        request: call.request,
-        readCapability: granted.token,
-      });
-      const body = (await import("../gateway/client.js")).GatewayClient.json(result);
-      if (!result.isError && body) return body;
-    }
+  if (!(await context.client.hasTool(READ_CAPABILITY_TOOL))) {
+    throw gatewayUnsupported(context.profile.gatewayUrl, READ_CAPABILITY_TOOL);
   }
-
-  return callAuthorizedLifecycleTool({
-    client: context.client,
-    signer: context.signer,
-    toolName: call.toolName,
-    action: call.action,
-    orderHandle: handle,
-    request: call.request,
-    chainId: context.profile.chainId,
-    gatewayUrl: context.profile.gatewayUrl,
-  });
+  const granted = await grantRead(context, record, handle);
+  const result = await read(granted.token);
+  const body = GatewayClient.json(result);
+  if (result.isError || !body) throw lifecycleFailure(call.toolName, result);
+  return body;
 }
 
 /**
- * The grant-read flow (spec 01 §8). The gateway hands back a `signRequest`,
- * which goes through the same §4 lifecycle validation as everything else
- * before the wallet sees it.
+ * The grant-read flow (spec 01 §8): the same challenge, §4 validation, sign,
+ * and authorized retry as every lifecycle action, for the `grant-read`
+ * action, answered with a capability that is stored on the record.
  */
 async function grantRead(
   context: Awaited<ReturnType<typeof createContext>>,
   record: OrderRecord,
   handle: string,
-): Promise<{ token: string; expiresAt: number } | undefined> {
-  const { GatewayClient } = await import("../gateway/client.js");
-  const {
-    orderActionTypedData, validateOrderActionChallenge,
-  } = await import("@daski/x402-scheme");
-
-  const challengeResult = await context.client.callTool(READ_CAPABILITY_TOOL, {
-    orderHandle: handle, request: {},
-  });
-  const challengeBody = GatewayClient.json(challengeResult);
-  if (!challengeBody || challengeResult.isError) return undefined;
-  if (challengeBody.authorizationRequired !== true) {
-    return capabilityFrom(challengeBody, record);
-  }
-  const challenge = validateOrderActionChallenge(challengeBody.challenge, {
-    orderHandle: handle,
+): Promise<ReadCapability> {
+  const body = await callAuthorizedLifecycleTool({
+    client: context.client,
+    signer: context.signer,
+    toolName: READ_CAPABILITY_TOOL,
     action: "grant-read",
-    gatewayUrl: context.profile.gatewayUrl,
+    orderHandle: handle,
     request: {},
     chainId: context.profile.chainId,
+    gatewayUrl: context.profile.gatewayUrl,
   });
-  const signature = await context.signer.signTypedData(
-    orderActionTypedData(challenge, context.profile.chainId, context.profile.gatewayUrl),
-  );
-  const granted = await context.client.callTool(READ_CAPABILITY_TOOL, {
-    orderHandle: handle,
-    request: {},
-    authorization: { ...challenge, signature },
-  });
-  const body = GatewayClient.json(granted);
-  if (!body || granted.isError) return undefined;
-  return capabilityFrom(body, record);
-}
-
-function capabilityFrom(
-  body: Record<string, unknown>,
-  record: OrderRecord,
-): { token: string; expiresAt: number } | undefined {
   if (typeof body.readCapability !== "string" || !Number.isSafeInteger(body.expiresAt)) {
-    return undefined;
+    throw new CliError({
+      code: "DASKI_GATEWAY_RESULT_UNREADABLE",
+      message: `${READ_CAPABILITY_TOOL} answered without a readCapability and expiresAt this CLI can read.`,
+      remediation:
+        "Nothing was read. Upgrade to the @daski/pay version the gateway pins, then re-run " +
+        "daski doctor --json, which checks that gateway results are readable.",
+      details: { tool: READ_CAPABILITY_TOOL, gateway: body },
+    });
   }
-  const stored = { token: body.readCapability, expiresAt: Number(body.expiresAt) };
+  const stored: ReadCapability = { token: body.readCapability, expiresAt: Number(body.expiresAt) };
   updateOrder(record.intentId, { readCapability: stored });
   return stored;
 }
@@ -297,7 +277,7 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
       updated = updateOrder(record.intentId, {
         handle: outcome.orderHandle,
         state: outcome.status === "settled" && outcome.gatewayState
-          ? normalize(outcome.gatewayState)
+          ? localOrderState(outcome.gatewayState, outcome.orderHandle)
           : "PENDING_RECONCILIATION",
       }) ?? record;
     }
@@ -409,16 +389,14 @@ export async function orderImport(
         chainId: context.profile.chainId,
         gatewayUrl: context.profile.gatewayUrl,
       });
-      if (!Array.isArray(body.orders)) throw new CliError({ code: "DASKI_ORDER_HISTORY_UNREADABLE",
-        message: "The gateway returned no readable order history.",
-        remediation: "Run daski doctor --json, then retry the import." });
-      for (const row of body.orders as Record<string, unknown>[]) {
+      // A row this CLI cannot read is refused before anything from the page
+      // is recorded; rows already imported from earlier pages stay, and the
+      // import is idempotent.
+      const rows = readPayerOrderRows(body);
+      const mapped = rows.map((row) => ({ row, state: localOrderState(row.state, row.orderHandle) }));
+      for (const { row, state } of mapped) {
         listed += 1;
-        if (typeof row.orderHandle !== "string" || typeof row.providerAgentId !== "string" ||
-            typeof row.outcomeId !== "string") continue;
-        const intentId = typeof row.paymentIdentifier === "string" && row.paymentIdentifier.length > 0
-          ? row.paymentIdentifier : row.orderHandle;
-        const state = normalize(String(row.state ?? ""));
+        const intentId = row.paymentIdentifier;
         const known = findByIntent(intentId) ?? findOrder(row.orderHandle, context.profileName);
         if (known) {
           if (!known.handle) {
@@ -437,9 +415,9 @@ export async function orderImport(
           providerAgentId: row.providerAgentId,
           outcomeId: row.outcomeId,
           payer: getAddress(context.payerAddress),
-          amount: typeof row.grossAmount === "string" && /^\d+$/.test(row.grossAmount) ? row.grossAmount : "0",
+          amount: row.grossAmount,
           state,
-          createdAt: typeof row.createdAt === "string" ? row.createdAt : now,
+          createdAt: row.createdAt ?? now,
           updatedAt: now,
         });
         imported += 1;
@@ -460,15 +438,6 @@ export async function orderImport(
   } finally {
     await context.close();
   }
-}
-
-function normalize(state: string): OrderRecord["state"] {
-  const value = state.toLowerCase();
-  if (["completed", "fulfilled"].includes(value)) return "FULFILLED";
-  if (["input-required", "input_required"].includes(value)) return "INPUT_REQUIRED";
-  if (["failed", "provider_failed"].includes(value)) return "PROVIDER_FAILED";
-  if (value === "canceled" || value === "cancelled") return "CANCELED";
-  return "SUBMITTED";
 }
 
 function extensionFor(mediaType: string | undefined): string {

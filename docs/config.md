@@ -11,6 +11,10 @@ Doctor reports the resolved `stateDirectory` and `configFile`. The default is `.
 
 POSIX directories use mode 700 and files use 600. Windows uses native ACLs.
 
+`orders.json` is replaced atomically: a flushed temporary file renamed into place, then the directory flushed. A missing file is an empty ledger; one that exists but cannot be read, parsed, or trusted refuses every command that needs it (`DASKI_ORDER_STORE_UNREADABLE`) and is never overwritten. Repair it, or move it aside and rebuild it with `daski order import --json`.
+
+Lock files beside it (`orders.json.lock`, per-order `.lock` files, `keystore.json.lock`) record their owner's process identity: on Linux the kernel boot id, the pid namespace, and the process start time; elsewhere the hostname. A lock is reclaimed only when that identity is verifiable from the waiting process and shows the owner gone. A lock from another boot, pid namespace, or host (a container mount, or Windows and WSL sharing `DASKI_HOME`), or one whose owner cannot be checked, is left in place and the command reports it for manual removal once no daski process is running.
+
 ## Profiles
 
 ```json

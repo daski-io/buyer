@@ -12,7 +12,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CliError } from "../src/cli/errors.js";
-import { challengeIntentId, issuedPaymentIdentifier, newIntentId, resolvePaymentIdentifier } from "../src/gateway/purchase.js";
+import { challengeIntentId, issuedPaymentIdentifier, resolvePaymentIdentifier } from "../src/gateway/purchase.js";
+
+const code = (wanted: string) => (error: unknown): boolean => error instanceof CliError && error.code === wanted;
 
 const ISSUED = "int_00000000-0000-4000-8000-000000000002";
 
@@ -33,23 +35,25 @@ test("the gateway's issued identifier is read from the vendored challenge extens
   assert.equal(issuedPaymentIdentifier({ "payment-identifier": { info: { required: true } } }), undefined);
 });
 
-test("a submission carries the issued identifier; a fresh one is used only when none was issued", () => {
+test("a submission carries the issued identifier; a challenge without one is refused, never given a minted one", () => {
   const extensions = fixtureExtensions();
   // sign-payment on an agent-obtained challenge: nothing proposed, the gateway's wins
   assert.equal(resolvePaymentIdentifier(extensions, undefined), ISSUED);
-  // buy: the identifier we proposed at challenge time came back as the issued one
+  // buy: the identifier recorded at challenge time is the issued one
   assert.equal(resolvePaymentIdentifier(extensions, ISSUED), ISSUED);
-  // a challenge without a pinned identifier keeps ours
-  const proposed = newIntentId();
-  assert.equal(resolvePaymentIdentifier({}, proposed), proposed);
-  assert.equal(resolvePaymentIdentifier(undefined, undefined), undefined);
+  // No identifier: nothing exists server-side to look the submission up by.
+  for (const missing of [{}, undefined, { "payment-identifier": { info: { required: true } } }, { "payment-identifier": { info: { id: "" } } }]) {
+    assert.throws(() => resolvePaymentIdentifier(missing, undefined), code("DASKI_PAYMENT_IDENTIFIER_MISSING"));
+    assert.throws(() => resolvePaymentIdentifier(missing, "daski-e1f3f326f4e5ea9a5546bbb34538daaf"), code("DASKI_PAYMENT_IDENTIFIER_MISSING"));
+    assert.throws(() => challengeIntentId(missing), (error: unknown) => code("DASKI_PAYMENT_IDENTIFIER_MISSING")(error) && /Do not sign/.test((error as CliError).remediation));
+  }
 });
 
 test("a challenge bound to a different identifier than the one proposed is refused, not signed", () => {
   const extensions = fixtureExtensions();
   assert.throws(
-    () => resolvePaymentIdentifier(extensions, newIntentId()),
-    (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_IDENTIFIER_MISMATCH",
+    () => resolvePaymentIdentifier(extensions, "int_00000000-0000-4000-8000-000000000009"),
+    code("DASKI_PAYMENT_IDENTIFIER_MISMATCH"),
   );
 });
 
@@ -57,13 +61,9 @@ test("buy adopts the identifier the challenge issued, so it can never mismatch i
   // 0.1.2's `buy` minted a fresh identifier after the challenge and then
   // refused the challenge with DASKI_PAYMENT_IDENTIFIER_MISMATCH: the gateway
   // never accepted a proposal, so a proposal was never anything but a mismatch
-  // (2026-09-04). The ledger key is now the issued identifier.
+  // (2026-09-04). The ledger key is the issued identifier and nothing else.
   const extensions = fixtureExtensions();
   const intentId = challengeIntentId(extensions);
   assert.equal(intentId, ISSUED);
   assert.equal(resolvePaymentIdentifier(extensions, intentId), ISSUED);
-  // A challenge without an identifier still gets a fresh reconciliation key.
-  const minted = challengeIntentId({});
-  assert.match(minted, /^daski-[0-9a-f]{32}$/);
-  assert.equal(resolvePaymentIdentifier({}, minted), minted);
 });

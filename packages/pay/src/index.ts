@@ -43,9 +43,9 @@ export {
   type GatewayMetadata, type PinnedBuyerCli,
 } from "./gateway/metadata.js";
 export {
-  authorizePayment, listPayerOrders, newIntentId, reconcileAmbiguousPurchase, reconcileByIdentifier,
+  authorizePayment, listPayerOrders, localOrderState, readPayerOrderRows, readSettlement, reconcileByIdentifier,
   recordIntent, requestChallenge, submitPayment,
-  type AuthorizedPayment, type ChallengeResult, type ReconcileOutcome,
+  type AuthorizedPayment, type ChallengeResult, type PayerOrderRow, type SettlementReading,
 } from "./gateway/purchase.js";
 
 export { createSigner, type SignerSelection } from "./signers/index.js";

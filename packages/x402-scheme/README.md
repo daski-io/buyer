@@ -68,9 +68,9 @@ what lets you sign a server-proposed authorization without trusting the
 server. When the gateway supplies `daski-sign-request`, its proposal is
 treated as an input: recomputed, compared, and refused on mismatch.
 
-Both `recipeNonce` (v1) and `recipeNonceV2` are implemented and pinned by
-tests against a vector produced independently by the reference client behind
-43 settled sandbox orders.
+`recipeNonceV2` is the only recipe (the V1 binding is retired) and is pinned
+by tests against a vector produced independently by the reference client
+behind 43 settled sandbox orders.
 
 ## Examples
 

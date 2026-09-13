@@ -132,14 +132,13 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "buy": {
-      assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "outcome", "request", "payer", "legacy-arg", "approve"]);
+      assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "outcome", "request", "payer", "approve"]);
       const result = await runBuy({
         ...shared,
         providerAgentId: requireFlag(flags, "provider"),
         outcomeId: requireFlag(flags, "outcome"),
         requestFile: requireFlag(flags, "request"),
         payer: stringFlag(flags, "payer"),
-        legacyArg: boolFlag(flags, "legacy-arg"),
         approved: stringFlag(flags, "approve"),
         json,
       });

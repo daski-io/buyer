@@ -10,7 +10,10 @@
  * the signature goes out, so an interrupted buy can be looked up instead of
  * re-signed.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import {
+  closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import type { Address, Hex } from "viem";
 import { CliError } from "../cli/errors.js";
@@ -103,14 +106,59 @@ interface OrderFile {
   orders: OrderRecord[];
 }
 
+const DOC = "https://github.com/daski-io/buyer/blob/main/docs/config.md";
+
+function storeUnreadable(path: string, reason: string): CliError {
+  return new CliError({
+    code: "DASKI_ORDER_STORE_UNREADABLE",
+    message: `The order store ${path} exists but cannot be read: ${reason}.`,
+    remediation:
+      "An unreadable order store is never treated as empty: it holds recorded intents, order " +
+      "handles, budgets, and pending confirmation journals, and writing over it would lose them. " +
+      `Repair ${path}, or move it aside and rebuild it with daski order import --json, then re-run. ` +
+      `See ${DOC}`,
+  });
+}
+
+/** The fields every command reads before it can trust a record; the amount feeds the budget total. */
+function isOrderRecord(value: unknown): value is OrderRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.intentId === "string" && typeof record.profile === "string" &&
+    typeof record.state === "string" && typeof record.amount === "string" && /^\d+$/.test(record.amount);
+}
+
+/**
+ * Reads the store. A missing file (or a missing state directory) is an empty
+ * ledger; anything else that stops the file being read, parsed, or trusted is
+ * `DASKI_ORDER_STORE_UNREADABLE`. Every write path reads first, so an
+ * unreadable store is refused before a temporary file could be renamed over it.
+ */
 function read(): OrderFile {
+  const path = ordersPath();
+  let raw: string;
   try {
-    const parsed = JSON.parse(readFileSync(ordersPath(), "utf8")) as OrderFile;
-    if (parsed.version !== 1 || !Array.isArray(parsed.orders)) throw new Error("shape");
-    return parsed;
-  } catch {
-    return { version: 1, orders: [] };
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, orders: [] };
+    throw storeUnreadable(path, (error as Error).message);
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw storeUnreadable(path, `not valid JSON (${(error as Error).message})`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw storeUnreadable(path, "the document is not an object");
+  }
+  const file = parsed as { version?: unknown; orders?: unknown };
+  if (file.version !== 1) throw storeUnreadable(path, `unsupported version ${String(file.version)}`);
+  if (!Array.isArray(file.orders)) throw storeUnreadable(path, "orders is not an array");
+  file.orders.forEach((order, index) => {
+    if (!isOrderRecord(order)) throw storeUnreadable(path, `order ${index} is malformed`);
+  });
+  return file as OrderFile;
 }
 
 /** How long a whole-file update waits for another process's update. */
@@ -139,13 +187,43 @@ function withStoreLock<T>(run: () => T): T {
   }, run);
 }
 
-/** Writes via a temp file and rename, so a crash cannot truncate the store. */
+function fsyncDirectory(directory: string): void {
+  // Windows cannot open a directory handle for fsync; the rename is still atomic there.
+  if (process.platform === "win32") return;
+  const fd = openSync(directory, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Replaces the store atomically: an owner-only temporary file beside the
+ * target, flushed, renamed over the target, then the directory flushed. A
+ * crash or power loss at any point leaves either the previous file or the
+ * new one, never a truncated mixture and never a rename that was not yet
+ * durable.
+ */
 function write(file: OrderFile): void {
   const path = ordersPath();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeSync(fd, `${JSON.stringify(file, null, 2)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  fsyncDirectory(directory);
 }
 
 export function listOrders(profile?: string): OrderRecord[] {

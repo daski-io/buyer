@@ -64,6 +64,10 @@ directory, then reads the file back and decrypts the new entry to the
 expected address before reporting success (`DASKI_KEYSTORE_READBACK_MISMATCH`
 otherwise). Two creations for the same profile serialize to one key.
 
+`daski doctor` warns (`DASKI_KEYSTORE_NOT_PRIVATE`) when `keystore.json` is
+readable or writable by other users. The entries are encrypted, so this is a
+posture warning rather than a refusal: `chmod 600` the file.
+
 ### The passphrase
 
 The file store's passphrase comes from a terminal, or from the file named by

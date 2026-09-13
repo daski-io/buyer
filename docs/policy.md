@@ -43,11 +43,11 @@ Optional per-order and cumulative budgets apply when configured. The cumulative 
 <a id="reconciliation"></a>
 ### 7. Payment identifier and reconciliation
 
-Both `buy` and `sign-payment` use the identifier issued in `payment-identifier.info.id` as the submission identifier and ledger key. An existing authorized or paid identifier is reconciled before another signature.
+Both `buy` and `sign-payment` use the identifier issued in `payment-identifier.info.id` as the submission identifier and ledger key; a challenge without one is refused (`DASKI_PAYMENT_IDENTIFIER_MISSING`), and the CLI never mints an identifier. An existing authorized or paid identifier is reconciled before another signature.
 
-Automatic recovery and `daski order reconcile <intentId>` use a payer-authorized gateway lookup filtered by that exact identifier. A settled state recovers the order handle. In-flight, ambiguous, unknown, or unidentified legacy rows stay unresolved. Recovery uses no additional payment signature.
+Automatic recovery and `daski order reconcile <intentId>` use a payer-authorized gateway lookup filtered by that exact identifier. A settled state recovers the order handle. In-flight, ambiguous, and unknown states stay unresolved. A history row without a string `paymentIdentifier` or a decimal `grossAmount` is refused as unreadable (`DASKI_ORDER_HISTORY_UNREADABLE`), never matched on other invariants. Recovery uses no additional payment signature.
 
-A definitive no-settlement response records `NOT_SETTLED`, which consumes no budget. Resolve the original refusal's cause before another purchase. Gateway order state establishes settlement; balances and local handles do not establish absence.
+Only a refusal carrying `paymentMayHaveSettled: false` is a definitive no-settlement response; it records `NOT_SETTLED`, which consumes no budget. A refusal without the flag, or a body the CLI cannot read, is reconciled like any ambiguous outcome. Resolve the original refusal's cause before another purchase. Gateway order state establishes settlement; balances and local handles do not establish absence, and a gateway order state the CLI does not know is refused (`DASKI_ORDER_STATE_UNREADABLE`) rather than recorded.
 
 <a id="lifecycle"></a>
 ### 8. Lifecycle actions
@@ -74,15 +74,13 @@ nonce = keccak256(abi.encode(
   quoteHash, canonicalRequestHash, orderNonce))
 ```
 
-Version 1 uses `DaskiStandardExactOrderV1` and the corresponding `listingManifestHash` and `providerOfferHash` slots.
-
 <a id="sign-request"></a>
 ## Sign requests and binding extensions
 
 The bridge recomputes the payment proposal from the challenge binding, validates it against profile and catalog expectations, and signs the resulting authorization. It returns the payment extensions while excluding the instructional `daski-sign-request`.
 
 <a id="daski-order-binding"></a>
-The `daski-order-binding` parser accepts the supported closed version 1 and version 2 shapes. Unsupported fields or profiles return a schema error.
+The `daski-order-binding` parser accepts only the closed `recipe-bound-v2` shape (version 2). Unsupported fields, versions, or profiles return a schema error.
 
 <a id="caps"></a>
 ## Optional budgets

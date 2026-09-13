@@ -87,8 +87,12 @@ the `circle` command with an argument array, never a shell string:
 - the signature from `circle wallet sign typed-data '<json>' --address <addr> --chain <chain> --quiet`,
   which receives exactly the typed data the policy validator produced.
 
-Each command has a 30-second deadline. Only the signature is retained; the
-vendor's output is never logged and never repeated in an error. `describe()`
+Each command has a 30-second deadline and runs with this process's
+environment minus every `DASKI_*` variable, so `DASKI_PAYER_PRIVATE_KEY` and
+`DASKI_KEYSTORE_PASSPHRASE_FILE` never reach the vendor. Only the signature
+is retained; the vendor's output is never logged and never repeated in an
+error. A signature ending in the ERC-6492 suffix is refused on every use
+(`DASKI_SIGNER_NOT_DEPLOYED`), not only in the self-test. `describe()`
 reports `circle-agent` / `contract` / `candidate-pending-conformance`.
 
 Login, terms acceptance, wallet creation, deployment, funding, and spending

@@ -5,10 +5,13 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CliError } from "../src/cli/errors.js";
 import * as store from "../src/store/orders.js";
+
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 /** Each test gets its own DASKI_HOME; the store reads the env on every call. An async body keeps its home until it settles. */
 function withHome<T>(run: () => T): T {
@@ -158,5 +161,71 @@ test("updates to different orders from concurrent processes are never lost", asy
       assert.equal(order?.handle, `ord_${id}_${rounds - 1}`);
     }
     assert.equal(orders.length, ids.length);
+  });
+});
+
+const unreadable = (path: string) => (error: unknown): boolean =>
+  error instanceof CliError && error.code === "DASKI_ORDER_STORE_UNREADABLE" && error.remediation.includes(path);
+
+test("a missing store is an empty ledger; an unreadable one refuses every read and write and is never overwritten", () => {
+  withHome(() => {
+    const home = process.env.DASKI_HOME!;
+    const path = join(home, "orders.json");
+    assert.deepEqual(store.listOrders(), []);
+    assert.equal(store.findByIntent("a"), undefined);
+    assert.equal(store.authorizedTotalAtomic("sandbox"), 0n);
+    const refused = unreadable(path);
+    const valid = JSON.stringify({ version: 1, orders: [{ ...BASE, intentId: "a", state: "SUBMITTED", handle: "ord_a" }] });
+    for (const content of [
+      valid.slice(0, valid.length - 20),                                    // truncated by a crash mid-write
+      "{not json",
+      "[]",
+      JSON.stringify({ version: 2, orders: [] }),
+      JSON.stringify({ version: 1, orders: {} }),
+      JSON.stringify({ version: 1, orders: [{ intentId: "a" }] }),            // a record without its budget fields
+      JSON.stringify({ version: 1, orders: [{ ...BASE, intentId: "a", state: "SUBMITTED", amount: "9.99" }] }),
+    ]) {
+      writeFileSync(path, content);
+      assert.throws(() => store.listOrders(), refused, content);
+      assert.throws(() => store.findOrder("ord_a"), refused, content);
+      assert.throws(() => store.findByIntent("a"), refused, content);
+      // The budget total surfaces the error rather than reporting zero.
+      assert.throws(() => store.authorizedTotalAtomic("sandbox"), refused, content);
+      assert.throws(() => store.upsertOrder({ ...BASE, intentId: "fresh", state: "SUBMITTED" }), refused, content);
+      assert.throws(() => store.updateOrder("a", { state: "FULFILLED" }), refused, content);
+      assert.equal(readFileSync(path, "utf8"), content, "the bytes are untouched");
+      assert.deepEqual(readdirSync(home), ["orders.json"], "no temporary or lock file is left behind");
+    }
+  });
+});
+
+test("a permission-denied store refuses reads and writes", { skip: isRoot || process.platform === "win32" }, () => {
+  withHome(() => {
+    const home = process.env.DASKI_HOME!;
+    const path = join(home, "orders.json");
+    store.upsertOrder({ ...BASE, intentId: "kept", state: "SUBMITTED", handle: "ord_kept" });
+    const before = readFileSync(path, "utf8");
+    chmodSync(path, 0o000);
+    try {
+      assert.throws(() => store.listOrders(), unreadable(path));
+      assert.throws(() => store.authorizedTotalAtomic("sandbox"), unreadable(path));
+      assert.throws(() => store.upsertOrder({ ...BASE, intentId: "fresh", state: "SUBMITTED" }), unreadable(path));
+      assert.throws(() => store.updateOrder("kept", { state: "FULFILLED" }), unreadable(path));
+    } finally {
+      chmodSync(path, 0o600);
+    }
+    assert.equal(readFileSync(path, "utf8"), before, "the previous store is byte-identical");
+    assert.deepEqual(readdirSync(home), ["orders.json"]);
+    assert.equal(store.findByIntent("kept")?.handle, "ord_kept");
+  });
+});
+
+test("a write leaves only the store behind, owner-only", () => {
+  withHome(() => {
+    const home = process.env.DASKI_HOME!;
+    store.upsertOrder({ ...BASE, intentId: "w-1", state: "SUBMITTED" });
+    store.updateOrder("w-1", { handle: "ord_w" });
+    assert.deepEqual(readdirSync(home), ["orders.json"], "the flushed temporary file was renamed into place");
+    if (process.platform !== "win32") assert.equal(statSync(join(home, "orders.json")).mode & 0o777, 0o600);
   });
 });

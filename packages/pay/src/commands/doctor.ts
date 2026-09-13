@@ -29,7 +29,8 @@ import {
   type GatewayProtocolProbe,
 } from "../gateway/client.js";
 import {
-  easAddressMismatch, readGatewayMetadata, type GatewayMetadata,
+  confirmationPinsMissing, easAddressMismatch, payerAccountsMissing, readGatewayMetadata,
+  type GatewayMetadata,
 } from "../gateway/metadata.js";
 import {
   detectLegacyKeyringEntry, keyBackendFor, keyNotDurable, resolveHost,
@@ -47,6 +48,9 @@ import { authorizedTotalAtomic } from "../store/orders.js";
 import { CLI_VERSION } from "../version.js";
 
 const SIGNERS_DOC = "https://github.com/daski-io/buyer/blob/main/docs/signers.md";
+
+/** The tools every purchase and order read goes through; a gateway without one of them is unsupported. */
+const REQUIRED_TOOLS = ["daski_buy_outcome", "daski_get_payment_challenge", "daski_get_order_access"] as const;
 
 export interface DoctorIssue {
   severity: "blocking" | "warning";
@@ -279,8 +283,27 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     try {
       metadata = await transport.metadata(profile.gatewayUrl);
     } catch (error) {
-      addIssue({ severity: "warning", ...issueFields(error as CliError) });
+      // A contract signer cannot buy without the document: buy and
+      // sign-payment read payerAccounts from it before anything is signed.
+      const fields = issueFields(error as CliError);
+      addIssue(signer && isContractSigner(signer)
+        ? {
+          severity: "blocking",
+          ...fields,
+          remediation:
+            "A contract wallet buys only after the gateway's payerAccounts has been read from this " +
+            "document, so no purchase can start until it is readable. This is retryable: check " +
+            "connectivity to the gateway, then re-run: daski doctor --json",
+        }
+        : { severity: "warning", ...fields });
     }
+  }
+  if (metadata) {
+    // Each block is validated on its own; a missing one is named here so a
+    // later refusal (no confirmation pins, no account types) is never the
+    // first signal.
+    if (!metadata.confirmationSigning) addIssue({ severity: "warning", ...issueFields(confirmationPinsMissing(profile.gatewayUrl)) });
+    if (!metadata.payerAccounts) addIssue({ severity: "warning", ...issueFields(payerAccountsMissing(profile.gatewayUrl)) });
   }
   const pinned = metadata?.buyerCli ?? null;
   if (pinned) {
@@ -320,24 +343,26 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   // so "exit 0" means a purchase can actually complete.
   let protocol: GatewayProtocolProbe | null = null;
   if (health.reachable && health.status === "ready") {
-    protocol = await transport.probe(new GatewayClient({ gatewayUrl: profile.gatewayUrl }));
-    if (!protocol.reachable) {
+    const probe = await transport.probe(new GatewayClient({ gatewayUrl: profile.gatewayUrl }));
+    protocol = probe;
+    const missing = REQUIRED_TOOLS.filter((tool) => !probe.tools.includes(tool));
+    if (!probe.reachable) {
       addIssue({
         severity: "blocking",
         code: "DASKI_GATEWAY_MCP_UNREACHABLE",
-        message: `${profile.gatewayUrl}/mcp did not answer: ${protocol.error ?? "unknown error"}`,
+        message: `${profile.gatewayUrl}/mcp did not answer: ${probe.error ?? "unknown error"}`,
         remediation: "Check connectivity to the gateway's /mcp endpoint, then re-run: daski doctor --json",
       });
-    } else if (!protocol.tools.includes("daski_buy_outcome")) {
+    } else if (missing.length > 0) {
       addIssue({
         severity: "blocking",
         code: "DASKI_GATEWAY_TOOLS_MISSING",
-        message: `The gateway at ${profile.gatewayUrl} does not advertise daski_buy_outcome.`,
+        message: `The gateway at ${profile.gatewayUrl} does not advertise ${missing.join(", ")}.`,
         remediation:
-          `Point the "${loaded.profileName}" profile's gatewayUrl at a Daski gateway in ` +
-          `${configPath()}, then re-run: daski doctor --json`,
+          `Point the "${loaded.profileName}" profile's gatewayUrl at a Daski gateway this release ` +
+          `supports in ${configPath()}, then re-run: daski doctor --json`,
       });
-    } else if (!protocol.readableVia) {
+    } else if (!probe.readableVia) {
       addIssue({
         severity: "blocking",
         code: "DASKI_GATEWAY_PROTOCOL_MISMATCH",
@@ -351,7 +376,15 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     }
   }
 
-  const spent = authorizedTotalAtomic(loaded.profileName);
+  // The budget total is the on-disk ledger; a store that cannot be read is
+  // reported here rather than as zero, since zero would let a capped profile
+  // overspend and hide a journal a purchase or confirmation is waiting on.
+  let spent: bigint | null = null;
+  try {
+    spent = authorizedTotalAtomic(loaded.profileName);
+  } catch (error) {
+    addIssue(blockingFrom(error, "Repair or move aside the order store, then re-run: daski doctor --json"));
+  }
   return {
     cliVersion: CLI_VERSION,
     profile: loaded.profileName,
@@ -388,7 +421,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       maxPerOrderUsdc: profile.maxPerOrderUsdc,
       sessionCapUsdc: profile.sessionCapUsdc,
       requireApprovalAboveUsdc: profile.requireApprovalAboveUsdc,
-      sessionAuthorizedAtomic: spent.toString(),
+      sessionAuthorizedAtomic: spent === null ? null : spent.toString(),
       mode: profile.maxPerOrderUsdc === null && profile.sessionCapUsdc === null
         ? "quote-approval" : "configured-budgets",
       configurationVersion: loaded.config.version,

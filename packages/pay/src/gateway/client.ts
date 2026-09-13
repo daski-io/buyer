@@ -172,18 +172,17 @@ export class GatewayClient {
   }
 
   /**
-   * The x402 challenge in a tool result. Three places, in order: the x402 MCP
-   * transport's `_meta["x402/payment-required"]`; the prepare tool's body,
-   * which nests the challenge under `paymentRequired` beside its `preflight`;
-   * and a bare PaymentRequired body, which the unpaid buy call returns.
+   * The x402 challenge in a tool result. Two places, in order: the x402 MCP
+   * transport's `_meta["x402/payment-required"]`, and the prepare tool's
+   * body, which nests the challenge under `paymentRequired` beside its
+   * `preflight`. A bare PaymentRequired body is not a challenge this CLI
+   * reads: only the prepare tool issues challenges.
    */
   static challenge(result: McpToolResult): PaymentChallenge | undefined {
     const fromMeta = result._meta?.["x402/payment-required"];
     if (isChallenge(fromMeta)) return fromMeta;
-    const body = GatewayClient.json(result);
-    const nested = body?.paymentRequired;
-    if (isChallenge(nested)) return nested;
-    return isChallenge(body) ? body : undefined;
+    const nested = GatewayClient.json(result)?.paymentRequired;
+    return isChallenge(nested) ? nested : undefined;
   }
 
   /** The prepare tool's `preflight` block, when the result carries one. */
@@ -250,6 +249,25 @@ export function unreadableResultError(
         "upgrade to the @daski/pay version the gateway's /skills/setup.md pins, then " +
         "re-run `daski doctor --json`, which checks that gateway results are readable.",
     details: { tool: toolName, gateway: describeResult(result) },
+  });
+}
+
+/**
+ * A gateway that does not advertise a tool every purchase or order read goes
+ * through. This release negotiates nothing: the prepare tool issues every
+ * challenge and grant-read serves every read, so their absence is not a
+ * gateway to read around but one this CLI does not support.
+ */
+export function gatewayUnsupported(gatewayUrl: string, tool: string): CliError {
+  return new CliError({
+    code: "DASKI_GATEWAY_UNSUPPORTED",
+    message:
+      `The gateway at ${gatewayUrl} does not advertise ${tool}, which this release requires; ` +
+      "it is not a gateway this @daski/pay supports.",
+    remediation:
+      "Nothing was signed. Run daski doctor --json, which lists what the gateway advertises, and " +
+      "use the @daski/pay release the gateway pins, or point the profile's gatewayUrl at a current " +
+      "Daski gateway.",
   });
 }
 

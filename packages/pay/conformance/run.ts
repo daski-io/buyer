@@ -42,14 +42,11 @@ interface Step {
 }
 
 /**
- * The §6 budget assumes the spec-01 surfaces: one challenge, one paid retry,
- * one grant-read, and reads served by the capability. Where the gateway does
- * not yet expose them, each read costs a challenge plus an authorized retry,
- * so the suite states the tier it ran in rather than quietly failing a budget
- * that does not apply.
+ * The §6 budget: one challenge, one paid retry, one grant-read (a challenge
+ * and an authorized retry), and reads served by the capability. Those are
+ * the only surfaces this CLI uses, so there is one budget.
  */
-const SPEC01_CALL_BUDGET = 6;
-const FALLBACK_CALL_BUDGET = 12;
+const CALL_BUDGET = 6;
 
 /** Codes that mean the order's on-chain reputation record is not there yet. */
 const NOT_READY = new Set(["DASKI_CONFIRMATION_MISMATCH", "REPUTATION_NOT_READY"]);
@@ -126,7 +123,6 @@ async function main(): Promise<number> {
   let exitCode = 0;
   let orderHandle: string | undefined;
   let firstAttemptAccepted = false;
-  let specTier: "spec-01" | "fallback" = "fallback";
   /** What the confirmation step proved: a sponsored submission, or a direct call prepared for the wallet's own tool. */
   let confirmation: Record<string, unknown> | null = null;
 
@@ -143,10 +139,6 @@ async function main(): Promise<number> {
 
     const context = await createContext({ ...selection, onCall: log });
     try {
-      specTier = await context.client.hasTool("daski_get_payment_challenge") &&
-        await context.client.hasTool("daski_get_order_access")
-        ? "spec-01" : "fallback";
-
       // -- prepare ---------------------------------------------------------
       const request = { address: `conformance-${Date.now()}@sandbox.daski.io` };
       const challenge = await step("prepare: challenge issued", () => requestChallenge({
@@ -202,7 +194,7 @@ async function main(): Promise<number> {
       process.stderr.write(`       order ${orderHandle}\n`);
       await context.close();
 
-      // -- reads: capability if available, per-action signing otherwise -----
+      // -- reads: one grant-read, then served by the capability ---------------
       await step("status", () => orderStatus({ ...selection, handle: orderHandle!, json: true }));
       await step("artifact", () => orderArtifact({
         ...selection, handle: orderHandle!, json: true,
@@ -238,24 +230,23 @@ async function main(): Promise<number> {
     }
 
     // -- assertions --------------------------------------------------------
-    const budget = specTier === "spec-01" ? SPEC01_CALL_BUDGET : FALLBACK_CALL_BUDGET;
     const used = calls.length;
-    if (used > budget) {
+    if (used > CALL_BUDGET) {
       steps.push({
-        name: `daski calls within the ${specTier} budget`,
+        name: "daski calls within the budget",
         ok: false,
-        detail: `used ${used}, budget ${budget}`,
+        detail: `used ${used}, budget ${CALL_BUDGET}`,
         durationMs: 0,
       });
-      process.stderr.write(`  FAIL call budget: used ${used}, budget ${budget} (${specTier})\n`);
+      process.stderr.write(`  FAIL call budget: used ${used}, budget ${CALL_BUDGET}\n`);
     } else {
       steps.push({
-        name: `daski calls within the ${specTier} budget`,
+        name: "daski calls within the budget",
         ok: true,
-        detail: `used ${used} of ${budget}`,
+        detail: `used ${used} of ${CALL_BUDGET}`,
         durationMs: 0,
       });
-      process.stderr.write(`  ok   call budget: used ${used} of ${budget} (${specTier} tier)\n`);
+      process.stderr.write(`  ok   call budget: used ${used} of ${CALL_BUDGET}\n`);
     }
     void report;
   } catch {
@@ -268,7 +259,7 @@ async function main(): Promise<number> {
     finishedAt: new Date().toISOString(),
     profile,
     signer: signerOverride ?? "(profile default)",
-    specTier,
+    callBudget: CALL_BUDGET,
     orderHandle: orderHandle ?? null,
     firstAttemptAccepted,
     confirmation,

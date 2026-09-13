@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generatePrivateKey } from "viem/accounts";
 import { CliError } from "../src/cli/errors.js";
+import { permissionWarnings } from "../src/config.js";
 import type { HostEnvironment } from "../src/host.js";
 import { hasKey, loadKey, locateKey, storeKey, type KeyStoreSelection } from "../src/store/keystore.js";
 
@@ -181,4 +182,26 @@ test("two concurrent native-keychain setups for one profile serialize: exactly o
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("a keystore file readable by other users is a warning, not a refusal", { skip: process.platform === "win32" }, async () => {
+  await withStore(async ({ home, store, keystore }) => {
+    const configFile = join(home, "config.json");
+    assert.deepEqual(permissionWarnings(configFile).filter((warning) => warning.code === "DASKI_KEYSTORE_NOT_PRIVATE"), [],
+      "no keystore, nothing to warn about");
+    const key = generatePrivateKey();
+    await storeKey("sandbox", key, store);
+    assert.deepEqual(permissionWarnings(configFile).filter((warning) => warning.code === "DASKI_KEYSTORE_NOT_PRIVATE"), [],
+      "a freshly written store is owner-only");
+    chmodSync(keystore, 0o644);
+    const warning = permissionWarnings(configFile).find((entry) => entry.code === "DASKI_KEYSTORE_NOT_PRIVATE");
+    assert.ok(warning);
+    assert.match(warning.message, /mode 644/);
+    assert.equal(warning.remediation, `Run: chmod 600 ${keystore}`);
+    assert.equal(await loadKey("sandbox", store), key, "the key is still usable");
+    chmodSync(keystore, 0o660);
+    assert.ok(permissionWarnings(configFile).some((entry) => entry.code === "DASKI_KEYSTORE_NOT_PRIVATE"), "group-readable warns too");
+    chmodSync(keystore, 0o600);
+    assert.ok(!permissionWarnings(configFile).some((entry) => entry.code === "DASKI_KEYSTORE_NOT_PRIVATE"));
+  });
 });

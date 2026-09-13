@@ -16,6 +16,7 @@ import {
   authorizePayment,
   challengeIntentId,
   isAmbiguousPurchaseAnswer,
+  localOrderState,
   reconcileByIdentifier,
   recordIntent,
   requestChallenge,
@@ -30,7 +31,6 @@ export interface BuyOptions extends ContextOptions {
   requestFile: string;
   payer?: string | undefined;
   json: boolean;
-  legacyArg?: boolean;
   /** The identifier of the quote the user approved. */
   approved?: string | undefined;
 }
@@ -146,7 +146,6 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
         outcomeId: options.outcomeId,
         request,
         submission: authorized.submission,
-        ...(options.legacyArg === undefined ? {} : { legacyArg: options.legacyArg }),
       });
     } catch (error) {
       // The signature left the process and the answer did not come back. This
@@ -159,7 +158,7 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
 
     const body = GatewayClient.json(result);
     const code = typeof body?.code === "string" ? body.code : undefined;
-    if (result.isError && isAmbiguousPurchaseAnswer(code, body)) {
+    if (result.isError && isAmbiguousPurchaseAnswer(body)) {
       return await reconcile(context, {
         intentId,
         cause: `gateway reported ${code ?? "an error"} with the payment outcome unknown`,
@@ -186,10 +185,10 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
     }
 
     // -- 6 & 7. persist and report ----------------------------------------
-    const record = updateOrder(intentId, {
-      handle: body.orderHandle,
-      state: normalizeState(body.status),
-    });
+    // The handle is recorded before the state is read: a state this release
+    // cannot map is refused, and the order must still be reachable by handle.
+    updateOrder(intentId, { handle: body.orderHandle });
+    const record = updateOrder(intentId, { state: localOrderState(body.status, body.orderHandle) });
     return {
       purchased: true,
       orderHandle: body.orderHandle,
@@ -198,12 +197,9 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
       provider: options.providerAgentId,
       outcome: options.outcomeId,
       price: formatUsdc(amountAtomic),
-      state: record?.state ?? String(body.status ?? "unknown"),
+      state: record?.state ?? String(body.status),
       payer: context.payerAddress,
       authorizationNonce: authorized.nonce,
-      challengeSource: challenge.viaChallengeTool
-        ? "daski_get_payment_challenge"
-        : "daski_buy_outcome (unpaid challenge fallback)",
       receipt: body.receipt ?? null,
       gatewayCalls: context.client.callCount,
     };
@@ -234,7 +230,7 @@ async function reconcile(
   if (outcome.status === "settled") {
     const settled = updateOrder(args.intentId, {
       handle: outcome.orderHandle,
-      state: normalizeState(outcome.gatewayState),
+      state: localOrderState(outcome.gatewayState, outcome.orderHandle),
     });
     return {
       purchased: true,
@@ -267,14 +263,6 @@ async function reconcile(
     details: { intentId: args.intentId, reconciliation: outcome.evidence },
     exitCode: 3,
   });
-}
-
-function normalizeState(status: unknown): "FULFILLED" | "INPUT_REQUIRED" | "PROVIDER_FAILED" | "SUBMITTED" {
-  const value = String(status ?? "").toLowerCase();
-  if (["completed", "fulfilled"].includes(value)) return "FULFILLED";
-  if (["input-required", "input_required"].includes(value)) return "INPUT_REQUIRED";
-  if (["failed", "canceled", "provider_failed"].includes(value)) return "PROVIDER_FAILED";
-  return "SUBMITTED";
 }
 
 /**

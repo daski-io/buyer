@@ -16,7 +16,7 @@ that can be triggered by accident is a suite that drains a wallet by accident.
 ## What it runs
 
 `doctor passes` → `prepare` → `policy-validate + recompute + sign` → `buy` →
-grant-read (when available) → `status` → `artifact` → optionally `confirm`
+grant-read → `status` → `artifact` → optionally `confirm`
 (`--confirm`: a `Confirmed` review, waiting up to five minutes for the order's
 on-chain reputation record; a plain wallet's review is sponsored and
 submitted, a contract wallet's ends at the validated direct call, written to
@@ -44,18 +44,13 @@ enabled on mainnet, and `cdp` and `circle` remain candidates.
 
 ## Call budget
 
-The spec's budget of 6 assumes the spec-01 surfaces: `daski_get_payment_challenge`
-for the challenge and `daski_get_order_access` for a read capability that
-serves both `status` and `artifact`.
-
-The sandbox has advertised both since gateway v0.28.0 (2026-09-01). A gateway
-without them still works: the CLI falls back to an unpaid `daski_buy_outcome`
-for the challenge and to per-action lifecycle signing for each read, which
-costs a challenge plus an authorized retry.
-
-The suite detects which tier it is running in and asserts the matching budget
-(`6` for `spec-01`, `12` for `fallback`), reporting the tier in `summary.json`
-rather than failing a budget that does not apply.
+The budget is 6 daski calls: one challenge from `daski_get_payment_challenge`,
+one paid `daski_buy_outcome` retry, one grant-read through
+`daski_get_order_access` (a challenge and an authorized retry), and `status`
+and `artifact` served by the capability. These are the only surfaces the CLI
+uses; a gateway without one of them is refused as unsupported
+(`DASKI_GATEWAY_UNSUPPORTED`) rather than run in a fallback tier.
+`summary.json` records the budget as `callBudget`.
 
 Run the suite against the live sandbox before every publication, after the
 gateway release it targets is deployed, and record the gateway version from

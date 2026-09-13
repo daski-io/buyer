@@ -30,7 +30,7 @@ export interface RecipePaymentFacts {
   grossAmount: bigint;
 }
 
-/** The eleven-slot ABI layout shared by both recipe versions. */
+/** The eleven-slot ABI layout of the V2 recipe. */
 const RECIPE_ABI = [
   { type: "bytes32" }, // domain separator
   { type: "uint256" }, // chainId
@@ -38,8 +38,8 @@ const RECIPE_ABI = [
   { type: "address" }, // payer
   { type: "address" }, // splitter
   { type: "uint256" }, // grossAmount
-  { type: "bytes32" }, // deal slot 1: runtimeCommitmentHash / listingManifestHash
-  { type: "bytes32" }, // deal slot 2: providerIntentHash / providerOfferHash
+  { type: "bytes32" }, // runtimeCommitmentHash
+  { type: "bytes32" }, // providerIntentHash
   { type: "bytes32" }, // quoteHash
   { type: "bytes32" }, // canonicalRequestHash
   { type: "bytes32" }, // orderNonce
@@ -48,8 +48,8 @@ const RECIPE_ABI = [
 function encodeRecipe(
   domain: Hex,
   facts: RecipePaymentFacts,
-  dealSlot1: Hex,
-  dealSlot2: Hex,
+  runtimeCommitmentHash: Hex,
+  providerIntentHash: Hex,
   quoteHash: Hex,
   canonicalRequestHash: Hex,
   orderNonce: Hex,
@@ -61,8 +61,8 @@ function encodeRecipe(
     facts.payer,
     facts.splitter,
     facts.grossAmount,
-    dealSlot1,
-    dealSlot2,
+    runtimeCommitmentHash,
+    providerIntentHash,
     quoteHash,
     canonicalRequestHash,
     orderNonce,

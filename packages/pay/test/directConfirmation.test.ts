@@ -151,6 +151,18 @@ const block = (number: number, hash = blockHashAt(BigInt(number))) => ({ number:
 const factsReader = (f: ConfirmationFacts = facts) => async () => f;
 const options = { handle: "handle", json: true };
 
+/** The gateway's sponsored attest preparation for the fixture facts, signable as is. */
+function sponsoredAttestPreparation(): Record<string, unknown> {
+  const deadline = String(Math.floor(Date.now() / 1000) + 300);
+  return { preparationId: "prep", orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 0, finalAttestation: false,
+    signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
+      types: { Attest: [{ name: "schema", type: "bytes32" }, { name: "recipient", type: "address" }, { name: "expirationTime", type: "uint64" },
+        { name: "revocable", type: "bool" }, { name: "refUID", type: "bytes32" }, { name: "data", type: "bytes" }, { name: "value", type: "uint256" },
+        { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint64" }] },
+      primaryType: "Attest", message: { schema: facts.schemaUid, recipient: facts.recipient, expirationTime: "0", revocable: true,
+        refUID: facts.currentUid, data: confirmationData(facts.orderKey, "Confirmed"), value: "0", nonce: facts.nonce, deadline } } };
+}
+
 test("the mode follows the signer: contract accounts submit directly, plain wallets are sponsored unless they ask", () => {
   assert.equal(selectConfirmationMode(description("contract"), undefined), "direct");
   assert.equal(selectConfirmationMode(description("eoa"), undefined), "sponsored");
@@ -472,14 +484,7 @@ test("direct mode derives the final attestation and the count from chain facts, 
 test("a sponsorship refusal raised before admission clears the journal so direct mode can proceed; an ambiguous failure keeps it", async () => {
   await withStore(async (record) => {
     const { context, gateway } = fixture("eoa");
-    const deadline = String(Math.floor(Date.now() / 1000) + 300);
-    gateway.prepared = { preparationId: "prep", orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 0, finalAttestation: false,
-      signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
-        types: { Attest: [{ name: "schema", type: "bytes32" }, { name: "recipient", type: "address" }, { name: "expirationTime", type: "uint64" },
-          { name: "revocable", type: "bool" }, { name: "refUID", type: "bytes32" }, { name: "data", type: "bytes" }, { name: "value", type: "uint256" },
-          { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint64" }] },
-        primaryType: "Attest", message: { schema: facts.schemaUid, recipient: facts.recipient, expirationTime: "0", revocable: true,
-          refUID: facts.currentUid, data: confirmationData(facts.orderKey, "Confirmed"), value: "0", nonce: facts.nonce, deadline } } };
+    gateway.prepared = sponsoredAttestPreparation();
     const original = context.client.callTool;
     let refusal: Record<string, unknown> = { code: "CONFIRMATION_SPONSORSHIP_UNAVAILABLE" };
     context.client.callTool = async (name: string, args: Record<string, unknown>) => {
@@ -501,6 +506,60 @@ test("a sponsorship refusal raised before admission clears the journal so direct
     const direct = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader());
     assert.equal(direct.mode, "direct");
     assert.equal(current().confirmationTx?.state, "prepared");
+  });
+});
+
+test("a stale answer on --resume is ambiguous: the journal is kept, its remediation says to keep resuming, and a new preparation is refused", async () => {
+  await withStore(async (record) => {
+    // The reproduction: the sponsored submission was accepted as pending, the
+    // gateway's 300 s preparation TTL passed, and a resumed submit is answered
+    // CONFIRMATION_PREPARATION_STALE although the operation may already run.
+    const { context, gateway } = fixture("eoa");
+    gateway.prepared = sponsoredAttestPreparation();
+    let answer: Record<string, unknown> = { code: "CONFIRMATION_SUBMISSION_PENDING" };
+    let isError = true;
+    const original = context.client.callTool;
+    context.client.callTool = async (name: string, args: Record<string, unknown>) => {
+      if (args.authorization && (args.request as Record<string, unknown> | undefined)?.phase === "submit") {
+        return { content: [], isError, structuredContent: answer };
+      }
+      return original(name, args);
+    };
+    const pending = await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    assert.equal(pending.status, "pending");
+    assert.equal(current().confirmationSubmission?.request.preparationId, "prep");
+
+    answer = { code: "CONFIRMATION_PREPARATION_STALE", message: "The preparation has expired." };
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()),
+      (error: unknown) => code("CONFIRMATION_PREPARATION_STALE")(error) &&
+        /--resume/.test((error as CliError).remediation) && /--check/.test((error as CliError).remediation) &&
+        /new preparation is refused/.test((error as CliError).remediation));
+    assert.equal(current().confirmationSubmission?.request.preparationId, "prep", "kept: the gateway may already have admitted it");
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader()),
+      code("DASKI_CONFIRMATION_PENDING"), "a new direct preparation is refused while the journal is pending");
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed" }, factsReader()),
+      code("DASKI_CONFIRMATION_PENDING"), "so is a new sponsored one");
+    // Once the gateway reports the operation, the same resumed submission closes the journal.
+    answer = { operationId: "op", state: "final" };
+    isError = false;
+    const closed = await confirmOrder(context, current(), { ...options, resume: true }, factsReader());
+    assert.equal(closed.state, "final");
+    assert.equal(current().confirmationSubmission, undefined);
+  });
+});
+
+test("a gateway without confirmation pins is refused with its own code before any chain read or preparation", async () => {
+  await withStore(async (record) => {
+    const { context, calls, chain } = fixture("contract");
+    chain.record = { orderKey: facts.orderKey, providerAgentId: 1n, payer: payer.address, providerOwner: REPUTATION,
+      providerAgentWallet: RECIPIENT, confirmationSubmissions: 0, outcomeRecorded: true, reputationEligible: true, currentConfirmationUid: ZERO_UID };
+    context.metadata = async () => parseGatewayMetadata({ payerAccounts: { types: ["eoa", "contract"], counterfactual: false } });
+    chain.log.length = 0;
+    await assert.rejects(readConfirmationFacts(context, record),
+      (error: unknown) => code("DASKI_GATEWAY_CONFIRMATION_PINS_MISSING")(error) && /confirmationSigning/.test((error as CliError).message));
+    await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }), code("DASKI_GATEWAY_CONFIRMATION_PINS_MISSING"));
+    assert.deepEqual(chain.log, [], "no chain fact is read without the pins");
+    assert.equal(calls.length, 0, "nothing is prepared at the gateway");
   });
 });
 

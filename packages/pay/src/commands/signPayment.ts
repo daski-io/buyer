@@ -80,8 +80,8 @@ export async function runSignPayment(
     // The challenge was obtained by the caller, so the gateway has already
     // bound its own payment identifier to it; the local order record and the
     // signed payload both use that identifier. A fresh one would be refused by
-    // the gateway before settlement (0.1.1, 2026-09-03). A challenge without
-    // one gets a fresh identifier, as before.
+    // the gateway before settlement (0.1.1, 2026-09-03), so a challenge
+    // without one is refused here instead.
     const intentId = challengeIntentId(challenge.extensions);
     recordIntent({
       intentId,
@@ -97,7 +97,7 @@ export async function runSignPayment(
     const authorized = await authorizePayment({
       policy: context.policy,
       signer: context.signer,
-      challenge: { challenge, requirement, binding, viaChallengeTool: false },
+      challenge: { challenge, requirement, binding },
       providerAgentId,
       outcomeId,
       // The approval above is bound to the amount and purchase terms.

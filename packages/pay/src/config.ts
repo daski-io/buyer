@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { getAddress, type Address } from "viem";
 import { CliError } from "./cli/errors.js";
-import { configPath, daskiHome } from "./paths.js";
+import { configPath, daskiHome, keystorePath } from "./paths.js";
 
 export type ProfileName = "sandbox" | "mainnet" | (string & {});
 export type SignerKind = "local" | "circle-agent" | "cdp" | "circle";
@@ -181,6 +181,25 @@ export function permissionWarnings(path: string): ConfigWarning[] {
     } catch {
       // A missing target is not a permissions problem; other checks report it.
     }
+  }
+  // The keystore's entries are encrypted, so another user reading the file
+  // gets ciphertext to attack offline rather than a key; still a posture worth
+  // naming, never a reason to block.
+  try {
+    const keystore = keystorePath();
+    const mode = statSync(keystore).mode;
+    if ((mode & 0o077) !== 0) {
+      warnings.push({
+        code: "DASKI_KEYSTORE_NOT_PRIVATE",
+        message:
+          `The keystore file ${keystore} is readable or writable by other users ` +
+          `(mode ${(mode & 0o777).toString(8)}); its entries are encrypted, but the ciphertext should ` +
+          "not be exposed.",
+        remediation: `Run: chmod 600 ${keystore}`,
+      });
+    }
+  } catch {
+    // No keystore file: nothing to check.
   }
   return warnings;
 }

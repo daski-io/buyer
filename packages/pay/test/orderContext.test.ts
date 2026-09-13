@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { CliError } from "../src/cli/errors.js";
-import { orderImport, readWithCapability, withOrder } from "../src/commands/order.js";
+import { gatewayOrderState, orderImport, readWithCapability, withOrder } from "../src/commands/order.js";
 import { createContext, type CommandContext, type ContextOptions, type OrderBinding } from "../src/context.js";
 import type { HostEnvironment } from "../src/host.js";
 import { findByIntent, findOrder, listOrders, upsertOrder } from "../src/store/orders.js";
@@ -58,8 +58,20 @@ test("a stored read capability serves a read without the key store, and the sign
     assert.equal(body.served, true);
     assert.deepEqual(reads, ["daski_get_order_status:cap"]);
     await assert.rejects(context.signer.getAddress(), code("DASKI_NO_KEY_FOR_PROFILE"), "the key store is opened only for a signature");
+    // Without a capability, grant-read is the only read path: a gateway
+    // without daski_get_order_access is unsupported, never read with a
+    // per-action signature.
+    const unsupported = { ...context, client: { hasTool: async () => false, callTool: async () => { throw new Error("nothing may be called"); } } } as unknown as CommandContext;
+    await assert.rejects(readWithCapability(unsupported, upsertOrder(record("intent-2", "handle-2")), { toolName: "daski_get_order_status", action: "status", request: {} }),
+      (error: unknown) => code("DASKI_GATEWAY_UNSUPPORTED")(error) && /daski_get_order_access/.test((error as CliError).message));
     await context.close();
   });
+});
+
+test("the gateway's own order state is read beside the provider's task state", () => {
+  assert.equal(gatewayOrderState({ state: "working", orderState: "DISPATCHED" }), "DISPATCHED");
+  assert.equal(gatewayOrderState({ state: "FULFILLED" }), "FULFILLED", "before dispatch only the gateway's state exists");
+  assert.equal(gatewayOrderState({ orderHandle: "h" }), undefined);
 });
 
 test("the lazily built signer must be the payer on record", async () => {
@@ -105,7 +117,7 @@ test("order import rehydrates the store from the payer's gateway history without
         { orderHandle: "ord_new", paymentIdentifier: "int_new", providerAgentId: "8327", outcomeId: "create-mailbox", state: "FULFILLED", grossAmount: "9990000", createdAt: now },
       ], nextCursor: "page-2" },
       { orders: [
-        { orderHandle: "ord_legacy", providerAgentId: "8327", outcomeId: "register-domain", state: "INPUT_REQUIRED", grossAmount: "5990000", createdAt: now },
+        { orderHandle: "ord_more", paymentIdentifier: "int_more", providerAgentId: "8327", outcomeId: "register-domain", state: "INPUT_REQUIRED", grossAmount: "5990000", createdAt: now },
       ], nextCursor: null },
     ];
     const context = { profileName: "sandbox", payerAddress: getAddress(PAYER), profile: { chainId: 84532, gatewayUrl: "https://g.example" },
@@ -124,9 +136,30 @@ test("order import rehydrates the store from the payer's gateway history without
     assert.equal(findByIntent("int_no_handle")?.handle, "ord_recovered");
     assert.equal(findByIntent("int_no_handle")?.state, "SUBMITTED");
     assert.equal(findByIntent("int_new")?.amount, "9990000");
-    assert.equal(findOrder("ord_legacy")?.intentId, "ord_legacy", "a row without an identifier is keyed by its handle");
-    assert.equal(findOrder("ord_legacy")?.state, "INPUT_REQUIRED");
+    assert.equal(findOrder("ord_more")?.intentId, "int_more", "the gateway's identifier is the ledger key");
+    assert.equal(findOrder("ord_more")?.state, "INPUT_REQUIRED");
     assert.equal(listOrders("sandbox").length, 4);
+  });
+});
+
+test("order import refuses a history row without a payment identifier, a decimal amount, or a known state, and records nothing from that page", async () => {
+  await withHome(async () => {
+    const good = { orderHandle: "ord_good", paymentIdentifier: "int_good", providerAgentId: "1", outcomeId: "form", state: "FULFILLED", grossAmount: "1000000", createdAt: now };
+    const cases: [string, Record<string, unknown>, string][] = [
+      ["no identifier", { orderHandle: "ord_legacy", providerAgentId: "8327", outcomeId: "register-domain", state: "INPUT_REQUIRED", grossAmount: "5990000", createdAt: now }, "DASKI_ORDER_HISTORY_UNREADABLE"],
+      ["no amount", { ...good, orderHandle: "ord_x", paymentIdentifier: "int_x", grossAmount: undefined }, "DASKI_ORDER_HISTORY_UNREADABLE"],
+      ["a non-atomic amount", { ...good, orderHandle: "ord_x", paymentIdentifier: "int_x", grossAmount: "5.99" }, "DASKI_ORDER_HISTORY_UNREADABLE"],
+      ["an unknown state", { ...good, orderHandle: "ord_x", paymentIdentifier: "int_x", state: "SOMETHING_NEW" }, "DASKI_ORDER_STATE_UNREADABLE"],
+      ["a provider task state", { ...good, orderHandle: "ord_x", paymentIdentifier: "int_x", state: "completed" }, "DASKI_ORDER_STATE_UNREADABLE"],
+    ];
+    for (const [label, row, wanted] of cases) {
+      const context = { profileName: "sandbox", payerAddress: getAddress(PAYER), profile: { chainId: 84532, gatewayUrl: "https://g.example" },
+        signer: { getAddress: async () => getAddress(PAYER), signTypedData: async () => { throw new Error("no signature expected"); }, describe: () => ({ provider: "local", accountType: "eoa" }) },
+        client: { hasTool: async () => true, callTool: async () => ({ content: [], structuredContent: { orders: [good, row], nextCursor: null } }) },
+        close: async () => {} } as unknown as CommandContext;
+      await assert.rejects(orderImport({ json: true, host }, async () => context), code(wanted), label);
+      assert.equal(listOrders("sandbox").length, 0, `${label}: nothing from the page is recorded, not even the readable row`);
+    }
   });
 });
 

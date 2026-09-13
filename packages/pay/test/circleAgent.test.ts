@@ -12,7 +12,7 @@ import { getAddress, type Hex } from "viem";
 import type { TypedDataRequest } from "@daski/x402-scheme";
 import { CliError } from "../src/cli/errors.js";
 import {
-  circleChainName, createCircleAgentSigner, signatureFromOutput, walletAddressesFromListing,
+  circleChainName, createCircleAgentSigner, signatureFromOutput, vendorEnvironment, walletAddressesFromListing,
   type CommandResult, type CommandRunner,
 } from "../src/signers/circleAgent.js";
 import { hasErc6492Suffix, isBoundedSignature } from "../src/signers/signature.js";
@@ -120,13 +120,31 @@ test("vendor failures are named without repeating the vendor's output", async ()
   await assert.rejects(oversized.signTypedData(TYPED_DATA), code("DASKI_CIRCLE_CLI_OUTPUT_INVALID"));
 });
 
-test("a fake circle on PATH is spawned directly with the argument array intact", { skip: process.platform === "win32" }, async () => {
+test("an ERC-6492 (counterfactual) signature is refused with the not-deployed code, bare or in JSON", async () => {
+  const wrapped = `0x${"11".repeat(40)}${"6492".repeat(16)}`;
+  for (const output of [`${wrapped}\n`, JSON.stringify({ signature: wrapped })]) {
+    const signer = await createCircleAgentSigner({ chainId: 84532,
+      run: fakeCircle((args) => (args[1] === "list" ? { stdout: listing(WALLET) } : { stdout: output })).run });
+    await assert.rejects(signer.signTypedData(TYPED_DATA),
+      (error: unknown) => code("DASKI_SIGNER_NOT_DEPLOYED")(error) && /ERC-6492/.test((error as CliError).message) &&
+        /zero-value transfer/.test((error as CliError).remediation), output);
+  }
+});
+
+test("the vendor CLI's environment carries no DASKI_ variable, and everything else", () => {
+  const scrubbed = vendorEnvironment({ PATH: "/usr/bin", HOME: "/home/u", DASKI_PAYER_PRIVATE_KEY: "0x11", DASKI_KEYSTORE_PASSPHRASE_FILE: "/p", DASKI_HOME: "/h", CIRCLE_KEEP: "1" });
+  assert.deepEqual(scrubbed, { PATH: "/usr/bin", HOME: "/home/u", CIRCLE_KEEP: "1" });
+});
+
+test("a fake circle on PATH is spawned directly with the argument array intact and without any DASKI_ variable", { skip: process.platform === "win32" }, async () => {
   const directory = mkdtempSync(join(tmpdir(), "daski-fake-circle-"));
   const argsFile = join(directory, "args.txt");
+  const envFile = join(directory, "env.txt");
   const script = join(directory, "circle");
   writeFileSync(script, [
     "#!/bin/sh",
     `printf '%s\\n' "$@" > "${argsFile}"`,
+    `env > "${envFile}"`,
     'if [ "$2" = "list" ]; then',
     `  printf '%s' '${listing(WALLET)}'`,
     "else",
@@ -134,8 +152,13 @@ test("a fake circle on PATH is spawned directly with the argument array intact",
     "fi",
   ].join("\n"));
   chmodSync(script, 0o755);
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${directory}${delimiter}${previousPath ?? ""}`;
+  const previous = Object.fromEntries(["PATH", "DASKI_PAYER_PRIVATE_KEY", "DASKI_KEYSTORE_PASSPHRASE_FILE", "DASKI_HOME", "CIRCLE_TEST_KEEP"]
+    .map((name) => [name, process.env[name]]));
+  process.env.PATH = `${directory}${delimiter}${previous.PATH ?? ""}`;
+  process.env.DASKI_PAYER_PRIVATE_KEY = `0x${"11".repeat(32)}`;
+  process.env.DASKI_KEYSTORE_PASSPHRASE_FILE = join(directory, "passphrase");
+  process.env.DASKI_HOME = directory;
+  process.env.CIRCLE_TEST_KEEP = "kept";
   try {
     const signer = await createCircleAgentSigner({ chainId: 8453 });
     assert.equal(await signer.getAddress(), getAddress(WALLET));
@@ -144,8 +167,13 @@ test("a fake circle on PATH is spawned directly with the argument array intact",
     assert.deepEqual([received[0], received[1], received[2], ...received.slice(4)],
       ["wallet", "sign", "typed-data", "--address", getAddress(WALLET), "--chain", "BASE", "--quiet"]);
     assert.deepEqual(JSON.parse(received[3]!).domain, TYPED_DATA.domain, "the typed data arrived as one argument, unshelled");
+    const names = readFileSync(envFile, "utf8").split("\n").map((line) => line.split("=")[0]!);
+    assert.ok(!names.some((name) => name.startsWith("DASKI_")), `the vendor saw ${names.filter((name) => name.startsWith("DASKI_")).join(", ")}`);
+    assert.ok(!readFileSync(envFile, "utf8").includes("11".repeat(32)), "the key never reached the vendor's environment");
+    assert.ok(names.includes("PATH"));
+    assert.ok(names.includes("CIRCLE_TEST_KEEP"), "unrelated variables are passed through");
   } finally {
-    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     rmSync(directory, { recursive: true, force: true });
   }
 });

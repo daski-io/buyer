@@ -78,7 +78,7 @@ test("mcp-result: an error carries its code where purchaseFailure looks for it",
   assert.equal(GatewayClient.unreadable(mcpResult.error), false);
 });
 
-test("mcp-result: the unpaid buy call's challenge is read from _meta and matches the body", () => {
+test("mcp-result: a payment-required result's challenge is read from _meta and matches the body", () => {
   const reply = mcpResult.paymentRequired;
   assert.equal(reply.isError, true);
   const challenge = GatewayClient.challenge(reply);
