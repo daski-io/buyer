@@ -7,15 +7,13 @@
  * if our nonce and theirs disagree, the deal we were shown is not the deal
  * we would be signing, and we refuse.
  *
- * These two functions mirror the gateway's `recipeNonce` / `recipeNonceV2`
- * byte for byte. Changing either is a protocol break, not a refactor.
+ * This function mirrors the gateway's `recipeNonceV2` byte for byte.
+ * Changing it is a protocol break, not a refactor.
  */
 import { encodeAbiParameters, keccak256, stringToHex, type Address, type Hex } from "viem";
-import type { OrderBinding, OrderBindingV1, OrderBindingV2 } from "./binding.js";
+import type { OrderBinding, OrderBindingV2 } from "./binding.js";
 
-/** `keccak256("DaskiStandardExactOrderV1")` — the v1 recipe domain separator. */
-export const RECIPE_NONCE_DOMAIN_V1: Hex = keccak256(stringToHex("DaskiStandardExactOrderV1"));
-/** `keccak256("DaskiStandardExactOrderV2")` — the v2 recipe domain separator. */
+/** `keccak256("DaskiStandardExactOrderV2")` — the recipe domain separator. */
 export const RECIPE_NONCE_DOMAIN_V2: Hex = keccak256(stringToHex("DaskiStandardExactOrderV2"));
 
 /**
@@ -32,7 +30,7 @@ export interface RecipePaymentFacts {
   grossAmount: bigint;
 }
 
-/** The eleven-slot ABI layout shared by both recipe versions. */
+/** The eleven-slot ABI layout of the V2 recipe. */
 const RECIPE_ABI = [
   { type: "bytes32" }, // domain separator
   { type: "uint256" }, // chainId
@@ -40,8 +38,8 @@ const RECIPE_ABI = [
   { type: "address" }, // payer
   { type: "address" }, // splitter
   { type: "uint256" }, // grossAmount
-  { type: "bytes32" }, // deal slot 1: runtimeCommitmentHash / listingManifestHash
-  { type: "bytes32" }, // deal slot 2: providerIntentHash / providerOfferHash
+  { type: "bytes32" }, // runtimeCommitmentHash
+  { type: "bytes32" }, // providerIntentHash
   { type: "bytes32" }, // quoteHash
   { type: "bytes32" }, // canonicalRequestHash
   { type: "bytes32" }, // orderNonce
@@ -50,8 +48,8 @@ const RECIPE_ABI = [
 function encodeRecipe(
   domain: Hex,
   facts: RecipePaymentFacts,
-  dealSlot1: Hex,
-  dealSlot2: Hex,
+  runtimeCommitmentHash: Hex,
+  providerIntentHash: Hex,
   quoteHash: Hex,
   canonicalRequestHash: Hex,
   orderNonce: Hex,
@@ -63,34 +61,17 @@ function encodeRecipe(
     facts.payer,
     facts.splitter,
     facts.grossAmount,
-    dealSlot1,
-    dealSlot2,
+    runtimeCommitmentHash,
+    providerIntentHash,
     quoteHash,
     canonicalRequestHash,
     orderNonce,
   ]));
 }
 
-export type RecipeNonceV1Input = RecipePaymentFacts &
-  Pick<OrderBindingV1, "listingManifestHash" | "providerOfferHash" | "quoteHash"
-    | "canonicalRequestHash" | "orderNonce">;
-
 export type RecipeNonceV2Input = RecipePaymentFacts &
   Pick<OrderBindingV2, "runtimeCommitmentHash" | "providerIntentHash" | "quoteHash"
     | "canonicalRequestHash" | "orderNonce">;
-
-/** `recipeNonce` — the v1 layout, for `recipe-bound-v1` listings. */
-export function recipeNonce(input: RecipeNonceV1Input): Hex {
-  return encodeRecipe(
-    RECIPE_NONCE_DOMAIN_V1,
-    input,
-    input.listingManifestHash,
-    input.providerOfferHash,
-    input.quoteHash,
-    input.canonicalRequestHash,
-    input.orderNonce,
-  );
-}
 
 /** `recipeNonceV2` — the catalog-driven layout, for `recipe-bound-v2` listings. */
 export function recipeNonceV2(input: RecipeNonceV2Input): Hex {
@@ -105,9 +86,7 @@ export function recipeNonceV2(input: RecipeNonceV2Input): Hex {
   );
 }
 
-/** Recomputes the authorization nonce a binding commits to, at either version. */
+/** Recomputes the authorization nonce a binding commits to. */
 export function deriveBindingNonce(binding: OrderBinding, facts: RecipePaymentFacts): Hex {
-  return binding.profile === "recipe-bound-v2"
-    ? recipeNonceV2({ ...facts, ...binding })
-    : recipeNonce({ ...facts, ...binding });
+  return recipeNonceV2({ ...facts, ...binding });
 }

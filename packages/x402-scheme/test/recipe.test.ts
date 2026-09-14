@@ -9,12 +9,10 @@ import { test } from "node:test";
 import { encodeAbiParameters, keccak256, stringToHex, type Address, type Hex } from "viem";
 import {
   deriveBindingNonce,
-  RECIPE_NONCE_DOMAIN_V1,
   RECIPE_NONCE_DOMAIN_V2,
-  recipeNonce,
   recipeNonceV2,
 } from "../src/recipe.js";
-import type { OrderBindingV1, OrderBindingV2 } from "../src/binding.js";
+import type { OrderBindingV2 } from "../src/binding.js";
 
 /** A real `daski-order-binding` issued by sandbox-gateway.daski.io. */
 const LIVE_BINDING_V2: OrderBindingV2 = {
@@ -55,7 +53,6 @@ function independentRecipeNonce(domain: Hex, slots: readonly Hex[]): Hex {
 
 test("the v2 domain separator is keccak256 of the documented label", () => {
   assert.equal(RECIPE_NONCE_DOMAIN_V2, keccak256(stringToHex("DaskiStandardExactOrderV2")));
-  assert.equal(RECIPE_NONCE_DOMAIN_V1, keccak256(stringToHex("DaskiStandardExactOrderV1")));
 });
 
 /**
@@ -80,39 +77,6 @@ test("recipeNonceV2 matches an independent encoding of the same layout", () => {
     LIVE_BINDING_V2.orderNonce,
   ]);
   assert.equal(mine, theirs);
-});
-
-test("recipeNonce v1 fills the manifest/offer slots in the documented order", () => {
-  const binding: OrderBindingV1 = {
-    version: 1,
-    profile: "recipe-bound-v1",
-    listingManifestHash: LIVE_BINDING_V2.runtimeCommitmentHash,
-    providerOfferHash: LIVE_BINDING_V2.providerIntentHash,
-    quoteHash: LIVE_BINDING_V2.quoteHash,
-    canonicalRequestHash: LIVE_BINDING_V2.canonicalRequestHash,
-    orderNonce: LIVE_BINDING_V2.orderNonce,
-    expiresAt: LIVE_BINDING_V2.expiresAt,
-  };
-  assert.equal(
-    recipeNonce({ ...FACTS, ...binding }),
-    independentRecipeNonce(RECIPE_NONCE_DOMAIN_V1, [
-      binding.listingManifestHash, binding.providerOfferHash, binding.quoteHash,
-      binding.canonicalRequestHash, binding.orderNonce,
-    ]),
-  );
-});
-
-test("v1 and v2 never collide on identical slot values", () => {
-  const v1: OrderBindingV1 = {
-    version: 1, profile: "recipe-bound-v1",
-    listingManifestHash: LIVE_BINDING_V2.runtimeCommitmentHash,
-    providerOfferHash: LIVE_BINDING_V2.providerIntentHash,
-    quoteHash: LIVE_BINDING_V2.quoteHash,
-    canonicalRequestHash: LIVE_BINDING_V2.canonicalRequestHash,
-    orderNonce: LIVE_BINDING_V2.orderNonce,
-    expiresAt: LIVE_BINDING_V2.expiresAt,
-  };
-  assert.notEqual(deriveBindingNonce(v1, FACTS), deriveBindingNonce(LIVE_BINDING_V2, FACTS));
 });
 
 test("every payment fact changes the nonce", () => {

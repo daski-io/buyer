@@ -4,10 +4,11 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { getAddress, type Address } from "viem";
 import { CliError } from "./cli/errors.js";
-import { configPath, daskiHome } from "./paths.js";
+import { configPath, daskiHome, keystorePath } from "./paths.js";
 
 export type ProfileName = "sandbox" | "mainnet" | (string & {});
-export type SignerKind = "local" | "cdp" | "circle";
+export type SignerKind = "local" | "circle-agent" | "cdp" | "circle";
+export const SIGNER_KINDS: readonly SignerKind[] = ["local", "circle-agent", "cdp", "circle"];
 
 export interface ProfileConfig {
   /** Gateway base URL; also the audience for lifecycle signatures. */
@@ -17,8 +18,13 @@ export interface ProfileConfig {
   chainId: number;
   /** The only token this profile will ever sign a transfer of. */
   usdcAddress: Address;
-  /** EVM RPC used for balance reads. Never for signing. */
+  /** EVM RPC used for reads only: balances, code, receipts, attestations. Never for sending. */
   rpcUrl: string;
+  /**
+   * The EAS contract delivery confirmations are attested through. Pinned per
+   * profile; the gateway's `confirmationSigning.eas` must equal it.
+   */
+  easAddress: Address;
   /** Optional budget for a single purchase; null means no additional budget. */
   maxPerOrderUsdc: string | null;
   /** Optional budget across the profile's recorded authorizations. */
@@ -40,6 +46,10 @@ export interface DaskiConfig {
 export const SANDBOX_USDC = getAddress("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
 /** Base mainnet USDC, for the scaffolded-but-disabled profile. */
 export const MAINNET_USDC = getAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+/** The canonical EAS predeploy on Base and Base Sepolia. */
+export const EAS_PREDEPLOY = getAddress("0x4200000000000000000000000000000000000021");
+/** Chains whose profiles default `easAddress` to the predeploy. */
+const EAS_PREDEPLOY_CHAINS: ReadonlySet<number> = new Set([8453, 84532]);
 
 export const DEFAULT_CONFIG: DaskiConfig = {
   version: 2,
@@ -51,6 +61,7 @@ export const DEFAULT_CONFIG: DaskiConfig = {
       chainId: 84532,
       usdcAddress: SANDBOX_USDC,
       rpcUrl: "https://sepolia.base.org",
+      easAddress: EAS_PREDEPLOY,
       maxPerOrderUsdc: null,
       sessionCapUsdc: null,
       requireApprovalAboveUsdc: "0.00",
@@ -64,6 +75,7 @@ export const DEFAULT_CONFIG: DaskiConfig = {
       chainId: 8453,
       usdcAddress: MAINNET_USDC,
       rpcUrl: "https://mainnet.base.org",
+      easAddress: EAS_PREDEPLOY,
       maxPerOrderUsdc: null,
       sessionCapUsdc: null,
       requireApprovalAboveUsdc: "0.00",
@@ -170,6 +182,25 @@ export function permissionWarnings(path: string): ConfigWarning[] {
       // A missing target is not a permissions problem; other checks report it.
     }
   }
+  // The keystore's entries are encrypted, so another user reading the file
+  // gets ciphertext to attack offline rather than a key; still a posture worth
+  // naming, never a reason to block.
+  try {
+    const keystore = keystorePath();
+    const mode = statSync(keystore).mode;
+    if ((mode & 0o077) !== 0) {
+      warnings.push({
+        code: "DASKI_KEYSTORE_NOT_PRIVATE",
+        message:
+          `The keystore file ${keystore} is readable or writable by other users ` +
+          `(mode ${(mode & 0o777).toString(8)}); its entries are encrypted, but the ciphertext should ` +
+          "not be exposed.",
+        remediation: `Run: chmod 600 ${keystore}`,
+      });
+    }
+  } catch {
+    // No keystore file: nothing to check.
+  }
   return warnings;
 }
 
@@ -209,6 +240,20 @@ function assertProfileSane(name: string, profile: ProfileConfig, path: string): 
       code: "DASKI_PROFILE_GATEWAY_NOT_HTTPS",
       message: `Profile "${name}" points at a non-HTTPS gateway: ${profile.gatewayUrl}`,
       remediation: `Use an https:// gateway URL in ${path}. See ${DOC}`,
+    });
+  }
+  if (profile.easAddress === undefined && EAS_PREDEPLOY_CHAINS.has(profile.chainId)) {
+    profile.easAddress = EAS_PREDEPLOY;
+  }
+  try {
+    profile.easAddress = getAddress(profile.easAddress);
+  } catch {
+    throw new CliError({
+      code: "DASKI_PROFILE_EAS_MALFORMED",
+      message: `Profile "${name}" has no usable easAddress: ${String(profile.easAddress)}`,
+      remediation:
+        `Set easAddress to the EAS contract for chain ${profile.chainId} in ${path} ` +
+        `(Base and Base Sepolia default to ${EAS_PREDEPLOY}). See ${DOC}`,
     });
   }
 }

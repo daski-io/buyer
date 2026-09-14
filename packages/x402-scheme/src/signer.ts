@@ -12,8 +12,8 @@ import type { TypedDataRequest } from "./eip712.js";
 export interface SignerDescription {
   /** e.g. `local`, `cdp`, `circle`. */
   provider: string;
-  /** e.g. `eoa`, `smart-contract`. */
-  accountType: "eoa" | "smart-contract" | "unknown";
+  /** `eoa` for a plain wallet, `contract` for a deployed contract account. */
+  accountType: "eoa" | "contract" | "unknown";
   /** Set when an adapter has not yet passed the §6 conformance suite. */
   conformance?: "verified" | "candidate-pending-conformance";
 }

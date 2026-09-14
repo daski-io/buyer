@@ -10,7 +10,6 @@
 export {
   parseOrderBinding,
   type OrderBinding,
-  type OrderBindingV1,
   type OrderBindingV2,
 } from "./binding.js";
 
@@ -81,11 +80,8 @@ export {
 
 export {
   deriveBindingNonce,
-  RECIPE_NONCE_DOMAIN_V1,
   RECIPE_NONCE_DOMAIN_V2,
-  recipeNonce,
   recipeNonceV2,
-  type RecipeNonceV1Input,
   type RecipeNonceV2Input,
   type RecipePaymentFacts,
 } from "./recipe.js";

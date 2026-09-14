@@ -3,11 +3,15 @@
  *
  * `daski doctor` does not take a signer's word for it. Before reporting one as
  * usable it has the signer sign one fixed vector and checks the result the way
- * the gateway will: the address recovered from the typed data must be the
- * address the adapter claims, `s` must be in the low half of the curve order,
- * and the whole thing must be 65 bytes. A signer that rewrites a field, wraps
- * an ERC-1271 blob, emits a malleable twin, or simply throws fails here, on a
- * machine with nothing at stake, instead of at settlement.
+ * the gateway will. For a plain wallet (EOA): the address recovered from the
+ * typed data must be the address the adapter claims, `s` must be in the low
+ * half of the curve order, and the whole thing must be 65 bytes. For a
+ * deployed contract account: the bytes are opaque beyond their size, and the
+ * contract itself must answer `isValidSignature` with the ERC-1271 magic value
+ * for the hash this CLI computed, through one bounded read-only call against
+ * the profile RPC. A signer that rewrites a field, wraps an ERC-6492 blob,
+ * emits a malleable twin, or simply throws fails here, on a machine with
+ * nothing at stake, instead of at settlement.
  *
  * The vector has the *shape* of a purchase — the closed 6-field
  * `TransferWithAuthorization` type set, so an adapter that mishandles that
@@ -17,7 +21,9 @@
  * ever accept it.
  */
 import {
+  encodeFunctionData,
   getAddress,
+  hashTypedData,
   hexToBigInt,
   keccak256,
   parseSignature,
@@ -32,6 +38,10 @@ import {
   type SignerAdapter,
   type TypedDataRequest,
 } from "@daski/x402-scheme";
+import {
+  ERC1271_ABI, ERC1271_CALL_GAS, isErc1271Magic, type ChainReader,
+} from "../chain/reader.js";
+import { hasErc6492Suffix, isBoundedSignature, MAX_SIGNATURE_BYTES } from "./signature.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
@@ -71,20 +81,37 @@ export function selfTestVector(signerAddress: Address, chainId: number): TypedDa
 
 export interface SignerSelfTestResult {
   passed: boolean;
-  /** The address the signature recovers to, or null when nothing recovers. */
+  /** How the signature verified: `recovery` for a plain wallet, `erc1271` for a contract account. */
+  verifiedVia: "recovery" | "erc1271" | null;
+  /** The address the signature recovers to on the EOA path, or null when nothing recovers. */
   recovered: Address | null;
-  /** True when `s` is at most secp256k1n/2. */
-  lowS: boolean;
+  /** True when `s` is at most secp256k1n/2 on the EOA path; null on the contract path. */
+  lowS: boolean | null;
   /** Why the test failed. Absent on a pass. */
   reason?: string;
 }
 
 /**
- * Signs the vector with `signer` and checks the signature the way the gateway
- * will. Never throws: a signer that throws has failed the test, and the reason
- * says so.
+ * Runs the self-test that matches the signer's account type. Never throws: a
+ * signer that throws has failed the test, and the reason says so.
  */
 export async function runSignerSelfTest(
+  signer: SignerAdapter,
+  chainId: number,
+  chain?: ChainReader,
+): Promise<SignerSelfTestResult> {
+  if (signer.describe().accountType === "contract") {
+    return runContractSignerSelfTest(signer, chainId, chain);
+  }
+  return runEoaSignerSelfTest(signer, chainId);
+}
+
+/**
+ * Signs the vector with `signer` and checks the signature the way the
+ * gateway's EOA path will: exactly 65 bytes, low-s, recovering to the claimed
+ * address. No RPC is involved.
+ */
+export async function runEoaSignerSelfTest(
   signer: SignerAdapter,
   chainId: number,
 ): Promise<SignerSelfTestResult> {
@@ -115,6 +142,7 @@ export async function runSignerSelfTest(
   if (recovered !== claimed) {
     return {
       passed: false,
+      verifiedVia: null,
       recovered,
       lowS,
       reason:
@@ -126,6 +154,7 @@ export async function runSignerSelfTest(
   if (!lowS) {
     return {
       passed: false,
+      verifiedVia: null,
       recovered,
       lowS,
       reason:
@@ -133,11 +162,69 @@ export async function runSignerSelfTest(
         "recovery rejects",
     };
   }
-  return { passed: true, recovered, lowS };
+  return { passed: true, verifiedVia: "recovery", recovered, lowS };
+}
+
+/**
+ * Signs the vector and asks the deployed wallet itself whether the signature
+ * is valid for the EIP-712 hash this CLI computed: one `isValidSignature`
+ * `eth_call` with a gas bound and a deadline, accepting only the ERC-1271
+ * magic value. A revert, another value, or a malformed return fails; an RPC
+ * that cannot be reached fails with a reason that says so, never as invalid.
+ */
+export async function runContractSignerSelfTest(
+  signer: SignerAdapter,
+  chainId: number,
+  chain: ChainReader | undefined,
+): Promise<SignerSelfTestResult> {
+  let claimed: Address;
+  let vector: TypedDataRequest;
+  let signature: unknown;
+  try {
+    claimed = getAddress(await signer.getAddress());
+    vector = selfTestVector(claimed, chainId);
+    signature = await signer.signTypedData(vector);
+  } catch (error) {
+    return failedContract(`the signer threw: ${errorMessage(error)}`);
+  }
+  if (!isBoundedSignature(signature)) {
+    return failedContract(
+      `malformed signature: expected 0x-prefixed hex of at most ${MAX_SIGNATURE_BYTES} bytes, ` +
+      `got ${describeShape(signature)}`,
+    );
+  }
+  if (hasErc6492Suffix(signature)) {
+    return failedContract(
+      "counterfactual (ERC-6492) signature: the wallet is not deployed, and Daski refuses " +
+      "ERC-6492 wrappers",
+    );
+  }
+  if (!chain) return failedContract("no RPC reader was available to call isValidSignature");
+  const hash = hashTypedData(vector as never);
+  const data = encodeFunctionData({
+    abi: ERC1271_ABI, functionName: "isValidSignature", args: [hash, signature],
+  });
+  let result;
+  try {
+    result = await chain.call({ to: claimed, data, gas: ERC1271_CALL_GAS });
+  } catch (error) {
+    return failedContract(`isValidSignature could not be called: ${errorMessage(error)}`);
+  }
+  if (result.reverted) return failedContract("isValidSignature reverted for the vector");
+  if (!isErc1271Magic(result.data)) {
+    return failedContract(
+      `isValidSignature returned ${describeReturn(result.data)}, not the ERC-1271 magic value`,
+    );
+  }
+  return { passed: true, verifiedVia: "erc1271", recovered: null, lowS: null };
 }
 
 function failed(reason: string): SignerSelfTestResult {
-  return { passed: false, recovered: null, lowS: false, reason };
+  return { passed: false, verifiedVia: null, recovered: null, lowS: false, reason };
+}
+
+function failedContract(reason: string): SignerSelfTestResult {
+  return { passed: false, verifiedVia: null, recovered: null, lowS: null, reason };
 }
 
 function errorMessage(error: unknown): string {
@@ -146,4 +233,9 @@ function errorMessage(error: unknown): string {
 
 function describeShape(value: unknown): string {
   return typeof value === "string" ? `a ${value.length}-character string` : typeof value;
+}
+
+function describeReturn(data: Hex | undefined): string {
+  if (data === undefined || data === "0x") return "no data";
+  return `${(data.length - 2) / 2} bytes starting ${data.slice(0, 10)}`;
 }

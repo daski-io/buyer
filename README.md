@@ -9,14 +9,15 @@ The buyer side of Daski: a CLI for purchasing service outcomes and the x402 clie
 
 ## Quick start
 
-Install the release pinned by your gateway, then diagnose the existing configuration before creating a wallet:
+Install the release pinned by your gateway, state where the CLI runs, then diagnose the existing configuration before creating a wallet:
 
 ```bash
-npm install -g @daski/pay@0.3.1
+npm install -g @daski/pay@0.4.0
+export DASKI_HOST_CLASS=durable   # or ephemeral on an agent-managed, shared, or resettable host
 daski doctor --json
 ```
 
-Reuse a healthy signer. If doctor reports no signer, run `daski wallet create` interactively, or `daski wallet create --yes-human-approved` after the user authorizes wallet setup. Doctor reports `stateDirectory` and `configFile`; these use the CLI's native home directory or `DASKI_HOME`, which can differ from the shell's home.
+Reuse a healthy signer. On a durable machine with no signer, run `daski wallet create` interactively, or `daski wallet create --yes-human-approved` after the user authorizes wallet setup; without a terminal, provide `DASKI_KEYSTORE_PASSPHRASE_FILE`. On an ephemeral host no local key is created: use the Circle agent wallet (`--signer circle-agent`), which the gateway offers only when its `payerAccounts.types` includes `contract`. Doctor reports each fact separately — host class, key backend, key durability, signer kind, account type, deployment — together with `stateDirectory` and `configFile`; these use the CLI's native home directory or `DASKI_HOME`, which can differ from the shell's home.
 
 Use the gateway's discovery tools and `daski_get_outcome_requirements` to complete the request from the user's supplied facts. Then obtain the actual quote:
 
@@ -30,9 +31,19 @@ New profiles require approval of every paid quote and have no additional default
 daski order status <handle> --json
 daski order artifact <handle> --output ./result.json --json
 daski order reconcile <intentId> --json
+daski order import --json
 ```
 
-Quotation sends the request for provider pricing and creates or reuses a draft. The paid retry advances the purchase. Funding requirements come from that quote and preflight.
+Quotation sends the request for provider pricing and creates or reuses a draft. The paid retry advances the purchase. Funding requirements come from that quote and preflight. `order import` rehydrates the local order store from the gateway's own history for the active payer.
+
+## Delivery confirmation
+
+```bash
+daski order confirm <handle> --choice Confirmed|NotConfirmed --json
+daski order revoke-confirmation <handle> --json
+```
+
+The CLI picks the mode by signer. Plain wallets are sponsored: the CLI rebuilds the review message from chain facts, the wallet signs, and Daski submits it; on `CONFIRMATION_SUBMISSION_PENDING` run `--resume`. Contract wallets submit directly: the CLI validates the prepared EAS call against chain facts and the profile's pinned EAS address, prints it, and sends nothing; submit it with the wallet's own tool, then `--tx <hash>` records it and `--check` verifies the receipt in the canonical chain, the attestation that binds to the prepared call, and the gateway's finalized read at or past the receipt's block. A hash recorded by mistake can be replaced or abandoned once its transaction is finalized, canonical, and provably unrelated; a revert is abandoned once its block is finalized. Up to three confirmations can be submitted per order; the current one can always be revoked.
 
 ## Spending settings
 
@@ -46,7 +57,7 @@ daski budget --per-order none --total none --json
 
 The total covers recorded authorizations across runs. Temporary `--max-per-order` and `--session-cap` limits fit within any configured budget. See [configuration](./docs/config.md).
 
-Node 20 or newer is required. Sandbox uses Base Sepolia; mainnet is disabled until the user chooses to enable it. The local signer is verified; CDP and Circle adapters are candidates pending conformance. See [signer adapters](./docs/signers.md).
+Node 20 or newer is required. Sandbox uses Base Sepolia; mainnet is disabled until the user chooses to enable it. The local signer is verified; the Circle agent wallet, CDP, and Circle developer-controlled adapters are candidates pending conformance. See [signer adapters](./docs/signers.md) and [key storage](./docs/keys.md).
 
 ## Payment validation and recovery
 

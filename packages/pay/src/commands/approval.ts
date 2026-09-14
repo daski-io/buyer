@@ -20,8 +20,8 @@ export function purchaseApproval(args: {
     network: args.requirement.network, token: getAddress(args.requirement.asset),
     payTo: getAddress(args.requirement.payTo), amount: BigInt(args.requirement.amount).toString(),
     requestHash: binding.canonicalRequestHash,
-    listing: binding.version === 2 ? binding.runtimeCommitmentHash : binding.listingManifestHash,
-    providerTerms: binding.version === 2 ? binding.providerIntentHash : binding.providerOfferHash,
+    listing: binding.runtimeCommitmentHash,
+    providerTerms: binding.providerIntentHash,
   };
   const termsHash = canonicalHash(terms);
   const purchaseNumber = args.purchaseNumber ?? 1;

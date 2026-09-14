@@ -15,8 +15,9 @@
  *   DASKI_PAYER_PRIVATE_KEY=0x... \
  *   npm run conformance -- --profile sandbox --signer local
  *
- * `--signer cdp --cdp-account <name>` and `--signer circle --circle-wallet <id>`
- * select the other adapters; their credentials come from the environment.
+ * `--signer circle-agent [--circle-wallet <address>]`, `--signer cdp --cdp-account
+ * <name>` and `--signer circle --circle-wallet <id>` select the other adapters;
+ * their credentials come from the environment or the vendor's own login.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,8 +29,9 @@ import { createContext } from "../src/context.js";
 import { GatewayClient, type GatewayCallLog } from "../src/gateway/client.js";
 import { orderArtifact, orderConfirm, orderStatus } from "../src/commands/order.js";
 import {
-  authorizePayment, newIntentId, recordIntent, requestChallenge, submitPayment,
+  authorizePayment, challengeIntentId, recordIntent, requestChallenge, submitPayment,
 } from "../src/gateway/purchase.js";
+import { CliError } from "../src/cli/errors.js";
 import { updateOrder } from "../src/store/orders.js";
 
 interface Step {
@@ -40,14 +42,29 @@ interface Step {
 }
 
 /**
- * The §6 budget assumes the spec-01 surfaces: one challenge, one paid retry,
- * one grant-read, and reads served by the capability. Where the gateway does
- * not yet expose them, each read costs a challenge plus an authorized retry,
- * so the suite states the tier it ran in rather than quietly failing a budget
- * that does not apply.
+ * The §6 budget: one challenge, one paid retry, one grant-read (a challenge
+ * and an authorized retry), and reads served by the capability. Those are
+ * the only surfaces this CLI uses, so there is one budget.
  */
-const SPEC01_CALL_BUDGET = 6;
-const FALLBACK_CALL_BUDGET = 12;
+const CALL_BUDGET = 6;
+
+/** Codes that mean the order's on-chain reputation record is not there yet. */
+const NOT_READY = new Set(["DASKI_CONFIRMATION_MISMATCH", "REPUTATION_NOT_READY"]);
+const READY_WAIT_MS = 5 * 60_000;
+const READY_POLL_MS = 15_000;
+
+async function retryUntilReady<T>(run: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + READY_WAIT_MS;
+  for (;;) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof CliError) || !NOT_READY.has(error.code) || Date.now() + READY_POLL_MS > deadline) throw error;
+      process.stderr.write(`       waiting for the order's reputation record (${error.code})\n`);
+      await new Promise((resolve) => setTimeout(resolve, READY_POLL_MS));
+    }
+  }
+}
 
 async function main(): Promise<number> {
   const { flags } = parseArgs(process.argv.slice(2));
@@ -106,7 +123,8 @@ async function main(): Promise<number> {
   let exitCode = 0;
   let orderHandle: string | undefined;
   let firstAttemptAccepted = false;
-  let specTier: "spec-01" | "fallback" = "fallback";
+  /** What the confirmation step proved: a sponsored submission, or a direct call prepared for the wallet's own tool. */
+  let confirmation: Record<string, unknown> | null = null;
 
   try {
     // -- doctor ------------------------------------------------------------
@@ -121,10 +139,6 @@ async function main(): Promise<number> {
 
     const context = await createContext({ ...selection, onCall: log });
     try {
-      specTier = await context.client.hasTool("daski_get_payment_challenge") &&
-        await context.client.hasTool("daski_get_order_access")
-        ? "spec-01" : "fallback";
-
       // -- prepare ---------------------------------------------------------
       const request = { address: `conformance-${Date.now()}@sandbox.daski.io` };
       const challenge = await step("prepare: challenge issued", () => requestChallenge({
@@ -138,7 +152,9 @@ async function main(): Promise<number> {
       process.stderr.write(`       price ${formatUsdc(amountAtomic)}\n`);
 
       // -- policy-validate + sign ------------------------------------------
-      const intentId = newIntentId();
+      // The gateway pins the payment identifier in the challenge; the intent
+      // recorded here must be that one, or reconciliation cannot find the order.
+      const intentId = challengeIntentId(challenge.challenge.extensions);
       recordIntent({
         intentId, profile: context.profileName, providerAgentId: provider,
         outcomeId: outcome, payer: context.payerAddress,
@@ -178,40 +194,59 @@ async function main(): Promise<number> {
       process.stderr.write(`       order ${orderHandle}\n`);
       await context.close();
 
-      // -- reads: capability if available, per-action signing otherwise -----
+      // -- reads: one grant-read, then served by the capability ---------------
       await step("status", () => orderStatus({ ...selection, handle: orderHandle!, json: true }));
       await step("artifact", () => orderArtifact({
         ...selection, handle: orderHandle!, json: true,
         output: join(runDirectory, "artifact.bin"),
       }));
       if (withConfirm) {
-        await step("confirm delivery", () => orderConfirm({
-          ...selection, handle: orderHandle!, json: true,
-        }));
+        // The order's reputation record appears on chain after fulfillment;
+        // until then the chain facts do not match and the gateway is not ready.
+        await step("confirm delivery", async () => {
+          const result = await retryUntilReady(() => orderConfirm({
+            ...selection, handle: orderHandle!, json: true, confirmation: "Confirmed",
+          }));
+          if (result.mode === "direct") {
+            // A contract signer ends at the validated call: this CLI never sends
+            // a transaction. The call is kept with the run for the wallet's own
+            // tool, and this step is preparation evidence only; conformance for
+            // a contract wallet also needs the --tx record and an observed --check.
+            const kept = join(runDirectory, "direct-call.json");
+            writeFileSync(kept, `${JSON.stringify({ orderHandle, callHash: result.callHash, call: result.call, next: result.next }, null, 2)}\n`, { mode: 0o600 });
+            confirmation = { mode: "direct", evidence: "prepared-only", callHash: String(result.callHash), call: kept };
+            process.stderr.write(
+              `       direct call validated (${String(result.callHash)}) and written to ${kept}; PREPARATION ONLY. ` +
+              `Submit it with the wallet's tool, then: daski order confirm ${orderHandle} --tx <hash> and --check\n`,
+            );
+          } else {
+            confirmation = { mode: "sponsored", evidence: "submitted", state: String(result.state ?? "") };
+          }
+          return result;
+        });
       }
     } finally {
       await context.close();
     }
 
     // -- assertions --------------------------------------------------------
-    const budget = specTier === "spec-01" ? SPEC01_CALL_BUDGET : FALLBACK_CALL_BUDGET;
     const used = calls.length;
-    if (used > budget) {
+    if (used > CALL_BUDGET) {
       steps.push({
-        name: `daski calls within the ${specTier} budget`,
+        name: "daski calls within the budget",
         ok: false,
-        detail: `used ${used}, budget ${budget}`,
+        detail: `used ${used}, budget ${CALL_BUDGET}`,
         durationMs: 0,
       });
-      process.stderr.write(`  FAIL call budget: used ${used}, budget ${budget} (${specTier})\n`);
+      process.stderr.write(`  FAIL call budget: used ${used}, budget ${CALL_BUDGET}\n`);
     } else {
       steps.push({
-        name: `daski calls within the ${specTier} budget`,
+        name: "daski calls within the budget",
         ok: true,
-        detail: `used ${used} of ${budget}`,
+        detail: `used ${used} of ${CALL_BUDGET}`,
         durationMs: 0,
       });
-      process.stderr.write(`  ok   call budget: used ${used} of ${budget} (${specTier} tier)\n`);
+      process.stderr.write(`  ok   call budget: used ${used} of ${CALL_BUDGET}\n`);
     }
     void report;
   } catch {
@@ -224,9 +259,10 @@ async function main(): Promise<number> {
     finishedAt: new Date().toISOString(),
     profile,
     signer: signerOverride ?? "(profile default)",
-    specTier,
+    callBudget: CALL_BUDGET,
     orderHandle: orderHandle ?? null,
     firstAttemptAccepted,
+    confirmation,
     gatewayCalls: calls.length,
     steps,
     passed: failed.length === 0 && exitCode === 0,

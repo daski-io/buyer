@@ -12,7 +12,7 @@ import { emit, emitError } from "../cli/output.js";
 import { runBuy } from "../commands/buy.js";
 import { runDoctor } from "../commands/doctor.js";
 import {
-  orderArtifact, orderCancel, orderConfirm, orderInput, orderStatus,
+  orderArtifact, orderCancel, orderConfirm, orderImport, orderInput, orderStatus,
   orderReconcile,
 } from "../commands/order.js";
 import { runSignPayment } from "../commands/signPayment.js";
@@ -44,26 +44,34 @@ Commands
   order status <handle>               Read an order's state
   order artifact <handle> [--output <file>]
                                       Write the result bytes to a file (never to stdout)
-  order confirm <handle> --choice <Confirmed|NotConfirmed>
-                                      Record the user's delivery review
+  order confirm <handle> --choice <Confirmed|NotConfirmed> [--submission <sponsored|direct>]
+                                      Record the user's delivery review; the mode follows the signer
   order revoke-confirmation <handle>  Withdraw the active review
-  order confirm <handle> --resume     Reconcile a pending review submission
+  order confirm <handle> --resume     Reconcile a pending sponsored submission
+  order confirm <handle> --tx <hash>  Direct mode: record the hash the wallet's tool reported
+  order confirm <handle> --check      Direct mode: verify the receipt, attestation and final state
+  order confirm <handle> --abandon    Direct mode: drop a record with no executable transaction
   order input <handle> --request <file.json>
                                       Submit requested customer input
   order cancel <handle>               Request cancellation
   order reconcile <handle|intentId>   Ask the gateway whether a payment settled; never re-signs
+  order import                        Rehydrate the local order store from the gateway's history
   sign-payment --challenge <file.json> [--provider <id> --outcome <id>]
                                       Validate, recompute, sign; print the paymentPayload
 
 Global flags
   --json                              Machine-readable output
   --profile <name>                    Config profile (default: sandbox)
-  --signer <local|cdp|circle>         Override the profile's signer
+  --signer <local|circle-agent|cdp|circle>
+                                      Override the profile's signer
   --cdp-account <name>                CDP account for --signer cdp (or DASKI_CDP_ACCOUNT)
-  --circle-wallet <id>                Circle wallet id for --signer circle (or DASKI_CIRCLE_WALLET)
+  --circle-wallet <id|address>        Circle wallet id for --signer circle (or DASKI_CIRCLE_WALLET);
+                                      the agent wallet address to select for --signer circle-agent
   --max-per-order <usdc>              Apply a temporary per-order budget
   --session-cap <usdc>                Apply a temporary total budget
 
+Environment: DASKI_HOST_CLASS (durable|ephemeral), DASKI_KEY_BACKEND
+(keychain|file|circle-agent|cdp|none), DASKI_KEYSTORE_PASSPHRASE_FILE.
 New profiles use quote approval, with optional budgets. Doctor reports the
 active configuration path. See https://github.com/daski-io/buyer#readme
 `;
@@ -124,14 +132,13 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "buy": {
-      assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "outcome", "request", "payer", "legacy-arg", "approve"]);
+      assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "outcome", "request", "payer", "approve"]);
       const result = await runBuy({
         ...shared,
         providerAgentId: requireFlag(flags, "provider"),
         outcomeId: requireFlag(flags, "outcome"),
         requestFile: requireFlag(flags, "request"),
         payer: stringFlag(flags, "payer"),
-        legacyArg: boolFlag(flags, "legacy-arg"),
         approved: stringFlag(flags, "approve"),
         json,
       });
@@ -140,6 +147,11 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case "order": {
+      if (command[1] === "import") {
+        assertKnownFlags(flags, [...GLOBAL_FLAGS, "cursor"]);
+        emit(await orderImport({ ...shared, json, cursor: stringFlag(flags, "cursor") }), output);
+        return 0;
+      }
       const handle = command[2];
       if (!handle) {
         throw new CliError({
@@ -160,10 +172,13 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         case "confirm":
         case "revoke-confirmation":
-          assertKnownFlags(flags, [...GLOBAL_FLAGS, "choice", "resume", "acknowledge-final-transition"]);
+          assertKnownFlags(flags, [...GLOBAL_FLAGS, "choice", "resume", "acknowledge-final-transition",
+            "submission", "tx", "check", "abandon"]);
           emit(await orderConfirm({ ...base, confirmation: stringFlag(flags, "choice"),
             revoke: command[1] === "revoke-confirmation", resume: boolFlag(flags, "resume"),
-            acknowledgeFinalTransition: boolFlag(flags, "acknowledge-final-transition") }), output);
+            acknowledgeFinalTransition: boolFlag(flags, "acknowledge-final-transition"),
+            submission: stringFlag(flags, "submission"), tx: stringFlag(flags, "tx"),
+            check: boolFlag(flags, "check"), abandon: boolFlag(flags, "abandon") }), output);
           return 0;
         case "cancel":
           assertKnownFlags(flags, GLOBAL_FLAGS);
@@ -179,7 +194,7 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         default:
           throw unknownSubcommand("order", command[1],
-            ["status", "artifact", "confirm", "revoke-confirmation", "input", "cancel", "reconcile"]);
+            ["status", "artifact", "confirm", "revoke-confirmation", "input", "cancel", "reconcile", "import"]);
       }
     }
 

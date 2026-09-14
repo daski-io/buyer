@@ -16,6 +16,7 @@ import type { PaymentChallenge, PaymentRequirement } from "../gateway/client.js"
 import {
   authorizePayment, challengeIntentId, recordIntent,
 } from "../gateway/purchase.js";
+import { assertContractSignerUsable } from "../signers/contract.js";
 import { updateOrder } from "../store/orders.js";
 import { approvePurchase, nextPurchaseApproval } from "./approval.js";
 
@@ -54,6 +55,10 @@ export async function runSignPayment(
   const { providerAgentId, outcomeId } = resolveTarget(challenge, options);
   const context = await contextFactory(options);
   try {
+    await assertContractSignerUsable({
+      signer: context.signer, chain: context.chain, metadata: context.metadata,
+      gatewayUrl: context.profile.gatewayUrl,
+    });
     // The splitter evidence resolves through the catalog, so the same §4.1.4
     // two-source check applies here as in `buy`.
     const outcome = await context.catalog.getOutcome(providerAgentId, outcomeId);
@@ -75,8 +80,8 @@ export async function runSignPayment(
     // The challenge was obtained by the caller, so the gateway has already
     // bound its own payment identifier to it; the local order record and the
     // signed payload both use that identifier. A fresh one would be refused by
-    // the gateway before settlement (0.1.1, 2026-09-03). A challenge without
-    // one gets a fresh identifier, as before.
+    // the gateway before settlement (0.1.1, 2026-09-03), so a challenge
+    // without one is refused here instead.
     const intentId = challengeIntentId(challenge.extensions);
     recordIntent({
       intentId,
@@ -92,7 +97,7 @@ export async function runSignPayment(
     const authorized = await authorizePayment({
       policy: context.policy,
       signer: context.signer,
-      challenge: { challenge, requirement, binding, viaChallengeTool: false },
+      challenge: { challenge, requirement, binding },
       providerAgentId,
       outcomeId,
       // The approval above is bound to the amount and purchase terms.

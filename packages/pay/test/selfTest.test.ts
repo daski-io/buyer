@@ -35,7 +35,7 @@ function signer(overrides: Partial<SignerAdapter> = {}): SignerAdapter {
 
 test("a correct EOA signer passes", async () => {
   const result = await runSignerSelfTest(signer(), CHAIN_ID);
-  assert.deepEqual(result, { passed: true, recovered: account.address, lowS: true });
+  assert.deepEqual(result, { passed: true, verifiedVia: "recovery", recovered: account.address, lowS: true });
 });
 
 test("the vector has the shape of a purchase and can never be one", () => {

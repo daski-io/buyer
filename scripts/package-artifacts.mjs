@@ -90,7 +90,7 @@ export function provePackageBuild(output = join(ROOT, ".scratch/package-proof/pr
     const pay = JSON.parse(readFileSync(join(dependencies, "@daski/pay/package.json"))), scheme = packages[0];
     if (pay.dependencies["@daski/x402-scheme"] !== scheme.version) throw new Error("CLI must pin the exact candidate scheme");
     const cli = join(dependencies, "@daski/pay", pay.bin.daski), env = {
-      PATH: process.env.PATH, DASKI_HOME: join(temporary, "empty-home"), DASKI_DISABLE_KEYCHAIN: "1",
+      PATH: process.env.PATH, DASKI_HOME: join(temporary, "empty-home"), DASKI_KEY_BACKEND: "file",
     };
     const version = JSON.parse(run(process.execPath, [cli, "version", "--json"], temporary, env));
     if (version.version !== pay.version) throw new Error("Packed CLI reported the wrong version");

@@ -97,6 +97,45 @@ test("a 27.10 quote needs approval, then buys once with the existing signer and 
   });
 });
 
+test("a gateway without daski_get_payment_challenge is unsupported: nothing is signed or recorded", async () => {
+  await withFixture(async ({ options, context, signatures }) => {
+    context.client.hasTool = async (name: string) => name !== "daski_get_payment_challenge";
+    await assert.rejects(runBuy({ ...options, approved: purchaseApproval(approvedTerms).id }, async () => context),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_GATEWAY_UNSUPPORTED" && /daski_get_payment_challenge/.test(error.message));
+    assert.equal(signatures.length, 0);
+    assert.equal(listOrders().length, 0);
+  });
+});
+
+test("a refusal after submit without paymentMayHaveSettled is reconciled with the gateway, never read as definitive", async () => {
+  await withFixture(async ({ options, context, signatures, submissions, state }) => {
+    const original = context.client.callTool;
+    context.client.callTool = async (name: string, args: Record<string, unknown>, meta?: Record<string, unknown>) => {
+      if (name !== "daski_buy_outcome") return original(name, args, meta);
+      submissions.push(meta!["x402/payment"] as PaymentSubmission);
+      return { content: [], isError: true, structuredContent: { code: "REQUEST_SCHEMA_INVALID", message: "refused" } };
+    };
+    // The gateway's history says the payment is in flight: the intent stays pending.
+    await assert.rejects(runBuy({ ...options, approved: purchaseApproval(approvedTerms).id }, async () => context),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_PENDING_RECONCILIATION");
+    assert.equal(findByIntent(intentId)?.state, "PENDING_RECONCILIATION");
+    assert.equal(signatures.length, 1);
+    assert.equal(submissions.length, 1);
+  });
+  await withFixture(async ({ options, context, signatures, state }) => {
+    const original = context.client.callTool;
+    context.client.callTool = async (name: string, args: Record<string, unknown>, meta?: Record<string, unknown>) => name === "daski_buy_outcome"
+      ? { content: [], isError: true, structuredContent: { code: "REQUEST_SCHEMA_INVALID", message: "refused" } }
+      : original(name, args, meta);
+    // The gateway's history says nothing settled under the identifier: that answer, not the refusal, clears it.
+    state.gatewayState = "CHALLENGE_ISSUED";
+    await assert.rejects(runBuy({ ...options, approved: purchaseApproval(approvedTerms).id }, async () => context),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_UNRESOLVED_NO_ORDER");
+    assert.equal(findByIntent(intentId)?.state, "NOT_SETTLED");
+    assert.equal(signatures.length, 1, "nothing is re-signed");
+  });
+});
+
 test("actual insufficient funds report a shortfall without signing", async () => {
   await withFixture(async ({ options, context, signatures, state }) => {
     state.sufficient = false;

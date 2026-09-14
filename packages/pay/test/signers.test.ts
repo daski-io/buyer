@@ -16,6 +16,12 @@ import {
   type CircleWallet,
 } from "../src/signers/circle.js";
 import { createSigner } from "../src/signers/index.js";
+import type { HostEnvironment } from "../src/host.js";
+
+const HOST: HostEnvironment = {
+  platform: "linux", hostClass: "undeclared", declaredBackend: "file", passphraseFile: undefined,
+  procKeysPath: "/nonexistent/proc-keys",
+};
 
 const ENV = ["CIRCLE_API_KEY", "CIRCLE_ENTITY_SECRET", "DASKI_CIRCLE_WALLET"] as const;
 type EnvName = (typeof ENV)[number];
@@ -218,17 +224,17 @@ test("createSigner routes kind \"circle\" to the Circle adapter", async () => {
   // no other signer knows that code.
   await withEnv({}, async () => {
     await assert.rejects(
-      () => createSigner({ kind: "circle", profile: "sandbox", circleWallet: WALLET_ID }),
+      () => createSigner({ kind: "circle", profile: "sandbox", host: HOST, chainId: 84532, circleWallet: WALLET_ID }),
       cliErrorWithCode("DASKI_CIRCLE_CREDENTIALS_UNSET"),
     );
   });
 });
 
-test("createSigner still refuses a signer it does not know, and now lists circle", async () => {
+test("createSigner still refuses a signer it does not know, and lists every kind", async () => {
   await assert.rejects(
-    () => createSigner({ kind: "ledger" as never, profile: "sandbox" }),
+    () => createSigner({ kind: "ledger" as never, profile: "sandbox", host: HOST, chainId: 84532 }),
     (error: unknown) =>
       cliErrorWithCode("DASKI_SIGNER_UNKNOWN")(error) &&
-      /local, cdp, circle/.test((error as CliError).remediation),
+      /local, circle-agent, cdp, circle/.test((error as CliError).remediation),
   );
 });

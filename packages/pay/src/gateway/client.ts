@@ -11,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { TransferAuthorization } from "@daski/x402-scheme";
 import { CliError } from "../cli/errors.js";
+import { NOT_DEPLOYED_REMEDIATION } from "../signers/contract.js";
 import { CLI_VERSION } from "../version.js";
 
 export interface McpToolResult {
@@ -171,18 +172,17 @@ export class GatewayClient {
   }
 
   /**
-   * The x402 challenge in a tool result. Three places, in order: the x402 MCP
-   * transport's `_meta["x402/payment-required"]`; the prepare tool's body,
-   * which nests the challenge under `paymentRequired` beside its `preflight`;
-   * and a bare PaymentRequired body, which the unpaid buy call returns.
+   * The x402 challenge in a tool result. Two places, in order: the x402 MCP
+   * transport's `_meta["x402/payment-required"]`, and the prepare tool's
+   * body, which nests the challenge under `paymentRequired` beside its
+   * `preflight`. A bare PaymentRequired body is not a challenge this CLI
+   * reads: only the prepare tool issues challenges.
    */
   static challenge(result: McpToolResult): PaymentChallenge | undefined {
     const fromMeta = result._meta?.["x402/payment-required"];
     if (isChallenge(fromMeta)) return fromMeta;
-    const body = GatewayClient.json(result);
-    const nested = body?.paymentRequired;
-    if (isChallenge(nested)) return nested;
-    return isChallenge(body) ? body : undefined;
+    const nested = GatewayClient.json(result)?.paymentRequired;
+    return isChallenge(nested) ? nested : undefined;
   }
 
   /** The prepare tool's `preflight` block, when the result carries one. */
@@ -252,6 +252,25 @@ export function unreadableResultError(
   });
 }
 
+/**
+ * A gateway that does not advertise a tool every purchase or order read goes
+ * through. This release negotiates nothing: the prepare tool issues every
+ * challenge and grant-read serves every read, so their absence is not a
+ * gateway to read around but one this CLI does not support.
+ */
+export function gatewayUnsupported(gatewayUrl: string, tool: string): CliError {
+  return new CliError({
+    code: "DASKI_GATEWAY_UNSUPPORTED",
+    message:
+      `The gateway at ${gatewayUrl} does not advertise ${tool}, which this release requires; ` +
+      "it is not a gateway this @daski/pay supports.",
+    remediation:
+      "Nothing was signed. Run daski doctor --json, which lists what the gateway advertises, and " +
+      "use the @daski/pay release the gateway pins, or point the profile's gatewayUrl at a current " +
+      "Daski gateway.",
+  });
+}
+
 export interface GatewayProtocolProbe {
   reachable: boolean;
   tools: string[];
@@ -299,46 +318,6 @@ export async function probeGatewayProtocol(target: ProbeTarget): Promise<Gateway
   }
 }
 
-/** The buyer CLI release a gateway pins, from its `/.well-known/mcp.json`. */
-export interface PinnedBuyerCli {
-  package: string;
-  version: string;
-  install?: string | undefined;
-}
-
-/**
- * Reads the gateway's pinned buyer CLI. Gateways before 2026-09-04 publish no
- * `buyerCli`; that reads as `null`, never as an error, because the pin is
- * advisory to the gateway's own operation and the doctor must not block on a
- * field the gateway does not have.
- */
-export async function pinnedBuyerCli(
-  gatewayUrl: string,
-  timeoutMs = 10_000,
-): Promise<PinnedBuyerCli | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${gatewayUrl.replace(/\/$/, "")}/.well-known/mcp.json`, {
-      signal: controller.signal,
-    });
-    if (!response.ok) return null;
-    const body = await response.json() as { buyerCli?: unknown };
-    const pin = body.buyerCli as Partial<PinnedBuyerCli> | undefined;
-    if (!pin || typeof pin !== "object") return null;
-    if (typeof pin.package !== "string" || typeof pin.version !== "string") return null;
-    return {
-      package: pin.package,
-      version: pin.version,
-      install: typeof pin.install === "string" ? pin.install : undefined,
-    };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
  * Compares two `major.minor.patch` versions. Returns a negative number when
  * `installed` is older than `pinned`, zero when equal, positive when newer,
@@ -378,5 +357,48 @@ export async function readiness(gatewayUrl: string, timeoutMs = 10_000): Promise
     return { reachable: false, error: (error as Error).message };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Gateway refusals after which the same request may simply be retried. */
+export function isRetryableGatewayCode(code: string | undefined): boolean {
+  return code === "SIGNATURE_VERIFICATION_UNAVAILABLE" || code === "SIGNATURE_VERIFICATION_BUSY" ||
+    code === "CONFIRMATION_SUBMISSION_PENDING";
+}
+
+/**
+ * Remediations for gateway refusals whose next step is a flag of this CLI.
+ * The gateway's own `next_action` speaks in tool terms; these speak in
+ * command terms, and win when the code is one the CLI knows how to act on.
+ */
+export function gatewayRefusalRemediation(
+  code: string | undefined,
+  body: Record<string, unknown> | undefined,
+): string | undefined {
+  switch (code) {
+    case "CONFIRMATION_SPONSORED_REQUIRES_EOA":
+      return "This signer's signatures verify as a contract account, so Daski cannot sponsor " +
+        "its attestation. Re-run with --submission direct and submit the printed call with the " +
+        "wallet's own tool, then record it with --tx <hash>.";
+    case "CONFIRMATION_SPONSORSHIP_LIMIT":
+      return body?.chainEligible === true
+        ? "Daski's sponsorship allowance for this order is used up, but the chain still accepts " +
+          "a submission. If the wallet can send transactions, re-run with --submission direct " +
+          "and submit the printed call with the wallet's own tool."
+        : "Daski's sponsorship allowance for this order is used up and the chain accepts no " +
+          "further submission for it.";
+    case "SIGNATURE_COUNTERFACTUAL_REJECTED":
+      return `The signer's wallet is not deployed, so its signature was refused. ${NOT_DEPLOYED_REMEDIATION}`;
+    case "SIGNATURE_VERIFICATION_UNAVAILABLE":
+      return "The gateway could not reach the chain to verify the signature. Nothing was " +
+        "consumed; retry the same command in a moment.";
+    case "SIGNATURE_VERIFICATION_BUSY":
+      return "The gateway is verifying too many contract-account signatures right now. Nothing " +
+        "was consumed; retry the same command in a moment.";
+    case "CONFIRMATION_SUBMISSION_LIMIT":
+      return "This order has used its three confirmation submissions. The current confirmation " +
+        "can still be revoked with --revoke; no further confirmation can be submitted.";
+    default:
+      return undefined;
   }
 }

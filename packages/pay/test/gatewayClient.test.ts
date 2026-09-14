@@ -58,7 +58,7 @@ test("unreadable: a success with no payload is a protocol mismatch; a refusal is
   assert.equal(GatewayClient.unreadable({ content: [text({ code: "X" })], isError: true }), false);
 });
 
-test("challenge: _meta first, then the prepare tool's nested body, then a bare body", () => {
+test("challenge: _meta first, then the prepare tool's nested body; a bare PaymentRequired body is not a challenge", () => {
   const prepared = {
     orderHandle: "h",
     paymentRequired: challenge,
@@ -76,8 +76,10 @@ test("challenge: _meta first, then the prepare tool's nested body, then a bare b
   };
   assert.deepEqual(GatewayClient.challenge(viaMeta), challenge);
 
-  const bare: McpToolResult = { content: [text(challenge)] };
-  assert.deepEqual(GatewayClient.challenge(bare), challenge);
+  // Only the prepare tool issues challenges; a bare body was the unpaid buy
+  // call's form, which this release no longer reads.
+  const bare: McpToolResult = { content: [text(challenge)], structuredContent: challenge };
+  assert.equal(GatewayClient.challenge(bare), undefined);
   assert.equal(GatewayClient.preflight(bare), undefined);
 
   assert.equal(GatewayClient.challenge({ content: [text({ orderHandle: "h" })] }), undefined);

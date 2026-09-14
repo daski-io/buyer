@@ -6,25 +6,37 @@ Every wallet backend implements one small interface:
 interface SignerAdapter {
   getAddress(): Promise<Address>;
   signTypedData(payload: TypedDataRequest): Promise<Hex>;
-  describe(): { provider: string; accountType: "eoa" | "smart-contract" | "unknown";
+  describe(): { provider: string; accountType: "eoa" | "contract" | "unknown";
                 conformance?: "verified" | "candidate-pending-conformance" };
 }
 ```
 
 Deliberately tiny: an address, a typed-data signature, a self-description. No
-raw message signing, no transaction signing, no key export.
+raw message signing, no transaction signing, no key export. The CLI never
+constructs a sending client; a test fails if any code path does.
 
 The [conformance suite](../packages/pay/conformance/run.ts) is the acceptance
 gate for every adapter. `describe()` reports conformance status so
 `daski doctor` can say out loud what has and has not been established, rather
-than implying a guarantee nobody has checked.
+than implying a guarantee nobody has checked. A signer is *supported* once the
+suite has passed with it against the sandbox and the run is recorded with the
+release; until then it is a candidate.
+
+The gateway states which account types it verifies under `payerAccounts.types`
+in `/.well-known/mcp.json`. A contract signer is offered only when that list
+includes `contract`; otherwise `doctor` and `buy` refuse with
+`DASKI_GATEWAY_EOA_ONLY`. Counterfactual (ERC-6492) signatures are never
+accepted anywhere: a contract wallet must be deployed before its first
+purchase.
 
 <a id="self-test"></a>
 ## The doctor self-test
 
 `daski doctor` does not take an adapter's word for it either. Before it
 reports a signer as usable it has the signer sign one fixed vector and checks
-the result the way the gateway will:
+the result the way the gateway will.
+
+For a plain wallet (`accountType: eoa`), without any RPC:
 
 - the address recovered from the typed data equals the address the adapter
   reports — which also proves no field was rewritten before signing;
@@ -32,24 +44,93 @@ the result the way the gateway will:
   recovery accepts;
 - the signature is 65 bytes.
 
+For a deployed contract account (`accountType: contract`):
+
+- the signature is `0x` plus an even number of hex characters, at most 4,096
+  bytes, and does not end in the ERC-6492 suffix;
+- the wallet itself, asked through one read-only `isValidSignature` call
+  against the profile RPC with a gas bound of 1,000,000 and a five-second
+  deadline, returns exactly the ERC-1271 magic value `0x1626ba7e` for the
+  EIP-712 hash the CLI computed. A revert or any other value fails; an RPC
+  that cannot be reached fails with a reason that says so, never as invalid.
+
 The vector has the shape of a purchase — the closed 6-field
 `TransferWithAuthorization` type set — but can never be one: the domain is
 `DaskiDoctor` with a zero verifying contract rather than any token's, the
 value and recipient are zero, and the validity window is closed.
 
 A failure is blocking, reported as `DASKI_SIGNER_SELF_TEST_FAILED` with the
-reason (recovered-address mismatch, high-s, malformed, or the error the signer
-threw), and the report carries the details under `signer.selfTest`. It is a
-local check with nothing at stake; the conformance suite remains the
-acceptance gate.
+reason, and the report carries the details under `signer.selfTest` together
+with `signer.verifiedVia` (`recovery` or `erc1271`). It is a local check with
+nothing at stake; the conformance suite remains the acceptance gate.
 
 ## `local` — implemented, verified
 
-A viem account from the key store. Reports `eoa` / `verified`.
+A viem account from the key store. Reports `eoa` / `verified`. Where the key
+lives is a separate decision; see [key storage](./keys.md).
 
 ```bash
 daski doctor --signer local --json
 ```
+
+<a id="circle-agent"></a>
+## `circle-agent` — implemented, candidate pending conformance
+
+The Circle agent wallet: a deployed contract account operated through the
+pinned [`@circle-fin/cli`](https://www.npmjs.com/package/@circle-fin/cli),
+and the default signer for agent-hosted runtimes. The adapter shells out to
+the `circle` command with an argument array, never a shell string:
+
+- the address from `circle wallet list --chain <BASE|BASE-SEPOLIA> --type agent --output json`
+  (the chain name follows the profile's chain id; only Base and Base Sepolia
+  are supported);
+- the signature from `circle wallet sign typed-data '<json>' --address <addr> --chain <chain> --quiet`,
+  which receives exactly the typed data the policy validator produced.
+
+Each command has a 30-second deadline and runs with this process's
+environment minus every `DASKI_*` variable, so `DASKI_PAYER_PRIVATE_KEY` and
+`DASKI_KEYSTORE_PASSPHRASE_FILE` never reach the vendor. Only the signature
+is retained; the vendor's output is never logged and never repeated in an
+error. A signature ending in the ERC-6492 suffix is refused on every use
+(`DASKI_SIGNER_NOT_DEPLOYED`), not only in the self-test. `describe()`
+reports `circle-agent` / `contract` / `candidate-pending-conformance`.
+
+Login, terms acceptance, wallet creation, deployment, funding, and spending
+limits are the user's steps with the vendor CLI; the gateway's setup skill
+describes them, and this CLI never performs them. The gateway pins the
+vendor CLI version under `signerClis.circle-agent` in `/.well-known/mcp.json`;
+`doctor` reports the pin.
+
+**The wallet must be deployed.** `doctor` and `buy` read `getCode` and refuse
+an undeployed wallet with `DASKI_SIGNER_NOT_DEPLOYED`; the remediation is a
+zero-value transfer from the wallet to itself with the circle CLI, then
+doctor again.
+
+Delivery confirmations from a contract wallet are submitted directly: the
+CLI validates and prints the EAS call, and the wallet's own tool sends it.
+See the [CLI commands](../packages/pay/README.md).
+
+```bash
+export DASKI_KEY_BACKEND=circle-agent
+daski doctor --json --signer circle-agent
+DASKI_CONFORMANCE_SPEND_OK=1 npm run conformance -- --profile sandbox --signer circle-agent
+```
+
+| Setting | Purpose |
+|---|---|
+| `DASKI_KEY_BACKEND=circle-agent` | Declares that no local key exists on this host |
+| `--circle-wallet <address>` | Selects one agent wallet when the CLI lists several |
+
+Refusals, each with the command that fixes it: `DASKI_CIRCLE_CLI_MISSING`,
+`DASKI_CIRCLE_CLI_FAILED`, `DASKI_CIRCLE_CLI_TIMEOUT`,
+`DASKI_CIRCLE_CLI_OUTPUT_INVALID`, `DASKI_CIRCLE_AGENT_WALLET_MISSING`,
+`DASKI_CIRCLE_AGENT_WALLET_AMBIGUOUS`, `DASKI_CIRCLE_AGENT_WALLET_NOT_FOUND`,
+`DASKI_CIRCLE_AGENT_CHAIN_UNSUPPORTED`, `DASKI_SIGNER_NOT_DEPLOYED`,
+`DASKI_GATEWAY_EOA_ONLY`.
+
+The `circle` command is spawned directly from `PATH`. On Windows the npm
+`.cmd` shim cannot be spawned without a shell, so the command must be
+reachable as an executable named `circle`.
 
 <a id="cdp"></a>
 ## `cdp` — scaffolded, candidate pending conformance
@@ -83,13 +164,10 @@ policy validator produced it — to Circle's `signTypedData`. Nothing is added
 and nothing is rewritten; the doctor self-test checks that by recovering the
 signer from the same data.
 
-**Only the `EOA` account type is accepted.** Circle can also mint
-smart-contract accounts (`SCA`), which sign through ERC-1271: the contract
-decides what a valid signature is. The gateway verifies purchase
-authorizations by plain low-s ECDSA recovery of an EOA, which cannot verify an
-ERC-1271 signature, and no amount of adapter code changes that. Selecting an
-SCA wallet fails with `DASKI_CIRCLE_SCA_UNSUPPORTED` rather than producing
-signatures the facilitator cannot verify.
+**Only the `EOA` account type is accepted** by this adapter. Circle can also
+mint smart-contract accounts (`SCA`); those are the agent wallets the
+`circle-agent` adapter serves through the vendor CLI. Selecting an SCA wallet
+here fails with `DASKI_CIRCLE_SCA_UNSUPPORTED`.
 
 What is not yet established is that Circle's EOA signatures settle on the
 live gateway end to end. Until this passes, `describe()` reports
@@ -120,9 +198,11 @@ Refusals, each with the command that fixes it: `DASKI_CIRCLE_CREDENTIALS_UNSET`,
 
 ## Adding an adapter
 
-1. Implement `SignerAdapter`.
+1. Implement `SignerAdapter`; report `accountType: contract` for a contract
+   account so doctor runs the ERC-1271 self-test and confirmations use direct
+   mode.
 2. Register it in `packages/pay/src/signers/index.ts`.
 3. Report `candidate-pending-conformance` from `describe()`.
 4. Pass `daski doctor`: the [self-test](#self-test) runs on every adapter.
 5. Run the suite: `DASKI_CONFORMANCE_SPEND_OK=1 npm run conformance -- --signer <name>`.
-6. Promote to `verified` only once it passes.
+6. Promote to `verified` only once it passes and the run is recorded.
