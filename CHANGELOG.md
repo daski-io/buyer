@@ -3,6 +3,16 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.4.1 — unreleased
+
+### `@daski/pay`
+
+- **The Circle agent wallet is the default signer on every host.** A profile without a signing key (`DASKI_NO_KEY_FOR_PROFILE`) and doctor's signer fallbacks name the Circle agent wallet first (`DASKI_KEY_BACKEND=circle-agent`, then `daski doctor --json --signer circle-agent`) and a local key only on the user's own machine; the READMEs and the signer reference say the same. Remediation text only: a fresh profile still records `signer: local` until setup sets it.
+
+### `@daski/x402-scheme`
+
+- Version moves with `@daski/pay`; no changes.
+
 ## 0.4.0 — unreleased
 
 Both packages move together with the gateway's buyer CLI pin; there is no compatibility with earlier gateways or request shapes.

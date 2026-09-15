@@ -499,7 +499,7 @@ function noKey(profile: string): CliError {
   return new CliError({
     code: "DASKI_NO_KEY_FOR_PROFILE",
     message: `No signing key is configured for the "${profile}" profile.`,
-    remediation: `Run: daski wallet create --profile ${profile}`,
+    remediation: `Default signer: set DASKI_KEY_BACKEND=circle-agent and run: daski doctor --json --signer circle-agent --profile ${profile}. Local key, only on the user's own machine: daski wallet create --profile ${profile}`,
   });
 }
 

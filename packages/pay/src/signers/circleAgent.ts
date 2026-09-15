@@ -1,6 +1,6 @@
 /**
  * The Circle agent wallet — a deployed contract account operated through the
- * pinned `@circle-fin/cli`, and the default signer for agent-hosted runtimes.
+ * pinned `@circle-fin/cli`, and the default signer on every host.
  * Candidate pending conformance.
  *
  * The adapter shells out to the `circle` command with an argument array,

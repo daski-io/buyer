@@ -18,6 +18,12 @@ on:
         required: false
         type: boolean
         default: false
+      dist_tag:
+        description: npm dist-tag for this publication
+        required: false
+        type: choice
+        options: ["latest", "next"]
+        default: latest
 
 permissions:
   contents: read
@@ -52,7 +58,7 @@ jobs:
       # npmjs.com (Settings -> Trusted publishing -> GitHub Actions:
       # daski-io / buyer / release.yml). Provenance is generated automatically.
       - name: Publish with provenance
-        run: npm publish --workspace "${{ inputs.package }}" --provenance --access public
+        run: npm publish --workspace "${{ inputs.package }}" --tag "${{ inputs.dist_tag }}" --provenance --access public
 
       # Per §5: a SHA256SUMS file ships with every release so installers can
       # verify what they got against what was published.

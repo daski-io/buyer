@@ -139,7 +139,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     try {
       location = await locateKey(loaded.profileName, localKeyStore(host));
     } catch (error) {
-      addIssue(blockingFrom(error, `Run: daski wallet create --profile ${loaded.profileName}`));
+      addIssue(blockingFrom(error, `Default signer: set DASKI_KEY_BACKEND=circle-agent and run: daski doctor --json --signer circle-agent --profile ${loaded.profileName}. Local key, only on the user's own machine: daski wallet create --profile ${loaded.profileName}`));
     }
     if (location) {
       keyDurability = location.durability;
@@ -194,7 +194,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       }
     }
   } catch (error) {
-    addIssue(blockingFrom(error, `Run: daski wallet create --profile ${loaded.profileName}`));
+    addIssue(blockingFrom(error, `Default signer: set DASKI_KEY_BACKEND=circle-agent and run: daski doctor --json --signer circle-agent --profile ${loaded.profileName}. Local key, only on the user's own machine: daski wallet create --profile ${loaded.profileName}`));
   }
   if (location?.source === "environment") {
     addIssue({

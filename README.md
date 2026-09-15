@@ -9,15 +9,15 @@ The buyer side of Daski: a CLI for purchasing service outcomes and the x402 clie
 
 ## Quick start
 
-Install the release pinned by your gateway, state where the CLI runs, then diagnose the existing configuration before creating a wallet:
+Install the release pinned by your gateway, state where the CLI runs, then diagnose the existing configuration before choosing a signer:
 
 ```bash
-npm install -g @daski/pay@0.4.0
+npm install -g @daski/pay@0.4.1
 export DASKI_HOST_CLASS=durable   # or ephemeral on an agent-managed, shared, or resettable host
 daski doctor --json
 ```
 
-Reuse a healthy signer. On a durable machine with no signer, run `daski wallet create` interactively, or `daski wallet create --yes-human-approved` after the user authorizes wallet setup; without a terminal, provide `DASKI_KEYSTORE_PASSPHRASE_FILE`. On an ephemeral host no local key is created: use the Circle agent wallet (`--signer circle-agent`), which the gateway offers only when its `payerAccounts.types` includes `contract`. Doctor reports each fact separately — host class, key backend, key durability, signer kind, account type, deployment — together with `stateDirectory` and `configFile`; these use the CLI's native home directory or `DASKI_HOME`, which can differ from the shell's home.
+Reuse a healthy signer. The Circle agent wallet (`--signer circle-agent`) is the default on every host; the gateway offers it when its `payerAccounts.types` includes `contract`. Create a local key only on the user's own durable machine and only when the user asks: `daski wallet create` interactively, or `daski wallet create --yes-human-approved` after the user authorizes wallet setup; without a terminal, provide `DASKI_KEYSTORE_PASSPHRASE_FILE`. No local key is created on an ephemeral host. Doctor reports each fact separately — host class, key backend, key durability, signer kind, account type, deployment — together with `stateDirectory` and `configFile`; these use the CLI's native home directory or `DASKI_HOME`, which can differ from the shell's home.
 
 Use the gateway's discovery tools and `daski_get_outcome_requirements` to complete the request from the user's supplied facts. Then obtain the actual quote:
 
@@ -91,6 +91,7 @@ The composite wraps the stock handler under scheme `exact`. Challenges without a
 - [Key storage](./docs/keys.md)
 - [Signer adapters](./docs/signers.md)
 - [Conformance](./docs/conformance.md)
+- [Release readiness](./docs/release-readiness.md)
 
 ```bash
 npm ci
@@ -101,8 +102,9 @@ npm run typecheck
 
 Tests use isolated temporary state and fixture signers. The root test entrypoint
 first builds clean package outputs and verifies actual tarballs: both candidate
-packages, the CLI version, refusal of an invalid challenge before signer setup,
-and rejection when the packed CLI entrypoint is missing. It writes reusable
+packages, the CLI version, an offline `doctor --json` report from an empty
+state directory, refusal of an invalid challenge before signer setup, and
+rejection when the packed CLI entrypoint is missing. It writes reusable
 source/lockfile/toolchain/build/tarball evidence to `.scratch/package-proof/`;
 CI uploads this evidence for each supported Node version. `npm run
 verify:packages` runs that bounded offline package qualification by itself.

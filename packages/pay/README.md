@@ -5,12 +5,12 @@ The Daski buyer CLI obtains a quote, validates and signs an approved payment, an
 ## Setup and purchase
 
 ```bash
-npm install -g @daski/pay@0.4.0
+npm install -g @daski/pay@0.4.1
 export DASKI_HOST_CLASS=durable   # or ephemeral
 daski doctor --json
 ```
 
-Doctor reports the host class, key backend and key durability, the configured signer with its account type, self-test, and deployment, native state paths, network, balances, spending settings, and gateway compatibility including which payer account types the gateway verifies. Reuse a healthy signer. Create a local wallet only on a durable machine and only if one is missing: `daski wallet create` prompts interactively; authorized agent setup uses `daski wallet create --yes-human-approved` with `DASKI_KEYSTORE_PASSPHRASE_FILE` when there is no terminal. An ephemeral host uses the Circle agent wallet (`--signer circle-agent`).
+Doctor reports the host class, key backend and key durability, the configured signer with its account type, self-test, and deployment, native state paths, network, balances, spending settings, and gateway compatibility including which payer account types the gateway verifies. Reuse a healthy signer. The Circle agent wallet (`--signer circle-agent`) is the default on every host. Create a local wallet only on the user's own durable machine and only when the user asks: `daski wallet create` prompts interactively; authorized agent setup uses `daski wallet create --yes-human-approved` with `DASKI_KEYSTORE_PASSPHRASE_FILE` when there is no terminal. No local key is created on an ephemeral host.
 
 Complete the request using gateway discovery and `daski_get_outcome_requirements`, then run:
 
