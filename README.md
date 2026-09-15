@@ -91,6 +91,7 @@ The composite wraps the stock handler under scheme `exact`. Challenges without a
 - [Key storage](./docs/keys.md)
 - [Signer adapters](./docs/signers.md)
 - [Conformance](./docs/conformance.md)
+- [Release readiness](./docs/release-readiness.md)
 
 ```bash
 npm ci
@@ -101,8 +102,9 @@ npm run typecheck
 
 Tests use isolated temporary state and fixture signers. The root test entrypoint
 first builds clean package outputs and verifies actual tarballs: both candidate
-packages, the CLI version, refusal of an invalid challenge before signer setup,
-and rejection when the packed CLI entrypoint is missing. It writes reusable
+packages, the CLI version, an offline `doctor --json` report from an empty
+state directory, refusal of an invalid challenge before signer setup, and
+rejection when the packed CLI entrypoint is missing. It writes reusable
 source/lockfile/toolchain/build/tarball evidence to `.scratch/package-proof/`;
 CI uploads this evidence for each supported Node version. `npm run
 verify:packages` runs that bounded offline package qualification by itself.

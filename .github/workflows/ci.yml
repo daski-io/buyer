@@ -34,6 +34,23 @@ jobs:
           path: .scratch/package-proof/
           if-no-files-found: error
 
+  # The gateway generates its wire shapes into test/wire-fixtures/ and lists
+  # which consumer vendors each file. This repository's copies under
+  # test/fixtures/gateway-wire/ feed its offline wire tests, so a copy that is
+  # not byte-identical to the gateway's develop branch fails here, naming the
+  # file, instead of inside a paid acceptance run.
+  gateway-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Clone the gateway's develop branch
+        run: git clone --depth 1 --branch develop https://github.com/daski-io/gateway.git gateway-develop
+      - name: Compare the vendored wire fixtures with the gateway
+        run: node scripts/check-gateway-wire-fixtures.mjs --gateway gateway-develop
+
   # The conformance suite spends real testnet USDC against the live sandbox,
   # so it is never part of CI. It is run deliberately, by a human, with a
   # funded key: see docs/conformance.md.

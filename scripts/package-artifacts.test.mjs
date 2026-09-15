@@ -12,11 +12,13 @@ test("publishable artifact proof rejects stale output and exercises the actual p
   writeFileSync(orphan, "export const stale = true;\n");
   const proof = provePackageBuild();
   assert.equal(existsSync(orphan), false, "deleted source cannot leave obsolete published JavaScript");
-  assert.deepEqual(proof.executions, { packedCliVersion: "PASS", packedChallengeRefusal: "PASS", missingPackedEntrypoint: "REJECTED", externalNetwork: "NOT_USED" });
+  assert.deepEqual(proof.executions, { packedCliVersion: "PASS", packedDoctor: "PASS", packedChallengeRefusal: "PASS", missingPackedEntrypoint: "REJECTED", externalNetwork: "NOT_USED" });
   assert.equal(proof.packages.length, 2);
   assert.equal(verifyPackageProof(proof), true);
   const omitted = structuredClone(proof); delete omitted.executions.packedChallengeRefusal;
   assert.throws(() => verifyPackageProof(omitted), /execution proof is missing/);
+  const undoctored = structuredClone(proof); delete undoctored.executions.packedDoctor;
+  assert.throws(() => verifyPackageProof(undoctored), /execution proof is missing/);
   assert.throws(() => verifyPackageProof({ ...proof, packages: [] }), /Both exact candidate package proofs/);
   const output = join(root, "packages/pay/dist/version.js"), original = readFileSync(output);
   try {

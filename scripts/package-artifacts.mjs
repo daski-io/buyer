@@ -30,7 +30,7 @@ export function verifyPackageProof(proof, root = ROOT) {
       proof.sourceHash !== fingerprint(inputs(root)) || proof.compiledHash !== fingerprint(compiled(root))) throw new Error("Package proof source or compiled output changed");
   if (proof.toolchain.node !== process.version || proof.toolchain.npm !== run("npm", ["--version"], root).trim() ||
       proof.toolchain.typescript !== JSON.parse(readFileSync(join(root, "node_modules/typescript/package.json"))).version) throw new Error("Package proof toolchain changed");
-  const checks = { packedCliVersion: "PASS", packedChallengeRefusal: "PASS", missingPackedEntrypoint: "REJECTED", externalNetwork: "NOT_USED" };
+  const checks = { packedCliVersion: "PASS", packedDoctor: "PASS", packedChallengeRefusal: "PASS", missingPackedEntrypoint: "REJECTED", externalNetwork: "NOT_USED" };
   if (Object.entries(checks).some(([key, value]) => proof.executions?.[key] !== value)) throw new Error("Required packed execution proof is missing");
   if (!Array.isArray(proof.packages) || proof.packages.length !== 2) throw new Error("Both exact candidate package proofs are required");
   for (const name of ["x402-scheme", "pay"]) {
@@ -97,6 +97,19 @@ export function provePackageBuild(output = join(ROOT, ".scratch/package-proof/pr
     const bad = join(temporary, "unsupported-challenge.json"); writeFileSync(bad, "{}");
     const refusal = spawnSync(process.execPath, [cli, "sign-payment", "--challenge", bad, "--json"], { cwd: temporary, env, encoding: "utf8", timeout: 10000 });
     if (refusal.status === 0 || JSON.parse(refusal.stdout).error !== "DASKI_CHALLENGE_UNRECOGNIZED") throw new Error("Packed CLI failed its actual challenge refusal boundary");
+    // The packed doctor must report offline: the CLI writes its own default
+    // config into an empty home, the profile is pointed at closed loopback
+    // ports, and the report must still carry this version, the probed URL and
+    // the unreachable-gateway issue rather than a crash, a prompt or a live probe.
+    const doctorHome = join(temporary, "doctor-home"), doctorEnv = { ...env, DASKI_HOME: doctorHome };
+    run(process.execPath, [cli, "budget", "--json"], temporary, doctorEnv);
+    const config = JSON.parse(readFileSync(join(doctorHome, "config.json"), "utf8")), profile = config.profiles[config.defaultProfile];
+    profile.gatewayUrl = "https://127.0.0.1:1"; profile.rpcUrl = "http://127.0.0.1:1";
+    writeFileSync(join(doctorHome, "config.json"), JSON.stringify(config, null, 2) + "\n");
+    const doctor = spawnSync(process.execPath, [cli, "doctor", "--json"], { cwd: temporary, env: doctorEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10000 });
+    let report; try { report = JSON.parse(doctor.stdout); } catch { throw new Error("Packed CLI doctor did not emit a JSON report"); }
+    if (doctor.status === 0 || report.cliVersion !== pay.version || report.ok !== false || report.gateway?.url !== profile.gatewayUrl ||
+        report.gateway.reachable !== false || !report.issues?.some(issue => issue.code === "DASKI_GATEWAY_UNREACHABLE")) throw new Error("Packed CLI doctor did not report offline against the empty home");
     // Prove the smoke check cannot accidentally use the checkout's bin.
     renameSync(cli, cli + ".withheld");
     const broken = spawnSync(process.execPath, [cli, "version", "--json"], { cwd: temporary, env, encoding: "utf8", timeout: 10000 });
@@ -105,7 +118,7 @@ export function provePackageBuild(output = join(ROOT, ".scratch/package-proof/pr
     if (fingerprint(source) !== fingerprint(inputs(root)) || fingerprint(build) !== fingerprint(compiled(root))) throw new Error("Candidate changed during package qualification");
     const proof = { schemaVersion: 1, status: "PASS", source, sourceHash: fingerprint(source),
       compiled: build, compiledHash: fingerprint(build), toolchain, packages,
-      executions: { packedCliVersion: "PASS", packedChallengeRefusal: "PASS", missingPackedEntrypoint: "REJECTED", externalNetwork: "NOT_USED" } };
+      executions: { packedCliVersion: "PASS", packedDoctor: "PASS", packedChallengeRefusal: "PASS", missingPackedEntrypoint: "REJECTED", externalNetwork: "NOT_USED" } };
     mkdirSync(dirname(resolve(output)), { recursive: true }); writeFileSync(resolve(output), JSON.stringify(proof, null, 2) + "\n");
     verifyPackageProof(proof, root);
     return proof;
