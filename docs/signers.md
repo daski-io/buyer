@@ -78,7 +78,7 @@ daski doctor --signer local --json
 
 The Circle agent wallet: a deployed contract account operated through the
 pinned [`@circle-fin/cli`](https://www.npmjs.com/package/@circle-fin/cli),
-and the default signer for agent-hosted runtimes. The adapter shells out to
+and the default signer on every host. The adapter shells out to
 the `circle` command with an argument array, never a shell string:
 
 - the address from `circle wallet list --chain <BASE|BASE-SEPOLIA> --type agent --output json`
