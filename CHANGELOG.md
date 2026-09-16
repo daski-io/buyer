@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.4.2 — unreleased
+
+### `@daski/pay`
+
+- **Circle signing works.** The JSON handed to `circle wallet sign typed-data` and to Circle's `signTypedData` is now the `eth_signTypedData_v4` form: `types` carries the `EIP712Domain` entry derived from the domain (`typedDataV4` in `@daski/x402-scheme`), which Circle requires and Coinbase's SDK adds itself. The hash is unchanged; the validator still refuses a declared `EIP712Domain` on input. Found on 2026-09-16 by the first real purchase through the Circle agent wallet, whose agent patched the installed package to get past it.
+- **Circle remediations name Circle's skill and the profile's chain.** A missing CLI points at Circle's setup skill; a failed or timed-out command and a missing wallet point at Circle's login skill, adding `--testnet` and `circle wallet create --testnet` only when the profile's chain is Base Sepolia, where Circle keeps a separate session; `DASKI_NO_USDC` mentions Circle's faucet there. The gateway's setup skill therefore says nothing about environments.
+
+### `@daski/x402-scheme`
+
+- **`typedDataV4(request)`** returns the request with `types.EIP712Domain` derived from the domain's present fields in the standard order; the hash is unchanged.
+
 ## 0.4.1 — unreleased
 
 ### `@daski/pay`

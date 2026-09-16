@@ -237,9 +237,14 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
           severity: "warning",
           code: "DASKI_NO_USDC",
           message: `${address} holds no USDC on ${profile.network}, so no purchase can settle.`,
-          // The same sentence on every chain: where the USDC comes from is the
-          // operator's business, and this CLI has no opinion about it.
-          remediation: `Fund ${address} with USDC on ${profile.network} before buying.`,
+          // Where the USDC comes from is the operator's business, with one
+          // exception the setup skill must not carry: on Base Sepolia the Circle
+          // agent wallet is funded by Circle's faucet.
+          remediation:
+            `Fund ${address} with USDC on ${profile.network} before buying.` +
+            (signerKind === "circle-agent" && profile.chainId === 84532
+              ? " Circle's faucet funds an agent wallet on this chain; see Circle's skill (curl -sL https://agents.circle.com/skills/setup.md)."
+              : ""),
         });
       }
     } catch (error) {

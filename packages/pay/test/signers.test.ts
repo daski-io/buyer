@@ -89,6 +89,12 @@ function fakeSdk(wallet: Partial<CircleWallet> = {}): { sdk: CircleModule; calls
 const cliErrorWithCode = (code: string) => (error: unknown): boolean =>
   error instanceof CliError && error.code === code;
 
+/** The EIP712Domain entry the v4 form derives from AUTHORIZATION.domain. */
+const DOMAIN_TYPE = [
+  { name: "name", type: "string" }, { name: "version", type: "string" },
+  { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" },
+];
+
 const AUTHORIZATION: TypedDataRequest = {
   domain: {
     name: "USDC", version: "2", chainId: 84532,
@@ -191,11 +197,10 @@ test("circle: an EOA wallet reports its checksummed address and signs exactly wh
     assert.equal(call.walletId, WALLET_ID);
     assert.equal(typeof call.data, "string", "Circle takes the typed data as a JSON string");
     const sent = JSON.parse(call.data) as Record<string, unknown>;
-    assert.deepEqual(sent, AUTHORIZATION, "domain, types, primaryType, message — unchanged");
+    assert.deepEqual(sent, { ...AUTHORIZATION, types: { EIP712Domain: DOMAIN_TYPE, ...AUTHORIZATION.types } },
+      "domain, primaryType, message unchanged; types gains the EIP712Domain entry Circle requires");
     assert.deepEqual(Object.keys(sent).sort(), ["domain", "message", "primaryType", "types"],
       "nothing beyond the four EIP-712 members is sent");
-    assert.equal("EIP712Domain" in (sent.types as object), false,
-      "EIP712Domain is derived from the domain, never declared");
   });
 });
 

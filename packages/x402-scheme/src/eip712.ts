@@ -6,7 +6,7 @@
  * never signs a server-supplied `types` object: it signs *this* one, after
  * confirming the server asked for exactly this one.
  */
-import type { Address, Hex } from "viem";
+import { getTypesForEIP712Domain, type Address, type Hex } from "viem";
 
 export const TRANSFER_WITH_AUTHORIZATION_PRIMARY_TYPE = "TransferWithAuthorization" as const;
 
@@ -97,3 +97,20 @@ export function isClosedTransferWithAuthorizationTypes(types: unknown): boolean 
 export const AUTHORIZATION_FIELDS = [
   "from", "to", "value", "validAfter", "validBefore", "nonce",
 ] as const;
+
+/**
+ * The `eth_signTypedData_v4` form of a request: `types` gains the
+ * `EIP712Domain` entry derived from the domain's present fields in the
+ * standard order (name, version, chainId, verifyingContract, salt). Every
+ * vendor takes this form: Circle's CLI and API require it, Coinbase's SDK
+ * inserts it itself, the MetaMask RPC schema demands it, viem accepts it.
+ * The hash is unchanged, since it is computed from `domain`. This is what
+ * adapters emit; the validator still refuses a declared `EIP712Domain` on
+ * what it accepts (isClosedTransferWithAuthorizationTypes).
+ */
+export function typedDataV4(payload: TypedDataRequest): TypedDataRequest {
+  return {
+    ...payload,
+    types: { EIP712Domain: getTypesForEIP712Domain({ domain: payload.domain }), ...payload.types },
+  };
+}

@@ -25,7 +25,7 @@
  * shell history. Neither is ever printed, logged, or sent to the gateway.
  */
 import { getAddress, isAddress, type Address, type Hex } from "viem";
-import type { SignerAdapter, TypedDataRequest } from "@daski/x402-scheme";
+import { typedDataV4, type SignerAdapter, type TypedDataRequest } from "@daski/x402-scheme";
 import { CliError } from "../cli/errors.js";
 
 const DOC = "https://github.com/daski-io/buyer/blob/main/docs/signers.md#circle";
@@ -147,14 +147,15 @@ export async function createCircleSigner(options: CircleSignerOptions = {}): Pro
 }
 
 /**
- * Exactly the request the validator produced — domain, types, primaryType,
- * message — as the JSON string Circle's `signTypedData` takes. `uint256`
- * values arrive as bigints, which JSON cannot carry, so they go out as decimal
- * strings: the same wire form the authorization itself uses. `EIP712Domain` is
- * not added to `types`; it is derived from `domain`, as the validator does.
+ * The request the validator produced, in the `eth_signTypedData_v4` form
+ * Circle's `signTypedData` and CLI take: `types` carries the `EIP712Domain`
+ * entry derived from `domain` (typedDataV4), which Circle requires and which
+ * leaves the hash unchanged. `uint256` values arrive as bigints, which JSON
+ * cannot carry, so they go out as decimal strings: the same wire form the
+ * authorization itself uses.
  */
 export function serializeTypedData(payload: TypedDataRequest): string {
-  const { domain, types, primaryType, message } = payload;
+  const { domain, types, primaryType, message } = typedDataV4(payload);
   return JSON.stringify(
     { domain, types, primaryType, message },
     (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value),

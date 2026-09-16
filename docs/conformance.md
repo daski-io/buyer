@@ -1,72 +1,40 @@
-# Conformance suite
+# Signer conformance
 
-The acceptance gate for the CLI and for every signer adapter. It runs against
-the **live sandbox** with a funded key and **spends real testnet USDC**, so it
-refuses to start without explicit consent:
+A signer is *supported* once the conformance suite has passed with it against
+the sandbox gateway and the run is recorded with the release; until then
+`doctor` reports it as a candidate, and it can still buy. The suite spends real
+sandbox USDC, so it refuses to start without `DASKI_CONFORMANCE_SPEND_OK=1`.
 
-```bash
-DASKI_CONFORMANCE_SPEND_OK=1 \
-DASKI_PAYER_PRIVATE_KEY=0x… \
-npm run conformance -- --profile sandbox --signer local
-```
+## What the owner does once for the Circle agent wallet
 
-Without `DASKI_CONFORMANCE_SPEND_OK=1` it exits `2` and explains why. A suite
-that can be triggered by accident is a suite that drains a wallet by accident.
+The sandbox profile is Base Sepolia, and Circle keeps that session and wallet
+apart from its main ones, so every Circle step below carries `--testnet`.
 
-## What it runs
+1. Set the wallet up with Circle's skill
+   (`curl -sL https://agents.circle.com/skills/setup.md`), in your own
+   terminal. Check `circle wallet status` before any login: each `--init`
+   sends a new code, and request ids expire after ten minutes.
+2. Log in with `--testnet`, create the wallet with
+   `circle wallet create --testnet --output json`, deploy it with a zero-value
+   transfer to itself, and fund it from Circle's faucet as the skill describes.
+3. Run both signers against the sandbox from this repository:
 
-`doctor passes` → `prepare` → `policy-validate + recompute + sign` → `buy` →
-grant-read → `status` → `artifact` → optionally `confirm`
-(`--confirm`: a `Confirmed` review, waiting up to five minutes for the order's
-on-chain reputation record; a plain wallet's review is sponsored and
-submitted, a contract wallet's ends at the validated direct call, written to
-the run directory as `direct-call.json` for the wallet's own tool). For a
-contract wallet the run's PASS is preparation evidence only: `summary.json`
-records `confirmation.evidence: "prepared-only"`, and complete conformance
-additionally needs the wallet's submission recorded with `--tx` and a
-`--check` that reports `observed`, kept with the release evidence. The intent
-recorded before signing is the payment identifier the gateway pinned in the
-challenge. A signer is *supported* once this suite has passed with it
-against the sandbox and the run is recorded with the release; `local` is the
-regression baseline, `circle-agent` is required before contract accounts are
-enabled on mainnet, and `cdp` and `circle` remain candidates.
+   ```bash
+   DASKI_CONFORMANCE_SPEND_OK=1 npm run conformance -- --profile sandbox --signer local --confirm
+   DASKI_KEY_BACKEND=circle-agent DASKI_CONFORMANCE_SPEND_OK=1 npm run conformance -- --profile sandbox --signer circle-agent --confirm
+   ```
 
-## Assertions
+   For the contract signer the suite stops at the validated EAS call; submit
+   it through the circle CLI and record it with
+   `daski order confirm <handle> --tx <hash>` followed by `--check`.
+4. Record both runs with the release evidence: the exact Circle CLI version
+   (`circle --version`), the gateway version from `/.well-known/mcp.json`, and
+   the facilitator responses.
 
-- **The first signed attempt is accepted.** A second attempt would mean the
-  bridge signed something the gateway would not take.
-- **Every request and response is byte-logged** to a run directory
-  (`./conformance-runs/<timestamp>-<profile>-<signer>/`), as `calls.jsonl` plus
-  a `summary.json`. Signature redaction is optional (`--redact-signatures`);
-  **key redaction is unconditional**, because a run log is exactly the kind of
-  artifact that gets pasted into an issue tracker.
-- **Total daski calls stay within budget.**
+## After the evidence exists
 
-## Call budget
-
-The budget is 6 daski calls: one challenge from `daski_get_payment_challenge`,
-one paid `daski_buy_outcome` retry, one grant-read through
-`daski_get_order_access` (a challenge and an authorized retry), and `status`
-and `artifact` served by the capability. These are the only surfaces the CLI
-uses; a gateway without one of them is refused as unsupported
-(`DASKI_GATEWAY_UNSUPPORTED`) rather than run in a fallback tier.
-`summary.json` records the budget as `callBudget`.
-
-Run the suite against the live sandbox before every publication, after the
-gateway release it targets is deployed, and record the gateway version from
-`daski doctor --json` in the changelog entry. 0.1.0 shipped without that run,
-one day after the gateway changed its result shape, and could not complete a
-single call.
-
-## Flags
-
-| Flag | Effect |
-|---|---|
-| `--profile <name>` | Config profile (default `sandbox`) |
-| `--signer <local\|circle-agent\|cdp\|circle>` | Override the profile's signer |
-| `--cdp-account <name>` | CDP account for `--signer cdp` (or `DASKI_CDP_ACCOUNT`) |
-| `--circle-wallet <id\|address>` | Circle wallet id for `--signer circle` (or `DASKI_CIRCLE_WALLET`); the agent wallet address to select for `--signer circle-agent` |
-| `--provider` / `--outcome` | What to buy (default `8327` / `create-mailbox`) |
-| `--confirm` | Also run the delivery-confirmation step |
-| `--redact-signatures` | Blank signatures in the run log |
-| `DASKI_CONFORMANCE_DIR` | Where run directories are written |
+One buyer release flips `circle-agent` to `conformance: verified` in the
+adapter's `describe()`, which also ends doctor's pending-conformance warning;
+the gateway's `signerClis.circle-agent` moves to the version the run used,
+together with its pin on this package and the harness pin. Base mainnet
+additionally requires `CONFORMANCE_EVIDENCE_RECORDED=1` next to that evidence.

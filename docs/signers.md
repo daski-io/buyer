@@ -85,7 +85,10 @@ the `circle` command with an argument array, never a shell string:
   (the chain name follows the profile's chain id; only Base and Base Sepolia
   are supported);
 - the signature from `circle wallet sign typed-data '<json>' --address <addr> --chain <chain> --quiet`,
-  which receives exactly the typed data the policy validator produced.
+  which receives the typed data the policy validator produced in the
+  `eth_signTypedData_v4` form: `types` carries the `EIP712Domain` entry derived
+  from the domain (`typedDataV4` in `@daski/x402-scheme`), which Circle
+  requires and which leaves the hash unchanged.
 
 Each command has a 30-second deadline and runs with this process's
 environment minus every `DASKI_*` variable, so `DASKI_PAYER_PRIVATE_KEY` and
@@ -95,11 +98,14 @@ error. A signature ending in the ERC-6492 suffix is refused on every use
 (`DASKI_SIGNER_NOT_DEPLOYED`), not only in the self-test. `describe()`
 reports `circle-agent` / `contract` / `candidate-pending-conformance`.
 
-Login, terms acceptance, wallet creation, deployment, funding, and spending
-limits are the user's steps with the vendor CLI; the gateway's setup skill
-describes them, and this CLI never performs them. The gateway pins the
-vendor CLI version under `signerClis.circle-agent` in `/.well-known/mcp.json`;
-`doctor` reports the pin.
+Install, terms acceptance, login, wallet creation, and funding are Circle's
+own steps: the gateway's setup skill hands the agent Circle's skill
+(`curl -sL https://agents.circle.com/skills/setup.md`), and this CLI never
+performs them. The gateway publishes the vendor CLI version this adapter was
+tested with under `signerClis.circle-agent` in `/.well-known/mcp.json`;
+`doctor` reports it. Circle keeps its Base Sepolia session and wallet apart
+from the main ones (`--testnet`); the adapter's remediations say so when that
+is the profile's chain, so the setup skill does not.
 
 **The wallet must be deployed.** `doctor` and `buy` read `getCode` and refuse
 an undeployed wallet with `DASKI_SIGNER_NOT_DEPLOYED`; the remediation is a

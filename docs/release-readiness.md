@@ -51,6 +51,24 @@ a live gateway and stays a deliberate, human-run action (see
 its provenance and the pinned-CLI acceptance lane belong to the coordinator's
 release evidence.
 
+## Hand-off to the release agent
+
+The release agent reads nothing but your commits. If a change needs anything at deploy time beyond merging and publishing, put it in git trailers on the commit that needs it, one per line at the end of the commit message:
+
+```
+Release-Scenarios: daski-pay
+Release-Owner-Task: Circle conformance with the owner's account, see docs/conformance.md
+Release-Rollback: the previous package version stays on npm; the gateway pin can move back
+```
+
+- `Release-Variable`: a variable a service must receive, written as `Release-Variable: gateway NAME=value before-deploy` (service `gateway`, `provider` or `daski-website`; value literal or `staged`, meaning the owner sets the real value on Railway; timing `before-deploy` or `after-deploy`). Never put a secret in a commit. A key added to `.env.example` must appear in a `Release-Variable` trailer, or `Release-Variable: none NAME` when it needs no deployment change.
+- `Release-Requires`: an environment operation the owner must authorize: `new-epoch`, `reregister:<service>` or `contract-upgrade`.
+- `Release-Scenarios`: the acceptance scenarios the change touches, so the release runs them.
+- `Release-Owner-Task`: work only the owner can do after the release. It is listed once in the release summary and never asked during the release.
+- `Release-Rollback`: one line on how to undo the change if the release is rolled back.
+
+Do not write runbooks or instructions for the release agent anywhere else. CI runs `scripts/check-release-trailers.mjs` over every pushed commit.
+
 ## Publishing
 
 Publication goes through `.github/workflows/release.yml` only. The workflow

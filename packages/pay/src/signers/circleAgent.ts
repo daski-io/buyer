@@ -98,13 +98,27 @@ function cliMissing(): CliError {
     code: "DASKI_CIRCLE_CLI_MISSING",
     message: `The \`circle\` command is not on PATH; the Circle agent wallet signer needs ${CIRCLE_CLI_PACKAGE}.`,
     remediation:
-      "Verify provenance, then install the version the gateway pins under signerClis.circle-agent in " +
-      `/.well-known/mcp.json: npm view ${CIRCLE_CLI_PACKAGE} repository.url && npm install -g ` +
-      `${CIRCLE_CLI_PACKAGE}@<pinned>. See ${DOC}`,
+      "Install it with Circle's own skill (curl -sL https://agents.circle.com/skills/setup.md); Daski's " +
+      "adapter is tested with the version the gateway publishes under signerClis.circle-agent in " +
+      `/.well-known/mcp.json (npm install -g ${CIRCLE_CLI_PACKAGE}@<version>). See ${DOC}`,
   });
 }
 
-async function runCircle(run: CommandRunner, args: readonly string[], what: string): Promise<string> {
+/**
+ * How to establish the vendor session the profile's chain needs. Circle keeps
+ * its Base Sepolia session and wallet apart from the main ones, and this is
+ * the one place that says so, so the gateway's setup skill need not.
+ */
+export function loginHint(chain: string | undefined): string {
+  const skill = "Log in with Circle's login skill (curl -sL https://agents.circle.com/skills/wallet-login.md)";
+  return chain === "BASE-SEPOLIA"
+    ? `${skill}, adding --testnet to the login command; Circle keeps that session apart from the main one`
+    : skill;
+}
+
+async function runCircle(
+  run: CommandRunner, args: readonly string[], what: string, chain?: string,
+): Promise<string> {
   let result: CommandResult;
   try {
     result = await run(args, { timeoutMs: CIRCLE_COMMAND_TIMEOUT_MS });
@@ -120,7 +134,7 @@ async function runCircle(run: CommandRunner, args: readonly string[], what: stri
     throw new CliError({
       code: "DASKI_CIRCLE_CLI_TIMEOUT",
       message: `The circle CLI did not ${what} within ${CIRCLE_COMMAND_TIMEOUT_MS / 1000} seconds.`,
-      remediation: "Check the wallet login (circle wallet login) and connectivity, then re-run.",
+      remediation: `Check the vendor session and connectivity, then re-run. ${loginHint(chain)}.`,
     });
   }
   if (result.status !== 0) {
@@ -130,7 +144,7 @@ async function runCircle(run: CommandRunner, args: readonly string[], what: stri
       message: `The circle CLI exited with status ${result.status ?? "unknown"} when asked to ${what}.`,
       remediation:
         "Run the same circle command in the user's terminal to see the vendor's message; a " +
-        `logged-out session (circle wallet login) is the usual cause. See ${DOC}`,
+        `logged-out session is the usual cause. ${loginHint(chain)}. See ${DOC}`,
     });
   }
   return result.stdout;
@@ -172,7 +186,7 @@ export async function createCircleAgentSigner(options: CircleAgentSignerOptions)
   const run = options.run ?? spawnCircle;
 
   const listing = await runCircle(run,
-    ["wallet", "list", "--chain", chain, "--type", "agent", "--output", "json"], "list wallets");
+    ["wallet", "list", "--chain", chain, "--type", "agent", "--output", "json"], "list wallets", chain);
   let document: unknown;
   try {
     document = JSON.parse(listing);
@@ -204,8 +218,8 @@ export async function createCircleAgentSigner(options: CircleAgentSignerOptions)
       code: "DASKI_CIRCLE_AGENT_WALLET_MISSING",
       message: `The circle CLI lists no agent wallet on ${chain}.`,
       remediation:
-        "Log in with the user's email (circle wallet login <email> --type agent --init), then " +
-        `create one: circle wallet create --output json. See ${DOC}`,
+        `${loginHint(chain)}, then create one: circle wallet create` +
+        `${chain === "BASE-SEPOLIA" ? " --testnet" : ""} --output json. See ${DOC}`,
     });
   } else {
     throw new CliError({
@@ -221,7 +235,7 @@ export async function createCircleAgentSigner(options: CircleAgentSignerOptions)
       const output = await runCircle(run, [
         "wallet", "sign", "typed-data", serializeTypedData(payload),
         "--address", address, "--chain", chain, "--quiet",
-      ], "sign typed data");
+      ], "sign typed data", chain);
       const signature = signatureFromOutput(output);
       if (!signature) throw outputInvalid("signing");
       // An ERC-6492 wrapper means the wallet signed counterfactually; the
