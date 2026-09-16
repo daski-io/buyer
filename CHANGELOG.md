@@ -3,6 +3,16 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.4.3 — unreleased
+
+### `@daski/pay`
+
+- **The Circle agent wallet works on Windows.** npm installs the Circle CLI there as a `circle.cmd` shim and no executable, which the adapter's shell-less spawn could not start: `daski doctor --signer circle-agent` reported `DASKI_CIRCLE_CLI_MISSING` on a machine where `circle --version` ran, so the default signer was unusable from a stock install. The adapter now does what the shim does: it finds the package beside the shim through the package's own `bin` field and runs that entry file with Node (the `node.exe` beside the shim, otherwise the one running `daski`), argument array intact and still no shell (`resolveCircleCommand`, `circleRunner`). A `circle.exe` on PATH is run as it is, and a shim with no package beside it is named in the refusal. Found on 2026-09-16 by the first Windows purchase attempt through the Circle agent wallet.
+
+### `@daski/x402-scheme`
+
+- Version moves with `@daski/pay`; no changes.
+
 ## 0.4.2 — unreleased
 
 ### `@daski/pay`

@@ -134,9 +134,18 @@ Refusals, each with the command that fixes it: `DASKI_CIRCLE_CLI_MISSING`,
 `DASKI_CIRCLE_AGENT_CHAIN_UNSUPPORTED`, `DASKI_SIGNER_NOT_DEPLOYED`,
 `DASKI_GATEWAY_EOA_ONLY`.
 
-The `circle` command is spawned directly from `PATH`. On Windows the npm
-`.cmd` shim cannot be spawned without a shell, so the command must be
-reachable as an executable named `circle`.
+The `circle` command is spawned directly from `PATH` with an argument array
+and no shell. On Windows npm installs no executable, only a `circle.cmd`
+shim, which cannot be started without a shell; the adapter therefore does
+what the shim does and runs the package's entry file with Node. The package
+is found beside the shim (`node_modules` next to a global prefix's shim, one
+level up from a project's `node_modules/.bin`) through its own `bin` field,
+never by reading the shim, and the Node is the `node.exe` beside the shim
+when there is one, otherwise the one running `daski`. The argument array
+still travels unshelled. A `circle.exe` on PATH, such as a version manager's
+shim, is run as it is; PATH order decides between directories. A shim with
+no `@circle-fin/cli` beside it is refused as `DASKI_CIRCLE_CLI_MISSING`,
+naming the directory.
 
 <a id="cdp"></a>
 ## `cdp` — scaffolded, candidate pending conformance
