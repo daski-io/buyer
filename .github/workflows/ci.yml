@@ -51,6 +51,38 @@ jobs:
       - name: Compare the vendored wire fixtures with the gateway
         run: node scripts/check-gateway-wire-fixtures.mjs --gateway gateway-develop
 
+  # Every commit may carry Release-* git trailers that the release coordinator
+  # reads at deploy time (docs/release-readiness.md, "Hand-off to the release
+  # agent"). This job proves the trailers on every pushed commit are well
+  # formed and carry no secrets.
+  handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Release hand-off trailers
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            range="$BASE..HEAD"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            range="$BEFORE..HEAD"
+          else
+            range="HEAD~1..HEAD"
+          fi
+          node scripts/check-release-trailers.mjs --range "$range"
+
   # The conformance suite spends real testnet USDC against the live sandbox,
   # so it is never part of CI. It is run deliberately, by a human, with a
   # funded key: see docs/conformance.md.
