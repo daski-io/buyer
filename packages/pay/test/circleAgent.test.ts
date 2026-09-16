@@ -5,15 +5,15 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { getAddress, type Hex } from "viem";
 import type { TypedDataRequest } from "@daski/x402-scheme";
 import { CliError } from "../src/cli/errors.js";
 import {
-  circleChainName, createCircleAgentSigner, signatureFromOutput, vendorEnvironment, walletAddressesFromListing,
-  type CommandResult, type CommandRunner,
+  circleChainName, circleRunner, createCircleAgentSigner, resolveCircleCommand, signatureFromOutput, vendorEnvironment,
+  walletAddressesFromListing, type CommandResult, type CommandRunner,
 } from "../src/signers/circleAgent.js";
 import { hasErc6492Suffix, isBoundedSignature } from "../src/signers/signature.js";
 
@@ -179,5 +179,102 @@ test("a fake circle on PATH is spawned directly with the argument array intact a
   } finally {
     for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/** An npm install of the vendor CLI on disk: the shim where npm puts it, and the package with its entry file. */
+function npmInstall(root: string, layout: "global" | "bin", entrySource: string, bin: unknown = { circle: "dist/index.js" }): { shimDirectory: string; entry: string } {
+  const shimDirectory = layout === "global" ? root : join(root, "node_modules", ".bin");
+  const packageDirectory = join(root, "node_modules", "@circle-fin", "cli");
+  mkdirSync(shimDirectory, { recursive: true });
+  mkdirSync(join(packageDirectory, "dist"), { recursive: true });
+  writeFileSync(join(shimDirectory, "circle.cmd"), "@ECHO off\r\n");
+  writeFileSync(join(packageDirectory, "package.json"), JSON.stringify({ name: "@circle-fin/cli", version: "1.0.0", type: "commonjs", bin }));
+  const entry = join(packageDirectory, "dist", "index.js");
+  writeFileSync(entry, entrySource);
+  return { shimDirectory, entry };
+}
+
+/** This process's environment with one PATH entry, whatever case the host spells the variable in. */
+function environmentWithPath(directory: string, extra: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  for (const name of Object.keys(env)) if (name.toUpperCase() === "PATH") delete env[name];
+  env.PATH = directory;
+  return env;
+}
+
+test("on Windows the vendor CLI is found beside npm's shim and run by Node, or taken as an executable, in PATH order", () => {
+  const root = mkdtempSync(join(tmpdir(), "daski-circle-win-"));
+  try {
+    for (const platform of ["linux", "darwin"] as const) {
+      assert.deepEqual(resolveCircleCommand({ platform, env: {} }), { command: "circle", leading: [], via: "path" }, "POSIX leaves PATH to the OS");
+    }
+
+    const empty = join(root, "empty");
+    mkdirSync(empty);
+    assert.throws(() => resolveCircleCommand({ platform: "win32", env: {} }), code("DASKI_CIRCLE_CLI_MISSING"));
+    assert.throws(() => resolveCircleCommand({ platform: "win32", env: { PATH: `${empty};;"${empty}"` } }),
+      (error: unknown) => code("DASKI_CIRCLE_CLI_MISSING")(error) && /not on PATH/.test((error as CliError).message));
+
+    const orphan = join(root, "orphan");
+    mkdirSync(orphan);
+    writeFileSync(join(orphan, "circle.cmd"), "@ECHO off\r\n");
+    assert.throws(() => resolveCircleCommand({ platform: "win32", env: { PATH: orphan } }),
+      (error: unknown) => code("DASKI_CIRCLE_CLI_MISSING")(error) && (error as CliError).message.includes(orphan)
+        && /beside it/.test((error as CliError).message), "a shim with no package beside it is named");
+
+    const global = npmInstall(join(root, "global"), "global", "");
+    assert.deepEqual(resolveCircleCommand({ platform: "win32", env: { PATH: `${orphan};${global.shimDirectory}` }, execPath: "C:\\node\\node.exe" }),
+      { command: "C:\\node\\node.exe", leading: [global.entry], via: "npm-shim" }, "the orphan shim earlier on PATH is passed over");
+    writeFileSync(join(global.shimDirectory, "node.exe"), "");
+    assert.deepEqual(resolveCircleCommand({ platform: "win32", env: { Path: `"${global.shimDirectory}"` }, execPath: "C:\\node\\node.exe" }),
+      { command: join(global.shimDirectory, "node.exe"), leading: [global.entry], via: "npm-shim" },
+      "the Node beside the shim, which the shim itself would run, from a quoted Path entry");
+
+    const project = npmInstall(join(root, "project"), "bin", "", "dist/index.js");
+    assert.deepEqual(resolveCircleCommand({ platform: "win32", env: { PATH: project.shimDirectory }, execPath: "node" }),
+      { command: "node", leading: [project.entry], via: "npm-shim" }, "a project's node_modules/.bin, and a bin field that is a string");
+
+    const tools = join(root, "tools");
+    mkdirSync(tools);
+    writeFileSync(join(tools, "circle.exe"), "");
+    writeFileSync(join(tools, "circle.cmd"), "");
+    assert.deepEqual(resolveCircleCommand({ platform: "win32", env: { PATH: `${tools};${global.shimDirectory}` } }),
+      { command: join(tools, "circle.exe"), leading: [], via: "executable" }, "an executable is run as it is");
+    assert.equal(resolveCircleCommand({ platform: "win32", env: { PATH: `${global.shimDirectory};${tools}` } }).via, "npm-shim", "PATH order decides");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("on Windows the entry file beside npm's shim runs under Node with the argument array intact and without any DASKI_ variable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "daski-circle-shim-"));
+  const argsFile = join(root, "args.json");
+  const envFile = join(root, "env.json");
+  const { shimDirectory } = npmInstall(join(root, "prefix"), "global", [
+    'const { writeFileSync } = require("node:fs");',
+    "const args = process.argv.slice(2);",
+    "writeFileSync(process.env.CIRCLE_FAKE_ARGS, JSON.stringify(args));",
+    "writeFileSync(process.env.CIRCLE_FAKE_ENV, JSON.stringify(Object.keys(process.env)));",
+    `process.stdout.write(args[1] === "list" ? ${JSON.stringify(listing(WALLET))} : ${JSON.stringify(`${SIGNATURE}\n`)});`,
+  ].join("\n"));
+  try {
+    const run = circleRunner({ platform: "win32", env: environmentWithPath(shimDirectory, {
+      CIRCLE_FAKE_ARGS: argsFile, CIRCLE_FAKE_ENV: envFile,
+      DASKI_PAYER_PRIVATE_KEY: `0x${"11".repeat(32)}`, DASKI_KEYSTORE_PASSPHRASE_FILE: join(root, "passphrase"), DASKI_HOME: root,
+    }) });
+    const signer = await createCircleAgentSigner({ chainId: 8453, run });
+    assert.equal(await signer.getAddress(), getAddress(WALLET));
+    assert.deepEqual(JSON.parse(readFileSync(argsFile, "utf8")), ["wallet", "list", "--chain", "BASE", "--type", "agent", "--output", "json"]);
+    assert.equal(await signer.signTypedData(TYPED_DATA), SIGNATURE, "the signature is the vendor's, byte for byte");
+    const received = JSON.parse(readFileSync(argsFile, "utf8")) as string[];
+    assert.deepEqual([received[0], received[1], received[2], ...received.slice(4)],
+      ["wallet", "sign", "typed-data", "--address", getAddress(WALLET), "--chain", "BASE", "--quiet"]);
+    assert.deepEqual(JSON.parse(received[3]!).domain, TYPED_DATA.domain, "the typed data arrived as one argument, unshelled");
+    const names = JSON.parse(readFileSync(envFile, "utf8")) as string[];
+    assert.ok(!names.some((name) => name.startsWith("DASKI_")), `the vendor saw ${names.filter((name) => name.startsWith("DASKI_")).join(", ")}`);
+    assert.ok(names.includes("CIRCLE_FAKE_ARGS"), "unrelated variables are passed through");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

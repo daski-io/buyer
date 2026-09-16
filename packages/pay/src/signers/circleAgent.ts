@@ -6,15 +6,20 @@
  * The adapter shells out to the `circle` command with an argument array,
  * never a shell string: the wallet address comes from `circle wallet list`,
  * and a signature from `circle wallet sign typed-data`, which receives exactly
- * the typed data the policy validator produced and nothing else. Each command
- * has a 30-second deadline. Only the signature is retained; command output is
- * never logged or included in an error.
+ * the typed data the policy validator produced and nothing else. On Windows,
+ * where npm installs a `.cmd` shim and no executable, the adapter runs the
+ * package's entry file with Node itself, as the shim would, still without a
+ * shell (`resolveCircleCommand`). Each command has a 30-second deadline. Only
+ * the signature is retained; command output is never logged or included in
+ * an error.
  *
  * Login, terms, wallet creation, deployment, funding, and spending limits are
  * the user's steps with the vendor CLI, described by the gateway's setup
  * skill. This adapter never performs them and never sends a transaction.
  */
 import { spawn } from "node:child_process";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { getAddress, isAddress, type Address, type Hex } from "viem";
 import type { SignerAdapter, TypedDataRequest } from "@daski/x402-scheme";
 import { CliError } from "../cli/errors.js";
@@ -66,37 +71,132 @@ export function vendorEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.
   return Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("DASKI_")));
 }
 
-/** Spawns the vendor CLI directly from PATH with an argument array. */
-export const spawnCircle: CommandRunner = (args, options) => new Promise((resolve, reject) => {
-  const child = spawn("circle", args, {
-    stdio: ["ignore", "pipe", "ignore"],
-    env: vendorEnvironment(),
-    timeout: options.timeoutMs,
-    killSignal: "SIGKILL",
-    windowsHide: true,
-  });
-  const chunks: Buffer[] = [];
-  let collected = 0;
-  child.stdout.on("data", (chunk: Buffer) => {
-    if (collected >= MAX_OUTPUT_BYTES) return;
-    collected += chunk.length;
-    chunks.push(chunk.subarray(0, Math.max(0, MAX_OUTPUT_BYTES - (collected - chunk.length))));
-  });
-  child.once("error", (error) => reject(error));
-  child.once("close", (status, signal) => {
-    resolve({
-      status,
-      signal,
-      timedOut: signal === "SIGKILL" && status === null,
-      stdout: Buffer.concat(chunks).toString("utf8"),
+/** How the vendor CLI is started on this host. */
+export interface CircleCommand {
+  /** The program to spawn: `circle` for the OS to find on PATH, an executable, or Node. */
+  command: string;
+  /** Arguments placed before the vendor's own: the CLI's entry file when Node runs it. */
+  leading: readonly string[];
+  /** How the program was found. */
+  via: "path" | "executable" | "npm-shim";
+}
+
+export interface ResolveCircleOptions {
+  platform?: NodeJS.Platform | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
+  /** Runs the entry file when no Node sits beside the shim; this process's Node by default. */
+  execPath?: string | undefined;
+}
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The entry file of the vendor package installed beside an npm shim: under
+ * `node_modules` next to the shim for a global install, where the shim sits
+ * in the prefix directory, or one level up for a project's `node_modules/.bin`.
+ * Taken from the package's own `bin` field, never from the shim's text.
+ */
+function packageEntryBesideShim(shimDirectory: string): string | undefined {
+  const [scope, name] = CIRCLE_CLI_PACKAGE.split("/") as [string, string];
+  for (const packageDirectory of [join(shimDirectory, "node_modules", scope, name), join(shimDirectory, "..", scope, name)]) {
+    let bin: unknown;
+    try {
+      bin = (JSON.parse(readFileSync(join(packageDirectory, "package.json"), "utf8")) as { bin?: unknown }).bin;
+    } catch {
+      continue;
+    }
+    const relative = typeof bin === "string" ? bin : (bin as Record<string, unknown> | null | undefined)?.circle;
+    if (typeof relative !== "string") continue;
+    const entry = join(packageDirectory, relative);
+    if (isFile(entry)) return entry;
+  }
+  return undefined;
+}
+
+/**
+ * Where the vendor CLI is on this host. On POSIX the OS resolves `circle`
+ * from PATH when it is spawned. On Windows npm installs no executable, only
+ * a `circle.cmd` shim, which cannot be started without a shell (Node refuses
+ * it outright since 20.12.2), so the adapter does what the shim does: it runs
+ * the package's entry file, found beside the shim, with Node, the argument
+ * array intact and still no shell. A `circle.exe` on PATH, such as a version
+ * manager's shim, is taken as it is. PATH order decides between directories.
+ */
+export function resolveCircleCommand(options: ResolveCircleOptions = {}): CircleCommand {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") return { command: "circle", leading: [], via: "path" };
+  const env = options.env ?? process.env;
+  const directories = (env.PATH ?? env.Path ?? "").split(";")
+    .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+    .filter((entry) => entry.length > 0);
+  let shimWithoutPackage: string | undefined;
+  for (const directory of directories) {
+    const executable = join(directory, "circle.exe");
+    if (isFile(executable)) return { command: executable, leading: [], via: "executable" };
+    if (!isFile(join(directory, "circle.cmd"))) continue;
+    const entry = packageEntryBesideShim(directory);
+    if (entry === undefined) {
+      shimWithoutPackage ??= directory;
+      continue;
+    }
+    const node = join(directory, "node.exe");
+    return { command: isFile(node) ? node : options.execPath ?? process.execPath, leading: [entry], via: "npm-shim" };
+  }
+  throw cliMissing(shimWithoutPackage);
+}
+
+/** A runner that spawns the vendor CLI as resolved for this host, with an argument array and no shell. */
+export function circleRunner(resolveOptions: ResolveCircleOptions = {}): CommandRunner {
+  return (args, options) => new Promise((resolve, reject) => {
+    let program: CircleCommand;
+    try {
+      program = resolveCircleCommand(resolveOptions);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const child = spawn(program.command, [...program.leading, ...args], {
+      stdio: ["ignore", "pipe", "ignore"],
+      env: vendorEnvironment(resolveOptions.env),
+      timeout: options.timeoutMs,
+      killSignal: "SIGKILL",
+      windowsHide: true,
+    });
+    const chunks: Buffer[] = [];
+    let collected = 0;
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (collected >= MAX_OUTPUT_BYTES) return;
+      collected += chunk.length;
+      chunks.push(chunk.subarray(0, Math.max(0, MAX_OUTPUT_BYTES - (collected - chunk.length))));
+    });
+    child.once("error", (error) => reject(error));
+    child.once("close", (status, signal) => {
+      resolve({
+        status,
+        signal,
+        timedOut: signal === "SIGKILL" && status === null,
+        stdout: Buffer.concat(chunks).toString("utf8"),
+      });
     });
   });
-});
+}
 
-function cliMissing(): CliError {
+/** Spawns the vendor CLI for this host with an argument array. */
+export const spawnCircle: CommandRunner = circleRunner();
+
+function cliMissing(shimWithoutPackage?: string): CliError {
   return new CliError({
     code: "DASKI_CIRCLE_CLI_MISSING",
-    message: `The \`circle\` command is not on PATH; the Circle agent wallet signer needs ${CIRCLE_CLI_PACKAGE}.`,
+    message: shimWithoutPackage === undefined
+      ? `The \`circle\` command is not on PATH; the Circle agent wallet signer needs ${CIRCLE_CLI_PACKAGE}.`
+      : `npm's circle.cmd shim in ${shimWithoutPackage} has no ${CIRCLE_CLI_PACKAGE} installed beside it; ` +
+        "the Circle agent wallet signer needs that package.",
     remediation:
       "Install it with Circle's own skill (curl -sL https://agents.circle.com/skills/setup.md); Daski's " +
       "adapter is tested with the version the gateway publishes under signerClis.circle-agent in " +
@@ -123,6 +223,7 @@ async function runCircle(
   try {
     result = await run(args, { timeoutMs: CIRCLE_COMMAND_TIMEOUT_MS });
   } catch (error) {
+    if (error instanceof CliError) throw error;
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw cliMissing();
     throw new CliError({
       code: "DASKI_CIRCLE_CLI_FAILED",

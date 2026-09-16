@@ -5,7 +5,7 @@ The Daski buyer CLI obtains a quote, validates and signs an approved payment, an
 ## Setup and purchase
 
 ```bash
-npm install -g @daski/pay@0.4.2
+npm install -g @daski/pay@0.4.3
 export DASKI_HOST_CLASS=durable   # or ephemeral
 daski doctor --json
 ```
