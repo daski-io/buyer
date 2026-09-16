@@ -12,7 +12,7 @@ The buyer side of Daski: a CLI for purchasing service outcomes and the x402 clie
 Install the release pinned by your gateway, state where the CLI runs, then diagnose the existing configuration before choosing a signer:
 
 ```bash
-npm install -g @daski/pay@0.4.1
+npm install -g @daski/pay@0.4.2
 export DASKI_HOST_CLASS=durable   # or ephemeral on an agent-managed, shared, or resettable host
 daski doctor --json
 ```

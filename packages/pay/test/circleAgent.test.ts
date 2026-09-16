@@ -87,6 +87,10 @@ test("the address comes from the wallet list and the signature from sign typed-d
     ["wallet", "sign", "typed-data", "--address", getAddress(WALLET), "--chain", "BASE-SEPOLIA", "--quiet"]);
   const sent = JSON.parse(sign[3]!) as Record<string, unknown>;
   assert.deepEqual(Object.keys(sent).sort(), ["domain", "message", "primaryType", "types"], "typed data only, as one argument");
+  assert.deepEqual((sent.types as Record<string, unknown>).EIP712Domain, [
+    { name: "name", type: "string" }, { name: "version", type: "string" },
+    { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" },
+  ], "the v4 form Circle requires: EIP712Domain derived from the domain, nothing else added");
   assert.deepEqual(sent.domain, TYPED_DATA.domain);
   assert.deepEqual((sent.message as Record<string, unknown>).value, "0", "bigints travel as decimal strings");
 });

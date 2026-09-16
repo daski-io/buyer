@@ -105,3 +105,4 @@ export {
   type SignerAdapter,
   type SignerDescription,
 } from "./signer.js";
+export { typedDataV4 } from "./eip712.js";
