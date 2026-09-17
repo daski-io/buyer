@@ -30,8 +30,12 @@ A change is done when all of the following hold for the commit on develop:
   the `gateway-contract` job proves the two agree. The offline wire tests then
   parse those exact shapes.
 - `CHANGELOG.md` describes the change under the version that will ship it.
-- Nothing was merged to `main`, tagged or published by hand. The coordinator
-  does that through the workflows, and only for a commit CI proved.
+- Nothing was merged to `sandbox` or `main`, tagged or published by hand. The
+  coordinator merges the release pull request into `sandbox`, the testnet
+  release branch, tags that merge and publishes through the `Release`
+  workflow, and only for a commit CI proved. `main` is the production branch
+  and moves only by fast-forward to a release commit of `sandbox`, performed
+  by the production coordinator.
 
 ## What CI proves
 
@@ -40,6 +44,10 @@ A change is done when all of the following hold for the commit on develop:
 | `build` (Node 20, 22, 24): `npm test` | A clean TypeScript build with no stale output; both workspaces packed without lifecycle scripts or registry access; tarball contents limited to `dist`, `package.json`, `README.md` and `LICENSE`; `@daski/pay` pins the exact candidate scheme version; the packed CLI, run in isolation from the checkout, reports the candidate version, produces a `doctor --json` report offline from an empty `DASKI_HOME`, refuses an unrecognised challenge before any signer is set up, and fails the check when its entrypoint is withheld; then both packages' offline test suites pass. |
 | `build` (Node 20, 22, 24): after the tests | The examples typecheck against the built packages, and `.scratch/package-proof/proof.json` still binds every tracked source file, the toolchain, every compiled file and both tarballs after all checks; the proof is uploaded per Node version. |
 | `gateway-contract` | Every wire fixture the gateway's `test/wire-fixtures/index.json` lists for `daski-buyer` is vendored under `test/fixtures/gateway-wire/` byte for byte against the gateway's develop branch, and no copy the gateway no longer lists remains. |
+
+CI runs the same jobs on a push to `sandbox`, so the release merge commit has
+its own run: production promotion reads that run as the proof for the exact
+commit `main` moves to.
 
 The `Release` workflow repeats the package proof on Node 24 and, before
 publishing `@daski/pay`, waits until the exact `@daski/x402-scheme` version it
