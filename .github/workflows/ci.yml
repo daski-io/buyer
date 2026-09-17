@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # develop integrates, sandbox is the testnet release branch and main is
+  # production. The release merge commit on sandbox gets its own push run
+  # here: production promotion reads that run as the proof for the exact
+  # commit it fast-forwards main to.
   push:
-    branches: [main, develop]
+    branches: [main, sandbox, develop]
   pull_request:
 
 permissions:
