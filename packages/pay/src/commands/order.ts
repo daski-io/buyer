@@ -19,7 +19,7 @@ import { createContext, type CommandContext, type ContextOptions, type OrderBind
 import { GatewayClient, gatewayUnsupported } from "../gateway/client.js";
 import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "../gateway/lifecycle.js";
 import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
-import { operationalStatus } from "../gateway/operations.js";
+import { operationalStatus, supportReply } from "../gateway/operations.js";
 import {
   activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord, type ReadCapability,
 } from "../store/orders.js";
@@ -58,6 +58,7 @@ export async function orderStatus(options: OrderOptions): Promise<Record<string,
       outcome: record.outcomeId,
       state: state ?? record.state,
       operationalStatus: operationalStatus(body),
+      supportReply: supportReply(body),
       gateway: body,
     };
   });
@@ -207,7 +208,10 @@ export async function readWithCapability(
     const result = await read(stored.token);
     const body = GatewayClient.json(result);
     if (!result.isError && body) return body;
-    // A rejected capability is a stale capability; drop it and re-authorize.
+    // The order has no artifact yet: the capability is fine, so keep it and
+    // do not ask for another signature.
+    if (body?.code === "ARTIFACT_NOT_AVAILABLE") throw lifecycleFailure(call.toolName, result);
+    // Any other rejected capability is a stale capability; drop it and re-authorize.
     updateOrder(record.intentId, { readCapability: undefined });
   }
 

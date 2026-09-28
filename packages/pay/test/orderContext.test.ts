@@ -68,6 +68,26 @@ test("a stored read capability serves a read without the key store, and the sign
   });
 });
 
+test("an artifact the order does not have yet is reported without dropping the capability or signing again", async () => {
+  await withHome(async () => {
+    const context = await createContext({ host }, { expectedPayer: PAYER });
+    const calls: string[] = [];
+    const refusing = { ...context, client: { hasTool: async () => true, callTool: async (name: string) => {
+      calls.push(name);
+      const refusal = { code: "ARTIFACT_NOT_AVAILABLE", message: "The order has no artifact: it is neither completed nor recovered",
+        retryable: true };
+      return { isError: true, content: [{ type: "text", text: JSON.stringify(refusal) }], structuredContent: refusal };
+    } } } as unknown as CommandContext;
+    const capability = { token: "cap", expiresAt: Math.floor(Date.now() / 1000) + 600 };
+    const stored = upsertOrder(record("intent", "handle", { readCapability: capability }));
+    await assert.rejects(readWithCapability(refusing, stored, { toolName: "daski_get_order_artifact", action: "artifact", request: {} }),
+      (error: unknown) => code("ARTIFACT_NOT_AVAILABLE")(error) && /daski order status/.test((error as CliError).remediation));
+    assert.deepEqual(calls, ["daski_get_order_artifact"], "no grant-read, so no new signature");
+    assert.deepEqual(findByIntent("intent")?.readCapability, capability);
+    await context.close();
+  });
+});
+
 test("the gateway's own order state is read beside the provider's task state", () => {
   assert.equal(gatewayOrderState({ state: "working", orderState: "DISPATCHED" }), "DISPATCHED");
   assert.equal(gatewayOrderState({ state: "FULFILLED" }), "FULFILLED", "before dispatch only the gateway's state exists");
