@@ -19,6 +19,7 @@ import { createContext, type CommandContext, type ContextOptions, type OrderBind
 import { GatewayClient, gatewayUnsupported } from "../gateway/client.js";
 import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "../gateway/lifecycle.js";
 import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
+import { operationalStatus } from "../gateway/operations.js";
 import {
   activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord, type ReadCapability,
 } from "../store/orders.js";
@@ -56,6 +57,7 @@ export async function orderStatus(options: OrderOptions): Promise<Record<string,
       provider: record.providerAgentId,
       outcome: record.outcomeId,
       state: state ?? record.state,
+      operationalStatus: operationalStatus(body),
       gateway: body,
     };
   });

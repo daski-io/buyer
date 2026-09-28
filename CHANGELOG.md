@@ -3,6 +3,16 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.4.6 — unreleased
+
+### `@daski/pay`
+
+- Order status presents DNS waiting, capacity queues and paid-order recovery separately from the original financial state. Completed remediation displays "Completed after recovery"; the original failed receipt remains history. Mailbox and support guides explain payer-bound DNS readiness and stable support request IDs with fresh authorizations.
+
+### `@daski/x402-scheme`
+
+- Version moves with `@daski/pay`; no changes.
+
 ## 0.4.5 — unreleased
 
 ### `@daski/pay`
