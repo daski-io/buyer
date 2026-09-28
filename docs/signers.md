@@ -74,7 +74,7 @@ daski doctor --signer local --json
 ```
 
 <a id="circle-agent"></a>
-## `circle-agent` — implemented, candidate pending conformance
+## `circle-agent` — implemented, verified
 
 The Circle agent wallet: a deployed contract account operated through the
 pinned [`@circle-fin/cli`](https://www.npmjs.com/package/@circle-fin/cli),
@@ -96,7 +96,7 @@ environment minus every `DASKI_*` variable, so `DASKI_PAYER_PRIVATE_KEY` and
 is retained; the vendor's output is never logged and never repeated in an
 error. A signature ending in the ERC-6492 suffix is refused on every use
 (`DASKI_SIGNER_NOT_DEPLOYED`), not only in the self-test. `describe()`
-reports `circle-agent` / `contract` / `candidate-pending-conformance`.
+reports `circle-agent` / `contract` / `verified`.
 
 Install, terms acceptance, login, wallet creation, and funding are Circle's
 own steps: the gateway's setup skill hands the agent Circle's skill

@@ -12,7 +12,7 @@ The buyer side of Daski: a CLI for purchasing service outcomes and the x402 clie
 Install the release pinned by your gateway, state where the CLI runs, then diagnose the existing configuration before choosing a signer:
 
 ```bash
-npm install -g @daski/pay@0.4.4
+npm install -g @daski/pay@0.4.5
 export DASKI_HOST_CLASS=durable   # or ephemeral on an agent-managed, shared, or resettable host
 daski doctor --json
 ```
@@ -57,7 +57,7 @@ daski budget --per-order none --total none --json
 
 The total covers recorded authorizations across runs. Temporary `--max-per-order` and `--session-cap` limits fit within any configured budget. See [configuration](./docs/config.md).
 
-Node 20 or newer is required. Sandbox uses Base Sepolia; mainnet is disabled until the user chooses to enable it. The local signer is verified; the Circle agent wallet, CDP, and Circle developer-controlled adapters are candidates pending conformance. See [signer adapters](./docs/signers.md) and [key storage](./docs/keys.md).
+Node 20 or newer is required. Sandbox uses Base Sepolia; mainnet is disabled until the user chooses to enable it. The local signer and the Circle agent wallet are verified; the CDP and Circle developer-controlled adapters are candidates pending conformance. See [signer adapters](./docs/signers.md) and [key storage](./docs/keys.md).
 
 ## Payment validation and recovery
 

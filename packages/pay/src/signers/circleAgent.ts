@@ -1,7 +1,7 @@
 /**
  * The Circle agent wallet — a deployed contract account operated through the
  * pinned `@circle-fin/cli`, and the default signer on every host.
- * Candidate pending conformance.
+ * Verified by the conformance suite.
  *
  * The adapter shells out to the `circle` command with an argument array,
  * never a shell string: the wallet address comes from `circle wallet list`,
@@ -347,7 +347,7 @@ export async function createCircleAgentSigner(options: CircleAgentSignerOptions)
     describe: () => ({
       provider: "circle-agent",
       accountType: "contract",
-      conformance: "candidate-pending-conformance",
+      conformance: "verified",
     }),
   };
 }

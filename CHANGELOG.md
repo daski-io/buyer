@@ -3,6 +3,16 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.4.5 — unreleased
+
+### `@daski/pay`
+
+- **The Circle agent wallet is verified.** On the owner's attestation that its conformance run against the sandbox exists, the `circle-agent` adapter describes itself as `conformance: verified`: `daski doctor` reports `signer.conformance: verified` for it and no longer raises `DASKI_SIGNER_PENDING_CONFORMANCE`. How it signs is unchanged. The CDP and Circle developer-controlled adapters remain candidates pending conformance.
+
+### `@daski/x402-scheme`
+
+- Version moves with `@daski/pay`; no changes.
+
 ## 0.4.4 — unreleased
 
 No behaviour of the CLI or the scheme changes. The release carries the repository's side of the three-branch model: continuous integration also runs on a push to `sandbox`, the testnet release branch, so the release merge commit there has its own run, and `docs/release-readiness.md` says that the coordinator merges the release pull request into `sandbox`, tags that merge and publishes through the `Release` workflow, while `main` is production and moves only by fast-forward.

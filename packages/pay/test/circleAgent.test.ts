@@ -1,7 +1,7 @@
 /**
  * The Circle agent wallet adapter: it runs the vendor CLI with an argument
  * array, hands it exactly the typed data it was given, keeps only the
- * signature, and describes itself as a contract account pending conformance.
+ * signature, and describes itself as a verified contract account.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -77,7 +77,7 @@ test("the address comes from the wallet list and the signature from sign typed-d
     args[1] === "list" ? { stdout: listing(WALLET) } : { stdout: `${SIGNATURE}\n` });
   const signer = await createCircleAgentSigner({ chainId: 84532, run });
   assert.equal(await signer.getAddress(), getAddress(WALLET));
-  assert.deepEqual(signer.describe(), { provider: "circle-agent", accountType: "contract", conformance: "candidate-pending-conformance" });
+  assert.deepEqual(signer.describe(), { provider: "circle-agent", accountType: "contract", conformance: "verified" });
   assert.deepEqual(calls[0], ["wallet", "list", "--chain", "BASE-SEPOLIA", "--type", "agent", "--output", "json"]);
 
   const signature = await signer.signTypedData(TYPED_DATA);
