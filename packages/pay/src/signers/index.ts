@@ -2,9 +2,9 @@
  * Signer selection.
  *
  * Four adapters behind one interface: `local` (a viem account from the key
- * store, verified by the conformance suite), `circle-agent` (a deployed
- * contract account operated through the pinned Circle CLI, the default
- * signer on every host), and `cdp` and `circle` (developer-controlled
+ * store) and `circle-agent` (a deployed contract account operated through
+ * the pinned Circle CLI, the default signer on every host), both verified by
+ * the conformance suite, and `cdp` and `circle` (developer-controlled
  * candidates). Whatever the backend, the request it signs has already been
  * through the §4 validator, and `daski doctor` puts every adapter through the
  * self-test for its account type before calling it usable.

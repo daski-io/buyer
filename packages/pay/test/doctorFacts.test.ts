@@ -161,6 +161,8 @@ test("a contract signer needs the gateway's well-known document: an unreadable o
       assert.equal(healthy.signer.accountType, "contract");
       assert.equal(healthy.signer.deployment, "deployed");
       assert.equal(healthy.signer.verifiedVia, "erc1271");
+      assert.equal(healthy.signer.conformance, "verified");
+      assert.ok(!healthy.issues.some((issue) => issue.code === "DASKI_SIGNER_PENDING_CONFORMANCE"), JSON.stringify(healthy.issues));
       assert.equal(healthy.issues.filter((issue) => issue.severity === "blocking").length, 0, JSON.stringify(healthy.issues));
 
       const blocked = await runDoctor({ host: contractHost, signerOverride: "circle-agent", transport: transport({ chain, metadata: unavailable }) });
