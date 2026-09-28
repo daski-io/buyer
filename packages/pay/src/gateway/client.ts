@@ -395,6 +395,9 @@ export function gatewayRefusalRemediation(
     case "SIGNATURE_VERIFICATION_BUSY":
       return "The gateway is verifying too many contract-account signatures right now. Nothing " +
         "was consumed; retry the same command in a moment.";
+    case "ARTIFACT_NOT_AVAILABLE":
+      return "This order has no artifact yet: it is neither completed nor completed after recovery. " +
+        "Check it with daski order status <handle> and read the artifact once it completes.";
     case "CONFIRMATION_SUBMISSION_LIMIT":
       return "This order has used its three confirmation submissions. The current confirmation " +
         "can still be revoked with --revoke; no further confirmation can be submitted.";

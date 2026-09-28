@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.4.6 — unreleased
+
+### `@daski/pay`
+
+- Order status presents DNS waiting, capacity queues and paid-order recovery separately from the original financial state. Completed remediation displays "Completed after recovery"; the original failed receipt remains history. Mailbox and support guides explain payer-bound DNS readiness and stable support request IDs with fresh authorizations.
+- `daski order status` shows the provider operator's latest reply to a support request as `supportReply`, as provider-authored data. `daski order artifact` on an order that is neither completed nor recovered reports `ARTIFACT_NOT_AVAILABLE` with a pointer to order status, and keeps the stored read capability instead of asking for another signature.
+
+### `@daski/x402-scheme`
+
+- Version moves with `@daski/pay`; no changes.
+
 ## 0.4.5 — unreleased
 
 ### `@daski/pay`

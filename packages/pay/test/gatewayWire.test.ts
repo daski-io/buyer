@@ -19,7 +19,7 @@ import {
   validateOrderActionChallenge,
   validateWalletActionChallenge,
 } from "@daski/x402-scheme";
-import { GatewayClient, type McpToolResult } from "../src/gateway/client.js";
+import { GatewayClient, gatewayRefusalRemediation, type McpToolResult } from "../src/gateway/client.js";
 
 type Json = Record<string, unknown>;
 
@@ -58,6 +58,7 @@ const orderActionChallenge = fixture("order-action-challenge.json");
 const railErrors = fixture<{
   walletAuthorizationInvalid: { error: Json };
   authorizationWindow: { error: Json };
+  artifactNotAvailable: { error: Json };
   requestSchemaInvalid: { error: Json };
   mcpWalletAccessDenied: McpToolResult;
 }>("standard-rail-error.json");
@@ -161,4 +162,6 @@ test("standard-rail-error: the MCP refusal and the HTTP envelopes carry their co
   assert.equal(railErrors.walletAuthorizationInvalid.error.code, "WALLET_AUTHORIZATION_INVALID");
   assert.equal(railErrors.authorizationWindow.error.code, "AUTHORIZATION_WINDOW");
   assert.equal(railErrors.requestSchemaInvalid.error.code, "REQUEST_SCHEMA_INVALID");
+  assert.equal(railErrors.artifactNotAvailable.error.code, "ARTIFACT_NOT_AVAILABLE");
+  assert.ok(gatewayRefusalRemediation("ARTIFACT_NOT_AVAILABLE", railErrors.artifactNotAvailable.error)?.includes("daski order status"));
 });
