@@ -383,10 +383,28 @@ export function gatewayRefusalRemediation(
     case "CONFIRMATION_SPONSORSHIP_LIMIT":
       return body?.chainEligible === true
         ? "Daski's sponsorship allowance for this order is used up, but the chain still accepts " +
-          "a submission. If the wallet can send transactions, re-run with --submission direct " +
-          "and submit the printed call with the wallet's own tool."
+          "a submission. First reconcile any saved delegated authorization; it may still execute. " +
+          "Once safe, a wallet that sends transactions can prepare with --submission direct."
         : "Daski's sponsorship allowance for this order is used up and the chain accepts no " +
           "further submission for it.";
+    case "CONFIRMATION_AUTHORIZATION_STILL_LIVE": {
+      const expected = body?.expected as { operationId?: unknown; preparationId?: unknown } | undefined;
+      return typeof expected?.operationId === "string"
+        ? "The saved signature is still live. Use --reaffirm to relay the same choice, or explicitly choose --supersedes-operation <id> --acknowledge-same-nonce. The first valid alternative to execute wins."
+        : "Issued review data may already have been signed. To replace it, explicitly pass --supersedes-preparation <id> --acknowledge-same-nonce with the chosen review; a local timeout does not invalidate a legacy signature.";
+    }
+    case "CONFIRMATION_SUBMISSION_FAILED": {
+      const expected = body?.expected as { safeRetired?: unknown } | undefined;
+      return expected?.safeRetired === true
+        ? "The failed operation is safely retired and its signed journal is archived. Choose the desired review and prepare it again."
+        : "The signed journal is preserved. Use --resume to reconcile; an operator must resolve any outstanding chain evidence before a new independent submission.";
+    }
+    case "CONFIRMATION_CLIENT_UPGRADE_REQUIRED":
+      return "Install the buyer version pinned by this gateway, then resume the saved review. Do not delete its signed journal.";
+    case "CONFIRMATION_EAS_INCOMPATIBLE":
+      return "The chain deployment does not match the approved review profile. Keep the saved journal and have the gateway operator verify EAS before signing or retrying.";
+    case "CONFIRMATION_NONCE_BUSY":
+      return "Another issued or admitted review holds this delegated nonce. Reconcile the identified operation or explicitly acknowledge a same-nonce replacement; waiting five minutes alone does not invalidate a legacy signature.";
     case "SIGNATURE_COUNTERFACTUAL_REJECTED":
       return `The signer's wallet is not deployed, so its signature was refused. ${NOT_DEPLOYED_REMEDIATION}`;
     case "SIGNATURE_VERIFICATION_UNAVAILABLE":

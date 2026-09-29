@@ -155,7 +155,7 @@ const options = { handle: "handle", json: true };
 /** The gateway's sponsored attest preparation for the fixture facts, signable as is. */
 function sponsoredAttestPreparation(): Record<string, unknown> {
   const deadline = String(Math.floor(Date.now() / 1000) + 300);
-  return { preparationId: "prep", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: deadline, admissionExpiresAt: deadline, orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 0, finalAttestation: false,
+  return { preparationId: "prep", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: deadline, admissionExpiresAt: new Date(Number(deadline) * 1000).toISOString(), orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 0, finalAttestation: false,
     signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
       types: { Attest: [{ name: "schema", type: "bytes32" }, { name: "recipient", type: "address" }, { name: "expirationTime", type: "uint64" },
         { name: "revocable", type: "bool" }, { name: "refUID", type: "bytes32" }, { name: "data", type: "bytes" }, { name: "value", type: "uint256" },
@@ -993,7 +993,7 @@ test("sponsored operation IDs persist and recovery cannot reinterpret a chosen r
       if (args.authorization && request.phase === "submit") return { content: [], isError, structuredContent: response };
       if (args.authorization && request.phase === "reaffirm") {
         assert.deepEqual(request, { phase: "reaffirm", submission: "sponsored", reviewProtocol: 2, operationId: "op-review" });
-        return { content: [], isError: false, structuredContent: { operationId: "op-review", state: "pending" } };
+        return { content: [], isError: true, structuredContent: { code: "CONFIRMATION_SUBMISSION_PENDING", expected: { operationId: "op-review" } } };
       }
       return original(name, args);
     };

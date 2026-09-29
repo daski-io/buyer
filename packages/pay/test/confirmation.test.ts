@@ -22,7 +22,7 @@ const facts: ConfirmationFacts = { profile: EAS_REVIEW_PROFILES[84532]!, chainId
   currentUid: canonicalHash("previous review"), nonce: "4", submissionsUsed: 1 };
 function preparation() {
   const now = Math.floor(Date.now() / 1000);
-  return { preparationId: "preparation-fixture", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: String(now + 300), admissionExpiresAt: String(now + 300), orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 1,
+  return { preparationId: "preparation-fixture", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: String(now + 300), admissionExpiresAt: new Date((now + 300) * 1000).toISOString(), orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 1,
     revocationAvailable: true, finalAttestation: false,
     signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
       primaryType: "Attest", types: { Attest: [

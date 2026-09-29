@@ -104,3 +104,11 @@ test("no generic wallet transaction client is constructed; Circle reviews use th
     for (const token of forbidden) assert.ok(!source.includes(token), `${file} mentions ${token}`);
   }
 });
+
+test("new review errors distinguish live authorization, safe retirement and incompatible EAS", () => {
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_AUTHORIZATION_STILL_LIVE", { expected: { operationId: "op" } }) ?? "", /--reaffirm/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_AUTHORIZATION_STILL_LIVE", { expected: { preparationId: "prep" } }) ?? "", /--supersedes-preparation/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_FAILED", { expected: { safeRetired: true } }) ?? "", /archived/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_FAILED", { expected: { safeRetired: false } }) ?? "", /preserved/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_NONCE_BUSY", {}) ?? "", /five minutes alone does not invalidate/);
+});

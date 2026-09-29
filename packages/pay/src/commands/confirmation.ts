@@ -191,7 +191,9 @@ export function validateConfirmationPreparation(prepared: Record<string, unknown
   const profile = facts.profile;
   if (!profile) throw invalidPreparation();
   const deadline = Number(proposed?.message?.deadline);
-  const admissionExpiry = Number(prepared.admissionExpiresAt);
+  const admissionExpiry = typeof prepared.admissionExpiresAt === "string" &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(prepared.admissionExpiresAt)
+    ? Date.parse(prepared.admissionExpiresAt) / 1000 : Number(prepared.admissionExpiresAt);
   if (prepared.profileId !== profile.id || prepared.domainVersion !== profile.domainVersion ||
       !Number.isSafeInteger(admissionExpiry) || admissionExpiry <= now || admissionExpiry > now + 330 ||
       (profile.signedDeadline ? prepared.signedDeadline !== String(deadline)
@@ -380,8 +382,18 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
       if (!submission?.operationId) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING",
         message: "No admitted operation is saved for reaffirmation.", remediation: "Use --resume first to recover its operation ID." });
       // Fresh outer authorization binds the operation. Never create another inner signature.
-      const result = await call(submission.action, { phase: "reaffirm", submission: "sponsored", reviewProtocol: 2, operationId: submission.operationId });
-      return { orderHandle: handle, mode: "sponsored", ...result };
+      try {
+        const result = await call(submission.action, { phase: "reaffirm", submission: "sponsored", reviewProtocol: 2, operationId: submission.operationId });
+        return { orderHandle: handle, mode: "sponsored", ...result };
+      } catch (error) {
+        if (error instanceof CliError && error.code === "CONFIRMATION_SUBMISSION_PENDING") {
+          const gateway = error.details.gateway as { expected?: { operationId?: unknown } } | undefined;
+          if (gateway?.expected?.operationId !== submission.operationId) throw invalidPreparation();
+          return { orderHandle: handle, mode: "sponsored", status: "pending", operationId: submission.operationId,
+            next: "The saved signature was reaffirmed. Use --resume to reconcile its execution." };
+        }
+        throw error;
+      }
     }
     if (!submission) {
       if (options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING", message: "There is no pending review submission.",
