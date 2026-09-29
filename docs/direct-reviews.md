@@ -12,7 +12,7 @@ daski order confirm <handle> --resume --json
 The same actions apply to a prepared revocation. Estimation sends no
 transaction. Submission requires the exact saved callHash, a deployed Circle
 agent wallet matching the payer, fresh chain validation, and the gateway's
-separate circleExecute qualification. A signing or estimation conformance
+separate circleExecute qualification. An explicitly authorized Base Sepolia\nconformance run can use --qualify-circle-execution with\nDASKI_CONFORMANCE_SPEND_OK=1 to generate the initial evidence; this candidate\nlane never bypasses mainnet qualification. A signing or estimation conformance
 result does not enable execution.
 
 The adapter verifies the installed @circle-fin/cli package identity and exact

@@ -76,7 +76,7 @@ export interface ConfirmationTxRecord {
   choice?: "Confirmed" | "NotConfirmed" | "revoke";
   vendor?: {
     provider: "circle-agent"; packageVersion: string; idempotencyKey: string; wallet: Address; chainId: number;
-    submissionStarted: string; transactionId?: string; hashes: Hex[];
+    submissionStarted: string; transactionId?: string; hashes: Hex[]; conformanceCandidate?: boolean;
   };
   txHash?: Hex | undefined;
   state: ConfirmationTxState;

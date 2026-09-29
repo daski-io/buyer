@@ -70,6 +70,7 @@ export interface ConfirmationOptions extends OrderOptions {
   estimate?: boolean | undefined;
   submit?: boolean | undefined;
   approveCallHash?: string | undefined;
+  qualifyCircleExecution?: boolean | undefined;
   supersedesOperationId?: string | undefined;
   supersedesPreparationId?: string | undefined;
   acknowledgeSameNonce?: boolean | undefined;
@@ -314,6 +315,9 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
   factsReader = readConfirmationFacts,
   directAdapter: () => DirectReviewSubmissionAdapter = createCircleReviewAdapter): Promise<Record<string, unknown>> {
   const handle = record.handle ?? options.handle;
+  if (options.qualifyCircleExecution && !options.submit) throw new CliError({
+    code: "DASKI_CIRCLE_CONFORMANCE_REFUSED", message: "Circle conformance qualification requires explicit submission.",
+    remediation: "Use only on testnet with DASKI_CONFORMANCE_SPEND_OK=1 and --submit --approve-call <callHash>." });
   const directAction = Boolean(options.estimate || options.submit || (options.resume && (options.submission === "direct" || record.confirmationTx?.vendor)));
   if (directAction) {
     const signer = await context.resolveSigner();
@@ -498,6 +502,9 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
   adapterFactory: () => DirectReviewSubmissionAdapter): Promise<Record<string, unknown>> {
   const tracked = record.confirmationTx;
   const handle = record.handle ?? options.handle;
+  if (options.qualifyCircleExecution && (context.profile.chainId !== 84532 || process.env.DASKI_CONFORMANCE_SPEND_OK !== "1")) throw new CliError({
+    code: "DASKI_CIRCLE_CONFORMANCE_REFUSED", message: "Candidate Circle execution is restricted to explicitly authorized Base Sepolia conformance.",
+    remediation: "After testnet spending approval, set DASKI_CONFORMANCE_SPEND_OK=1 and approve the exact saved call. This flag never bypasses mainnet qualification." });
   if (Number(Boolean(options.estimate)) + Number(Boolean(options.submit)) + Number(Boolean(options.resume)) !== 1 ||
       options.tx || options.check || options.abandon || options.reaffirm || options.confirmation !== undefined) throw new CliError({
     code: "DASKI_CONFIRMATION_FLAGS_INVALID", message: "Choose exactly one direct review action.",
@@ -538,7 +545,7 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
   }
   if (tracked.vendor || tracked.txHash || tracked.state !== "prepared") throw directPending(handle, tracked);
   const capabilities = (await context.metadata()).confirmation?.directReview;
-  if (options.submit && capabilities?.circleExecute !== true) throw new CliError({
+  if (options.submit && capabilities?.circleExecute !== true && !options.qualifyCircleExecution) throw new CliError({
     code: "DASKI_CIRCLE_EXECUTION_NOT_QUALIFIED", message: "Circle review execution is not yet qualified for this gateway.",
     remediation: "Execution requires a recorded live conformance result for the shipped adapter. Estimation remains separate and does not submit." });
   if (options.estimate && capabilities?.circleEstimate !== true) throw new CliError({
@@ -557,14 +564,14 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
     estimate: await adapter.estimate(request), note: "Estimation did not submit the review." };
   const started: ConfirmationTxRecord = { ...tracked, state: "submitted", vendor: {
     provider: "circle-agent", packageVersion: adapter.packageVersion, idempotencyKey, wallet: context.payerAddress,
-    chainId: context.profile.chainId, submissionStarted: new Date().toISOString(), hashes: [] } };
+    chainId: context.profile.chainId, conformanceCandidate: options.qualifyCircleExecution === true, submissionStarted: new Date().toISOString(), hashes: [] } };
   updateOrder(record.intentId, { confirmationTx: started });
   const result = await adapter.submit(request);
   const updated: ConfirmationTxRecord = { ...started, ...(result.txHash ? { txHash: result.txHash } : {}),
     vendor: { ...started.vendor!, ...(result.transactionId ? { transactionId: result.transactionId } : {}), hashes: result.txHash ? [result.txHash] : [] } };
   updateOrder(record.intentId, { confirmationTx: updated });
   return { orderHandle: handle, mode: "direct", state: "submitted", transactionId: result.transactionId ?? null,
-    txHash: result.txHash ?? null, next: "Use --resume to verify final EAS evidence. Vendor completion alone is not review success." };
+    txHash: result.txHash ?? null, conformanceCandidate: options.qualifyCircleExecution === true, next: "Use --resume to verify final EAS evidence. Vendor completion alone is not review success." };
 }
 
 function assertCapacity(facts: ConfirmationFacts, choice: Choice, handle: string): void {

@@ -1033,3 +1033,30 @@ test("signed-before-admission recovery requires an explicit preparation superses
     assert.equal(current().confirmationHistory?.[0]?.outcome.disposition, "explicitly-superseded-still-live");
   });
 });
+
+test("candidate Circle execution requires explicit testnet spend consent and never bypasses mainnet", async () => {
+  const saved = process.env.DASKI_CONFORMANCE_SPEND_OK;
+  try {
+    delete process.env.DASKI_CONFORMANCE_SPEND_OK;
+    await withStore(async record => {
+      const { context } = fixture("contract");
+      context.metadata = async () => parseGatewayMetadata({ confirmation: {
+        modes: ["direct"], directReview: { circleEstimate: true, circleExecute: false } } });
+      let executions = 0;
+      const adapter = () => ({ packageVersion: "1.0.0", estimate: async () => ({}),
+        submit: async () => { executions++; return { transactionId: "candidate" }; },
+        lookup: async () => ({ hashes: [] }) });
+      await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+      const submit = { ...options, submit: true, approveCallHash: current().confirmationTx!.callHash, qualifyCircleExecution: true };
+      await assert.rejects(confirmOrder(context, current(), submit, factsReader(), adapter), code("DASKI_CIRCLE_CONFORMANCE_REFUSED"));
+      process.env.DASKI_CONFORMANCE_SPEND_OK = "1";
+      await assert.rejects(confirmOrder({ ...context, profile: { ...context.profile, chainId: 8453 } }, current(), submit, factsReader(), adapter),
+        code("DASKI_CIRCLE_CONFORMANCE_REFUSED"));
+      await confirmOrder(context, current(), submit, factsReader(), adapter);
+      assert.equal(executions, 1);
+      assert.equal(current().confirmationTx!.vendor!.conformanceCandidate, true);
+    });
+  } finally {
+    if (saved === undefined) delete process.env.DASKI_CONFORMANCE_SPEND_OK; else process.env.DASKI_CONFORMANCE_SPEND_OK = saved;
+  }
+});

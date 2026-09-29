@@ -50,3 +50,18 @@ and intent-bound finalized EAS evidence. Use the [direct review workflow](direct
 If vendor history cannot expose an exact-call transaction ID or idempotency-key
 mapping after a timeout, record that limitation and retain the unresolved journal;
 do not manufacture a fresh key or claim execution conformance from estimation.
+
+To generate that initial execution evidence while the normal capability is
+disabled, an explicitly authorized Base Sepolia run can use the candidate lane
+against an already prepared chosen review:
+
+~~~bash
+DASKI_CONFORMANCE_SPEND_OK=1 daski order confirm <handle> --submit --approve-call <callHash> --qualify-circle-execution --json
+daski order confirm <handle> --resume --json
+~~~
+
+The flag requires explicit submit and the exact approved callHash, works only
+on chain 84532, and records conformanceCandidate in the durable vendor journal.
+It never bypasses mainnet qualification and does not create a new key on resume.
+A recorded successful run can then qualify ordinary execution through the
+gateway setting; a candidate submission alone is not a conformance result.
