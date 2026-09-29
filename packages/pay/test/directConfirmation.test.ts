@@ -1,3 +1,4 @@
+import { EAS_REVIEW_PROFILES } from "../src/chain/easProfiles.js";
 /**
  * Direct-mode delivery confirmation: the mode follows the signer, the
  * prepared call is validated field by field against chain facts and the
@@ -30,7 +31,7 @@ const ZERO_UID = `0x${"00".repeat(32)}` as Hex;
 const RECIPIENT = "0x4444444444444444444444444444444444444444" as Address;
 const REPUTATION = "0x3333333333333333333333333333333333333333" as Address;
 const facts: ConfirmationFacts = {
-  chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: REPUTATION,
+  profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: REPUTATION,
   orderKey: canonicalHash("order"), recipient: RECIPIENT, currentUid: ZERO_UID, nonce: "0", submissionsUsed: 0,
 };
 const TX = `0x${"aa".repeat(32)}` as Hex;
@@ -111,7 +112,7 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
     },
   };
   const context = { profile, profileName: "sandbox", payerAddress: payer.address, signer, resolveSigner: async () => signer, chain: reader,
-    metadata: async () => parseGatewayMetadata({ confirmationSigning: { chainId: 84532, eas: gateway.eas, schemaUid: facts.schemaUid, reputationStorage: REPUTATION } }),
+    metadata: async () => parseGatewayMetadata({ confirmationSigning: { profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: gateway.eas, schemaUid: facts.schemaUid, reputationStorage: REPUTATION } }),
     client: { hasTool: async () => true, callTool: async (name: string, args: Record<string, unknown>) => {
       if (name === "daski_get_order_status" && args.readCapability) return json({ orderKey: facts.orderKey, state: "FULFILLED" });
       const action = name === "daski_get_order_access" ? "grant-read" : name === "daski_revoke_delivery_confirmation" ? "revoke-confirmation" : "confirmation";
@@ -154,7 +155,7 @@ const options = { handle: "handle", json: true };
 /** The gateway's sponsored attest preparation for the fixture facts, signable as is. */
 function sponsoredAttestPreparation(): Record<string, unknown> {
   const deadline = String(Math.floor(Date.now() / 1000) + 300);
-  return { preparationId: "prep", orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 0, finalAttestation: false,
+  return { preparationId: "prep", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: deadline, admissionExpiresAt: new Date(Number(deadline) * 1000).toISOString(), orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 0, finalAttestation: false,
     signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
       types: { Attest: [{ name: "schema", type: "bytes32" }, { name: "recipient", type: "address" }, { name: "expirationTime", type: "uint64" },
         { name: "revocable", type: "bool" }, { name: "refUID", type: "bytes32" }, { name: "data", type: "bytes" }, { name: "value", type: "uint256" },
@@ -372,10 +373,10 @@ test("chain facts refuse a gateway whose EAS pin differs from the profile's befo
     chain.record = { orderKey: facts.orderKey, providerAgentId: 1n, payer: payer.address, providerOwner: REPUTATION,
       providerAgentWallet: RECIPIENT, confirmationSubmissions: 1, outcomeRecorded: true,
       reputationEligible: true, currentConfirmationUid: UID };
-    const read = await readConfirmationFacts(context, record);
+    const read = await readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES[84532]!);
     assert.deepEqual(read, { ...facts, currentUid: UID, submissionsUsed: 1 });
     chain.record = { ...chain.record, providerAgentWallet: "0x0000000000000000000000000000000000000000" };
-    await assert.rejects(readConfirmationFacts(context, record), code("DASKI_CONFIRMATION_MISMATCH"), "a zero provider wallet is not a record this CLI attests to");
+    await assert.rejects(readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES[84532]!), code("DASKI_CONFIRMATION_MISMATCH"), "a zero provider wallet is not a record this CLI attests to");
     chain.record = { ...chain.record, providerAgentWallet: RECIPIENT };
     gateway.eas = REPUTATION;
     await assert.rejects(readConfirmationFacts(context, record), code("DASKI_EAS_ADDRESS_MISMATCH"));
@@ -481,7 +482,7 @@ test("direct mode derives the final attestation and the count from chain facts, 
   });
 });
 
-test("a sponsorship refusal raised before admission clears the journal so direct mode can proceed; an ambiguous failure keeps it", async () => {
+test("a signed review survives all admission refusals; only evidenced safe retirement archives it", async () => {
   await withStore(async (record) => {
     const { context, gateway } = fixture("eoa");
     gateway.prepared = sponsoredAttestPreparation();
@@ -497,10 +498,14 @@ test("a sponsorship refusal raised before admission clears the journal so direct
     await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader()), code("CONFIRMATION_SPONSORSHIP_UNAVAILABLE"));
     assert.ok(current().confirmationSubmission, "kept for --resume");
     await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader()), code("DASKI_CONFIRMATION_PENDING"));
-    // Definitive, raised before any reservation: cleared, and direct mode proceeds at once.
+    // A signature may remain reusable even when admission was refused.
     refusal = { code: "CONFIRMATION_SPONSORSHIP_LIMIT", chainEligible: true };
     await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()), code("CONFIRMATION_SPONSORSHIP_LIMIT"));
-    assert.equal(current().confirmationSubmission, undefined, "nothing was admitted, nothing is retained");
+    assert.ok(current().confirmationSubmission, "signed bytes survive definite admission refusal");
+    refusal = { code: "CONFIRMATION_SUBMISSION_FAILED", expected: { operationId: "retired-op", safeRetired: true, disposition: "deadline-expired" } };
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()), code("CONFIRMATION_SUBMISSION_FAILED"));
+    assert.equal(current().confirmationSubmission, undefined);
+    assert.equal(current().confirmationHistory?.[0]?.submission.operationId, "retired-op");
     await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()), code("DASKI_CONFIRMATION_NOT_PENDING"));
     gateway.prepared = { submissionsUsed: 0, revocationAvailable: false, finalAttestation: false, call: attestCall() };
     const direct = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed", submission: "direct" }, factsReader());
@@ -908,5 +913,216 @@ test("--check still verifies a direct record while it is prepared or submitted, 
     const prepared = await confirmOrder(fx.context, current(), { ...options, check: true }).catch((error: unknown) => error);
     assert.ok(prepared instanceof CliError && prepared.code === "DASKI_CONFIRMATION_TX_NOT_RECORDED", "a prepared record is the check's subject");
     assert.equal(fx.calls.length, before);
+  });
+});
+
+test("Circle direct submit journals before vendor execution; timeout resume never executes again", async () => {
+  await withStore(async record => {
+    const { context, chain, gateway } = fixture("contract");
+    context.metadata = async () => parseGatewayMetadata({ confirmation: {
+      modes: ["direct"], directReview: { circleEstimate: true, circleExecute: true } } });
+    let executions = 0, estimates = 0, lookups = 0, capturedKey = "";
+    const adapter = () => ({
+      packageVersion: "1.0.0",
+      estimate: async () => { estimates++; return { gasLimit: "500000" }; },
+      submit: async (request: import("../src/signers/circleReviewTransport.js").CircleReviewRequest) => {
+        executions++;
+        assert.equal(current().confirmationTx?.vendor?.idempotencyKey, request.idempotencyKey);
+        assert.equal(current().confirmationTx?.state, "submitted");
+        capturedKey = request.idempotencyKey;
+        throw new Error("synthetic lost response");
+      },
+      lookup: async (request: import("../src/signers/circleReviewTransport.js").CircleReviewRequest) => {
+        lookups++;
+        assert.equal(request.idempotencyKey, capturedKey);
+        return { transactionId: "vendor-id", hashes: [TX] };
+      },
+    });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    assert.equal(executions, 0);
+    const callHash = current().confirmationTx!.callHash;
+    await confirmOrder(context, current(), { ...options, estimate: true }, factsReader(), adapter);
+    assert.equal(estimates, 1);
+    assert.equal(current().confirmationTx?.vendor, undefined);
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: "wrong" }, factsReader(), adapter),
+      code("DASKI_CONFIRMATION_APPROVAL_REQUIRED"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: callHash }, factsReader(), adapter),
+      /synthetic lost response/);
+    assert.ok(current().confirmationTx?.vendor?.submissionStarted);
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: callHash }, factsReader(), adapter),
+      code("DASKI_CONFIRMATION_TX_PENDING"));
+    chain.receipt = { ...receipt(), logs: [] }; // ERC-4337 outer success with no successful EAS inner call.
+    const pending = await confirmOrder(context, current(), { ...options, resume: true }, factsReader(), adapter);
+    assert.equal(pending.state, "submitted");
+    chain.receipt = receipt();
+    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID }, finalizedBlock: block(50) };
+    const final = await confirmOrder(context, current(), { ...options, resume: true }, factsReader(), adapter);
+    assert.equal(final.state, "observed");
+    assert.equal(lookups, 2);
+    assert.equal(executions, 1);
+  });
+});
+
+test("Circle execution qualification is separate from estimate and explicit approval", async () => {
+  await withStore(async record => {
+    const { context } = fixture("contract");
+    context.metadata = async () => parseGatewayMetadata({ confirmation: {
+      modes: ["direct"], directReview: { circleEstimate: true, circleExecute: false } } });
+    const adapter = () => ({
+      packageVersion: "1.0.0", estimate: async () => ({}),
+      submit: async () => { throw new Error("unqualified execute must not run"); },
+      lookup: async () => ({ hashes: [] }),
+    });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: current().confirmationTx!.callHash }, factsReader(), adapter),
+      code("DASKI_CIRCLE_EXECUTION_NOT_QUALIFIED"));
+    assert.equal(current().confirmationTx?.vendor, undefined);
+  });
+});
+
+test("sponsored operation IDs persist and recovery cannot reinterpret a chosen review or unknown success", async () => {
+  await withStore(async record => {
+    const { context, gateway, calls } = fixture("eoa");
+    gateway.prepared = sponsoredAttestPreparation();
+    const original = context.client.callTool;
+    let response: Record<string, unknown> = { code: "CONFIRMATION_SUBMISSION_PENDING", expected: { operationId: "op-review" } };
+    let isError = true;
+    context.client.callTool = async (name, args) => {
+      const request = args.request as Record<string, unknown>;
+      if (args.authorization && request.phase === "submit") return { content: [], isError, structuredContent: response };
+      if (args.authorization && request.phase === "reaffirm") {
+        assert.deepEqual(request, { phase: "reaffirm", submission: "sponsored", reviewProtocol: 2, operationId: "op-review" });
+        return { content: [], isError: true, structuredContent: { code: "CONFIRMATION_SUBMISSION_PENDING", expected: { operationId: "op-review" } } };
+      }
+      return original(name, args);
+    };
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
+    assert.equal(current().confirmationSubmission?.operationId, "op-review");
+    const signature = current().confirmationSubmission!.request.signature;
+    await confirmOrder(context, current(), { ...options, reaffirm: true }, factsReader());
+    assert.equal(current().confirmationSubmission!.request.signature, signature);
+    await assert.rejects(confirmOrder(context, current(), { ...options, reaffirm: true, confirmation: "NotConfirmed" }, factsReader()),
+      code("DASKI_CONFIRMATION_FLAGS_INVALID"));
+    isError = false; response = { state: "unexpected-failed" };
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()), code("DASKI_CONFIRMATION_STATUS_UNKNOWN"));
+    assert.equal(current().confirmationSubmission?.operationId, "op-review");
+    isError = true; response = { code: "CONFIRMATION_SUBMISSION_FAILED", expected: { operationId: "another", safeRetired: true } };
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()), code("DASKI_CONFIRMATION_MISMATCH"));
+    assert.ok(current().confirmationSubmission);
+    response = { code: "CONFIRMATION_SUBMISSION_PENDING", expected: { operationId: "op-replacement" } };
+    await confirmOrder(context, current(), { ...options, confirmation: "Confirmed", supersedesOperationId: "op-review", acknowledgeSameNonce: true }, factsReader());
+    assert.equal(current().confirmationSubmission?.operationId, "op-replacement");
+    assert.equal(current().confirmationHistory?.[0]?.submission.request.signature, signature);
+    assert.equal(calls.filter(call => call.request.phase === "prepare").at(-1)?.request.supersedesOperationId, "op-review");
+  });
+});
+
+test("signed-before-admission recovery requires an explicit preparation supersession acknowledgement", async () => {
+  await withStore(async record => {
+    const { context, gateway, calls } = fixture("eoa");
+    gateway.prepared = sponsoredAttestPreparation();
+    const original = context.client.callTool;
+    context.client.callTool = async (name, args) => args.authorization && (args.request as Record<string, unknown>).phase === "submit"
+      ? { content: [], isError: true, structuredContent: { code: "CONFIRMATION_SPONSORSHIP_UNAVAILABLE" } } : original(name, args);
+    await assert.rejects(confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader()));
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed", supersedesPreparationId: "prep" }, factsReader()));
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed", supersedesPreparationId: "prep", acknowledgeSameNonce: true }, factsReader()),
+      code("CONFIRMATION_SPONSORSHIP_UNAVAILABLE"));
+    assert.equal(calls.filter(call => call.request.phase === "prepare").at(-1)?.request.supersedesPreparationId, "prep");
+    assert.equal(current().confirmationHistory?.[0]?.outcome.disposition, "explicitly-superseded-still-live");
+  });
+});
+
+test("candidate Circle execution requires explicit testnet spend consent and never bypasses mainnet", async () => {
+  const saved = process.env.DASKI_CONFORMANCE_SPEND_OK;
+  try {
+    delete process.env.DASKI_CONFORMANCE_SPEND_OK;
+    await withStore(async record => {
+      const { context } = fixture("contract");
+      context.metadata = async () => parseGatewayMetadata({ confirmation: {
+        modes: ["direct"], directReview: { circleEstimate: true, circleExecute: false } } });
+      let executions = 0;
+      const adapter = () => ({ packageVersion: "1.0.0", estimate: async () => ({}),
+        submit: async () => { executions++; return { transactionId: "candidate" }; },
+        lookup: async () => ({ hashes: [] }) });
+      await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+      const submit = { ...options, submit: true, approveCallHash: current().confirmationTx!.callHash, qualifyCircleExecution: true };
+      await assert.rejects(confirmOrder(context, current(), submit, factsReader(), adapter), code("DASKI_CIRCLE_CONFORMANCE_REFUSED"));
+      process.env.DASKI_CONFORMANCE_SPEND_OK = "1";
+      await assert.rejects(confirmOrder({ ...context, profile: { ...context.profile, chainId: 8453 } }, current(), submit, factsReader(), adapter),
+        code("DASKI_CIRCLE_CONFORMANCE_REFUSED"));
+      await confirmOrder(context, current(), submit, factsReader(), adapter);
+      assert.equal(executions, 1);
+      assert.equal(current().confirmationTx!.vendor!.conformanceCandidate, true);
+    });
+  } finally {
+    if (saved === undefined) delete process.env.DASKI_CONFORMANCE_SPEND_OK; else process.env.DASKI_CONFORMANCE_SPEND_OK = saved;
+  }
+});
+
+test("an upgraded buyer explicitly replaces an expired unadmitted pre-protocol journal and preserves its original signature", async () => {
+  await withStore(async record => {
+    const { context, gateway, calls } = fixture("eoa");
+    const historicalId = "00000000-0000-4000-8000-000000000101";
+    const replacementId = "00000000-0000-4000-8000-000000000201";
+    const oldTyped = structuredClone(sponsoredAttestPreparation().signableTypedData) as TypedDataRequest;
+    oldTyped.message.deadline = String(Math.floor(Date.now() / 1000) - 600);
+    const oldSignature = await payer.signTypedData(oldTyped as never);
+    // This is the persisted shape from the old buyer: no protocol, operation,
+    // profile, or typed-data fields were recorded before the submit response.
+    const historical = { action: "confirmation" as const, request: { phase: "submit" as const, submission: "sponsored" as const,
+      preparationId: historicalId, signature: oldSignature } };
+    upsertOrder({ ...record, confirmationSubmission: historical });
+    gateway.prepared = { ...sponsoredAttestPreparation(), preparationId: replacementId };
+    const originalCall = context.client.callTool;
+    const originalSign = context.signer.signTypedData.bind(context.signer);
+    const innerSignatures: TypedDataRequest[] = [];
+    context.signer.signTypedData = async data => {
+      if (data.primaryType === "Attest") innerSignatures.push(data);
+      return originalSign(data);
+    };
+    const submissions: Record<string, unknown>[] = [];
+    context.client.callTool = async (name, args) => {
+      const request = args.request as Record<string, unknown>;
+      if (args.authorization && request.phase === "prepare") {
+        assert.deepEqual({ ...request }, { phase: "prepare", submission: "sponsored", reviewProtocol: 2,
+          supersedesPreparationId: historicalId, acknowledgeSameNonce: true,
+          confirmation: "Confirmed", acknowledgeFinalTransition: false });
+        // The gateway separately proves final-chain expiry before returning
+        // this replacement. The buyer never infers expiry from its own clock.
+      }
+      if (args.authorization && request.phase === "submit") {
+        submissions.push(request);
+        return request.preparationId === historicalId
+          ? { content: [], isError: true, structuredContent: { code: "CONFIRMATION_CLIENT_UPGRADE_REQUIRED" } }
+          : { content: [], isError: true, structuredContent: { code: "CONFIRMATION_SUBMISSION_PENDING",
+            expected: { operationId: "replacement-operation" } } };
+      }
+      return originalCall(name, args);
+    };
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()),
+      code("CONFIRMATION_CLIENT_UPGRADE_REQUIRED"));
+    assert.deepEqual(submissions[0], historical.request, "resume does not rewrite the old signed request");
+    assert.equal(current().confirmationSubmission!.request.signature, oldSignature);
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed" }, factsReader()),
+      code("DASKI_CONFIRMATION_PENDING"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed",
+      supersedesPreparationId: historicalId }, factsReader()));
+    assert.equal(innerSignatures.length, 0, "a blocked legacy journal cannot silently obtain another signature");
+    const replaced = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed",
+      supersedesPreparationId: historicalId, acknowledgeSameNonce: true }, factsReader());
+    assert.equal(replaced.status, "pending");
+    assert.equal(replaced.operationId, "replacement-operation");
+    assert.equal(calls.filter(call => call.request.phase === "prepare").length, 1);
+    assert.equal(innerSignatures.length, 1);
+    assert.deepEqual(innerSignatures[0], gateway.prepared.signableTypedData);
+    assert.equal(submissions[1]!.reviewProtocol, 2);
+    assert.equal(submissions[1]!.preparationId, replacementId);
+    assert.notEqual(submissions[1]!.signature, oldSignature);
+    assert.equal(current().confirmationSubmission!.operationId, "replacement-operation");
+    assert.equal(current().confirmationSubmission!.profileId, "eas-native-1.2.0");
+    assert.deepEqual(current().confirmationHistory![0]!.submission.request, historical.request);
+    assert.equal(current().confirmationHistory![0]!.submission.operationId, undefined);
   });
 });

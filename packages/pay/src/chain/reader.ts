@@ -4,8 +4,8 @@
  * Everything this CLI learns from the chain — whether a contract account is
  * deployed, whether it accepts a signature, what a receipt contains, what an
  * attestation binds — comes through this one narrow reader. It has no
- * account, no wallet client, and no way to send a transaction: the CLI never
- * sends one (T9), and a sending client is not constructed anywhere.
+ * account, no wallet client, and no way to send a transaction: the reader cannot
+ * send one. The optional Circle direct-review adapter is a separate boundary.
  *
  * The reader is an interface so `doctor` and the confirmation flow can be
  * exercised against a scripted chain in tests.
@@ -56,7 +56,9 @@ export function finalityTagFor(chainId: number): FinalityTag {
 
 export interface ChainReader {
   /** Code at `address` at the latest block; `undefined` or `0x` for an EOA. */
-  getCode(address: Address): Promise<Hex | undefined>;
+  getCode(address: Address, blockNumber?: bigint): Promise<Hex | undefined>;
+  /** EIP-1967 identity read at the same final block as profile checks. */
+  getStorageAt?(address: Address, slot: Hex, blockNumber: bigint): Promise<Hex | undefined>;
   /** A bounded, read-only `eth_call` at the latest block. */
   call(args: { to: Address; data: Hex; gas: bigint }): Promise<ChainCallResult>;
   /** The receipt for a hash, or `null` while the transaction is not mined. */
@@ -89,12 +91,16 @@ function isTransportFailure(error: unknown): boolean {
 export function createChainReader(rpcUrl: string, finalityTag: FinalityTag, timeoutMs = ERC1271_CALL_TIMEOUT_MS): ChainReader {
   const client = createPublicClient({ transport: http(rpcUrl, { timeout: timeoutMs, retryCount: 0 }) });
   return {
-    async getCode(address) {
+    async getCode(address, blockNumber) {
       try {
-        return await client.getCode({ address });
+        return await client.getCode({ address, ...(blockNumber === undefined ? {} : { blockNumber }) });
       } catch (error) {
         throw rpcUnavailable(rpcUrl, error);
       }
+    },
+    async getStorageAt(address, slot, blockNumber) {
+      try { return await client.getStorageAt({ address, slot, blockNumber }); }
+      catch (error) { throw rpcUnavailable(rpcUrl, error); }
     },
     async call({ to, data, gas }) {
       try {

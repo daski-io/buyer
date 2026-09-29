@@ -35,6 +35,7 @@ export interface ConfirmationModes {
   sponsoredRequires: string;
   attestationCap: number;
   revocationAfterCap: boolean;
+  directReview?: { circleEstimate: boolean; circleExecute: boolean };
 }
 
 export interface SignerCliPin {
@@ -93,6 +94,7 @@ function readConfirmation(value: unknown): ConfirmationModes | null {
     sponsoredRequires: typeof value.sponsoredRequires === "string" ? value.sponsoredRequires : "eoa",
     attestationCap: Number.isSafeInteger(value.attestationCap) ? value.attestationCap as number : 3,
     revocationAfterCap: value.revocationAfterCap === true,
+    ...(isRecord(value.directReview) ? { directReview: { circleEstimate: value.directReview.circleEstimate === true, circleExecute: value.directReview.circleExecute === true } } : {}),
   };
 }
 

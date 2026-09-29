@@ -3,6 +3,18 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.0 — unreleased
+
+### @daski/pay
+
+- Reconstruct native Base EAS 1.0.1 and Base Sepolia 1.2.0 review signatures from independently checked implementation, domain and type hashes. Negotiate review protocol 2 before signing.
+- Retain signed review journals and operation IDs through failures; archive evidenced retirement, and support explicit legacy reaffirmation and acknowledged same-nonce alternatives.
+- Add Circle direct-review estimation and callHash-approved execution through a scoped, integrity-pinned child adapter. Save execution identity before invocation; resume only reads and verifies final EAS evidence. Execution remains disabled until the gateway records separate live conformance.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.4.6 — unreleased
 
 ### `@daski/pay`

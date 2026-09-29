@@ -1,3 +1,4 @@
+import { EAS_REVIEW_PROFILES } from "../src/chain/easProfiles.js";
 /**
  * The confirmation requests this CLI sends, proved against the gateway's
  * closed request shapes vendored under test/fixtures/gateway-wire/: every
@@ -15,7 +16,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { encodeEventTopics, encodeFunctionData, type Address, type Hex } from "viem";
 import { canonicalHash, type TypedDataRequest } from "@daski/x402-scheme";
 import type { ChainReader } from "../src/chain/reader.js";
-import { confirmOrder, confirmationData, EAS_ABI, validateDirectCall, type ConfirmationFacts } from "../src/commands/confirmation.js";
+import { confirmOrder, confirmationData, EAS_ABI, validateConfirmationPreparation, validateDirectCall, type ConfirmationFacts } from "../src/commands/confirmation.js";
 import type { CommandContext } from "../src/context.js";
 import { DEFAULT_CONFIG, EAS_PREDEPLOY } from "../src/config.js";
 import { findByIntent, upsertOrder } from "../src/store/orders.js";
@@ -32,6 +33,9 @@ function fixtureDirectory(): string {
 
 interface Shapes {
   schemaVersion: number;
+  directShapes: Record<"confirmation" | "revoke-confirmation", { prepare: string[]; submit: string[]; check: string[] }>;
+  reviewProtocol: number;
+  reaffirm: string[];
   submissionModes: string[];
   sponsoredRequires: string;
   shapes: Record<"confirmation" | "revoke-confirmation", { prepare: string[]; submit: string[]; check: string[] }>;
@@ -47,7 +51,7 @@ const TX = `0x${"aa".repeat(32)}` as Hex;
 const BLOCK_42 = canonicalHash("block-42");
 const BLOCK_50 = canonicalHash("block-50");
 const facts: ConfirmationFacts = {
-  chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
+  profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
   orderKey: canonicalHash("order"), recipient: RECIPIENT, currentUid: ZERO_UID, nonce: "0", submissionsUsed: 0,
 };
 const active = { ...facts, currentUid: UID, submissionsUsed: 1 };
@@ -65,7 +69,7 @@ function directCall(action: "attest" | "revoke", f: ConfirmationFacts) {
 function sponsoredPreparation(action: "attest" | "revoke", f: ConfirmationFacts) {
   const deadline = String(Math.floor(Date.now() / 1000) + 300);
   const common = { schema: f.schemaUid, value: "0", nonce: f.nonce, deadline };
-  return { preparationId: "prep", orderKey: f.orderKey, currentRefUid: f.currentUid, submissionsUsed: f.submissionsUsed, finalAttestation: false,
+  return { preparationId: "prep", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: deadline, admissionExpiresAt: new Date(Number(deadline) * 1000).toISOString(), orderKey: f.orderKey, currentRefUid: f.currentUid, submissionsUsed: f.submissionsUsed, finalAttestation: false,
     signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: f.chainId, verifyingContract: f.eas },
       types: action === "attest"
         ? { Attest: [{ name: "schema", type: "bytes32" }, { name: "recipient", type: "address" }, { name: "expirationTime", type: "uint64" }, { name: "revocable", type: "bool" }, { name: "refUID", type: "bytes32" }, { name: "data", type: "bytes" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint64" }] }
@@ -133,8 +137,8 @@ async function withStore(run: () => Promise<void>): Promise<void> {
 }
 
 const keysOf = (request: Record<string, unknown>) => Object.keys(request).sort();
-const shape = (action: "attest" | "revoke", phase: "prepare" | "submit" | "check") =>
-  [...shapes.shapes[action === "attest" ? "confirmation" : "revoke-confirmation"][phase]].sort();
+const shape = (action: "attest" | "revoke", phase: "prepare" | "submit" | "check", direct = false) =>
+  [...(direct ? shapes.directShapes : shapes.shapes)[action === "attest" ? "confirmation" : "revoke-confirmation"][phase]].sort();
 
 test("the vendored shapes are the gateway's current ones", () => {
   assert.equal(shapes.schemaVersion, 1);
@@ -166,8 +170,8 @@ for (const action of ["attest", "revoke"] as const) {
       const checked = await confirmOrder(context, findByIntent("intent")!, { handle: "handle", json: true, check: true });
       assert.equal(checked.state, "observed");
       assert.deepEqual(sent.map((entry) => entry.request.phase), ["prepare", "check"]);
-      assert.deepEqual(keysOf(sent[0]!.request), shape(action, "prepare"), "prepare");
-      assert.deepEqual(keysOf(sent[1]!.request), shape(action, "check"), "check");
+      assert.deepEqual(keysOf(sent[0]!.request), shape(action, "prepare", true), "prepare");
+      assert.deepEqual(keysOf(sent[1]!.request), shape(action, "check", true), "check");
       assert.equal(sent[0]!.request.submission, "direct");
       assert.equal(sent[1]!.request.submission, "direct");
     });
@@ -193,4 +197,39 @@ test("the gateway's actual direct attest and revoke calls pass the validator, an
   delete stripped.value;
   assert.throws(() => validateDirectCall(stripped, f, directCalls.attest.confirmation, directCalls.facts.eas), (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_PREPARATION_INVALID");
   assert.throws(() => validateDirectCall({ ...(directCalls.attest.call as object), value: "1" }, f, directCalls.attest.confirmation, directCalls.facts.eas), (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_PREPARATION_INVALID");
+});
+
+/** Actual sponsored responses emitted by the gateway's production builders. */
+const sponsoredPreparations = JSON.parse(readFileSync(join(fixtureDirectory(), "confirmation-sponsored-preparation.json"), "utf8")) as {
+  schemaVersion: number;
+  profiles: Array<{
+    facts: Omit<ConfirmationFacts, "profile"> & { payer: Address; timestamp: number; admissionDeadline: string };
+    attest: { confirmation: "Confirmed" | "NotConfirmed"; result: Record<string, unknown> };
+    revoke: { result: Record<string, unknown> };
+  }>;
+};
+
+test("gateway sponsored preparations reconstruct both native EAS profiles with ISO admission expiry", () => {
+  assert.equal(sponsoredPreparations.schemaVersion, 1);
+  assert.deepEqual(sponsoredPreparations.profiles.map(entry => entry.facts.chainId), [8453, 84532]);
+  for (const entry of sponsoredPreparations.profiles) {
+    // The trusted profile comes from our independent registry, never the gateway response.
+    const facts: ConfirmationFacts = { ...entry.facts, profile: EAS_REVIEW_PROFILES[entry.facts.chainId]! };
+    for (const action of ["attest", "revoke"] as const) {
+      const prepared = entry[action].result;
+      assert.equal(prepared.admissionExpiresAt, new Date(Number(entry.facts.admissionDeadline) * 1000).toISOString());
+      const choice = action === "attest" ? entry.attest.confirmation : "revoke";
+      const rebuilt = validateConfirmationPreparation(prepared, facts, choice, false, entry.facts.timestamp);
+      assert.deepEqual(rebuilt, prepared.signableTypedData);
+      assert.equal(rebuilt.message.deadline, facts.profile!.signedDeadline ? entry.facts.admissionDeadline : undefined);
+      assert.equal(rebuilt.message.value, facts.profile!.signedDeadline ? "0" : undefined);
+      assert.throws(() => validateConfirmationPreparation(prepared, facts, choice, false, Number(entry.facts.admissionDeadline)),
+        (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "expired local admission must not be accepted");
+      const other = sponsoredPreparations.profiles.find(candidate => candidate.facts.chainId !== facts.chainId)!;
+      assert.throws(() => validateConfirmationPreparation(other[action].result, facts, choice, false, entry.facts.timestamp),
+        (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "another deployment's profile cannot select the signing message");
+      assert.throws(() => validateConfirmationPreparation({ ...prepared, admissionExpiresAt: "malformed" }, facts, choice, false, entry.facts.timestamp),
+        (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH");
+    }
+  }
 });

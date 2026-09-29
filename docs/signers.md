@@ -12,8 +12,9 @@ interface SignerAdapter {
 ```
 
 Deliberately tiny: an address, a typed-data signature, a self-description. No
-raw message signing, no transaction signing, no key export. The CLI never
-constructs a sending client; a test fails if any code path does.
+raw message signing, no transaction signing, no key export. Payment and signer
+paths remain sign-only. A separate direct-review adapter may execute only an
+explicitly approved, validated review; see [direct reviews](direct-reviews.md).
 
 The [conformance suite](../packages/pay/conformance/run.ts) is the acceptance
 gate for every adapter. `describe()` reports conformance status so

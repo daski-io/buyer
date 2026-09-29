@@ -9,8 +9,8 @@
  * for it): the gateway prepares the closed `attest` or `revoke` call, this
  * CLI validates every field of it against the same chain facts and the
  * profile's pinned EAS address, re-encodes the calldata, and prints the call
- * for the wallet's own tool to submit. The CLI never sends a transaction in
- * either mode, and never constructs anything that could.
+ * for the wallet's own tool to submit. Preparation sends no transaction. An explicit, callHash-approved direct
+ * submission uses the separate bounded Circle adapter when qualified.
  *
  * A direct submission is tracked in `orders.json`: `--tx <hash>` records the
  * hash immediately as `submitted` (recorded, unverified) so a restart never
@@ -42,11 +42,14 @@
  * preparations must not both find nothing pending. The signer is resolved
  * before the lock, so no passphrase prompt runs inside it.
  */
+import { randomUUID } from "node:crypto";
+import { createCircleReviewAdapter, type DirectReviewSubmissionAdapter } from "../signers/circleReview.js";
 import { canonicalHash, type SignerDescription, type TypedDataRequest } from "@daski/x402-scheme";
 import {
   decodeEventLog, encodeAbiParameters, encodeFunctionData, getAddress, isAddressEqual, keccak256,
   parseAbi, parseAbiParameters, type Address, type Hex,
 } from "viem";
+import { discoverEasReviewProfile, type EasReviewProfile } from "../chain/easProfiles.js";
 import type { ChainReader, TransactionReceiptLike } from "../chain/reader.js";
 import { finalityTagFor } from "../chain/reader.js";
 import { CliError } from "../cli/errors.js";
@@ -63,6 +66,14 @@ export interface ConfirmationOptions extends OrderOptions {
   confirmation?: string | undefined;
   revoke?: boolean | undefined;
   resume?: boolean | undefined;
+  reaffirm?: boolean | undefined;
+  estimate?: boolean | undefined;
+  submit?: boolean | undefined;
+  approveCallHash?: string | undefined;
+  qualifyCircleExecution?: boolean | undefined;
+  supersedesOperationId?: string | undefined;
+  supersedesPreparationId?: string | undefined;
+  acknowledgeSameNonce?: boolean | undefined;
   acknowledgeFinalTransition?: boolean | undefined;
   /** `sponsored` or `direct`; defaults by signer. */
   submission?: string | undefined;
@@ -111,6 +122,8 @@ export const REPUTATION_ABI = parseAbi([
 
 export interface ConfirmationFacts {
   chainId: number;
+  /** Independently qualified deployment identity. */
+  profile?: EasReviewProfile;
   eas: Address;
   schemaUid: Hex;
   reputationStorage: Address;
@@ -175,18 +188,28 @@ export function selectConfirmationMode(
 export function validateConfirmationPreparation(prepared: Record<string, unknown>, facts: ConfirmationFacts,
   choice: Choice, acknowledged: boolean, now = Math.floor(Date.now() / 1000)): TypedDataRequest {
   const proposed = prepared.signableTypedData as TypedDataRequest | undefined;
+  const profile = facts.profile;
+  if (!profile) throw invalidPreparation();
   const deadline = Number(proposed?.message?.deadline);
+  const admissionExpiry = typeof prepared.admissionExpiresAt === "string" &&
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(prepared.admissionExpiresAt)
+    ? Date.parse(prepared.admissionExpiresAt) / 1000 : Number(prepared.admissionExpiresAt);
+  if (prepared.profileId !== profile.id || prepared.domainVersion !== profile.domainVersion ||
+      !Number.isSafeInteger(admissionExpiry) || admissionExpiry <= now || admissionExpiry > now + 330 ||
+      (profile.signedDeadline ? prepared.signedDeadline !== String(deadline)
+        : prepared.signedDeadline !== null || proposed?.message?.deadline !== undefined)) throw invalidPreparation();
   const final = choice !== "revoke" && facts.submissionsUsed === ATTESTATION_CAP - 1;
   if (!proposed || prepared.orderKey !== facts.orderKey || prepared.currentRefUid !== facts.currentUid ||
       prepared.submissionsUsed !== facts.submissionsUsed || Boolean(prepared.finalAttestation) !== final ||
       (choice !== "revoke" && facts.submissionsUsed >= ATTESTATION_CAP) ||
       (choice === "revoke" && facts.currentUid === ZERO_UID) || (final && !acknowledged) ||
-      !Number.isSafeInteger(deadline) || deadline <= now || deadline > now + 330) {
+      (profile.signedDeadline && (!Number.isSafeInteger(deadline) || deadline <= now || deadline > now + 330))) {
     throw invalidPreparation();
   }
-  const common = { schema: facts.schemaUid, value: "0", nonce: facts.nonce, deadline: String(deadline) };
-  const expected: TypedDataRequest = { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
-    types: choice === "revoke" ? revokeTypes : attestTypes, primaryType: choice === "revoke" ? "Revoke" : "Attest",
+  const common = { schema: facts.schemaUid, nonce: facts.nonce, ...(profile.signedDeadline ? { value: "0", deadline: String(deadline) } : {}) };
+  const expected: TypedDataRequest = { domain: { name: "EAS", version: profile.domainVersion, chainId: facts.chainId, verifyingContract: facts.eas },
+    types: choice === "revoke" ? { Revoke: revokeTypes.Revoke.filter(field => profile.signedDeadline || (field.name !== "deadline" && field.name !== "value")) }
+      : { Attest: attestTypes.Attest.filter(field => profile.signedDeadline || (field.name !== "deadline" && field.name !== "value")) }, primaryType: choice === "revoke" ? "Revoke" : "Attest",
     message: choice === "revoke" ? { ...common, uid: facts.currentUid } : { ...common, recipient: facts.recipient,
       expirationTime: "0", revocable: true, refUID: facts.currentUid, data: confirmationData(facts.orderKey, choice) } };
   if (canonicalHash(proposed) !== canonicalHash(expected)) throw invalidPreparation();
@@ -285,31 +308,23 @@ export async function runConfirmation(options: ConfirmationOptions): Promise<Rec
   return withOrder(options, (context, record) => confirmOrder(context, record, options));
 }
 
-/**
- * Gateway refusals the submit phase raises before any sponsorship is reserved
- * (request shape, mode, signature, exhausted budget): the signed request was
- * never admitted, so the retained submission is cleared and another mode can
- * be prepared. Anything else may have been admitted and keeps the record for
- * --resume: an unavailable chain read, a transport failure, and
- * CONFIRMATION_PREPARATION_STALE, which the gateway also answers once its
- * preparation TTL has passed for a submission it admitted earlier, so a stale
- * answer on --resume says nothing about whether the operation is running.
- */
-const REFUSED_BEFORE_ADMISSION: ReadonlySet<string> = new Set([
-  "CONFIRMATION_REQUEST_INVALID",
-  "CONFIRMATION_SPONSORED_REQUIRES_EOA",
-  "CONFIRMATION_SIGNATURE_INVALID",
-  "CONFIRMATION_SPONSORSHIP_LIMIT",
-]);
-
 /** The record as the store holds it now; the caller's copy may predate another process's write. */
 function latest(record: OrderRecord): OrderRecord {
   return findByIntent(record.intentId) ?? record;
 }
 
 export async function confirmOrder(context: CommandContext, record: OrderRecord, options: ConfirmationOptions,
-  factsReader = readConfirmationFacts): Promise<Record<string, unknown>> {
+  factsReader = readConfirmationFacts,
+  directAdapter: () => DirectReviewSubmissionAdapter = createCircleReviewAdapter): Promise<Record<string, unknown>> {
   const handle = record.handle ?? options.handle;
+  if (options.qualifyCircleExecution && !options.submit) throw new CliError({
+    code: "DASKI_CIRCLE_CONFORMANCE_REFUSED", message: "Circle conformance qualification requires explicit submission.",
+    remediation: "Use only on testnet with DASKI_CONFORMANCE_SPEND_OK=1 and --submit --approve-call <callHash>." });
+  const directAction = Boolean(options.estimate || options.submit || (options.resume && (options.submission === "direct" || record.confirmationTx?.vendor)));
+  if (directAction) {
+    const signer = await context.resolveSigner();
+    return withOrderLock(record.intentId, () => manageCircleReview(context, latest(record), options, signer.describe(), factsReader, directAdapter));
+  }
   if (options.tx !== undefined || options.check || options.abandon) {
     // Only --check signs (the gateway's check authorization); the signer is
     // resolved before the lock so a passphrase prompt never runs inside it.
@@ -325,7 +340,13 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
   }
   const choice: Choice | undefined = options.revoke ? "revoke"
     : options.confirmation === "Confirmed" || options.confirmation === "NotConfirmed" ? options.confirmation : undefined;
-  if (!options.resume && choice === undefined) {
+  if ((options.reaffirm || options.resume) && options.confirmation !== undefined) throw new CliError({
+    code: "DASKI_CONFIRMATION_FLAGS_INVALID", message: "Resume or reaffirm uses the saved review; it cannot change your choice.",
+    remediation: "Omit --choice/--revoke for recovery. To change a live authorization, explicitly supersede it with --acknowledge-same-nonce." });
+  if (options.reaffirm && options.resume) throw new CliError({
+    code: "DASKI_CONFIRMATION_FLAGS_INVALID", message: "Choose either resume or reaffirm.",
+    remediation: "Resume checks the saved submission; reaffirm explicitly opens a new relay window." });
+  if (!options.resume && !options.reaffirm && choice === undefined) {
     throw new CliError({ code: "DASKI_CONFIRMATION_CHOICE_REQUIRED", message: "Choose the delivery confirmation for this order.",
       remediation: "After the user's choice, pass --choice Confirmed or --choice NotConfirmed. Leaving it Pending requires no action." });
   }
@@ -338,9 +359,42 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
 
   return withOrderLock(record.intentId, async () => {
     record = latest(record);
-    if (record.confirmationSubmission && !options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_PENDING",
+    if (record.confirmationSubmission && !options.resume && !options.reaffirm && !options.acknowledgeSameNonce) throw new CliError({ code: "DASKI_CONFIRMATION_PENDING",
       message: "A review submission for this order is awaiting reconciliation.", remediation: `Run daski order confirm ${options.handle} --resume.` });
     let submission = record.confirmationSubmission;
+    if (options.revoke && (options.resume || options.reaffirm) && submission?.action !== "revoke-confirmation") throw invalidPreparation();
+    const superseding = options.supersedesOperationId !== undefined || options.supersedesPreparationId !== undefined;
+    if (superseding !== Boolean(options.acknowledgeSameNonce) ||
+        (options.supersedesOperationId && options.supersedesPreparationId) ||
+        (superseding && (options.resume || options.reaffirm))) throw new CliError({
+      code: "DASKI_CONFIRMATION_SUPERSESSION_INVALID", message: "Same-nonce replacement requires one prior operation or preparation and explicit acknowledgement.",
+      remediation: "Pass --supersedes-operation <id> or --supersedes-preparation <id> with --acknowledge-same-nonce and your chosen review. Any previously signed alternative may execute first." });
+    if (superseding && submission) {
+      const matches = options.supersedesOperationId ? submission.operationId === options.supersedesOperationId
+        : submission.request.preparationId === options.supersedesPreparationId;
+      if (!matches) throw invalidPreparation();
+      // Preserve the old signed alternative; it remains executable until its nonce is consumed.
+      updateOrder(record.intentId, { confirmationHistory: [...(record.confirmationHistory ?? []),
+        { submission, outcome: { disposition: "explicitly-superseded-still-live" }, archivedAt: new Date().toISOString() }] });
+      submission = undefined;
+    }
+    if (options.reaffirm) {
+      if (!submission?.operationId) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING",
+        message: "No admitted operation is saved for reaffirmation.", remediation: "Use --resume first to recover its operation ID." });
+      // Fresh outer authorization binds the operation. Never create another inner signature.
+      try {
+        const result = await call(submission.action, { phase: "reaffirm", submission: "sponsored", reviewProtocol: 2, operationId: submission.operationId });
+        return { orderHandle: handle, mode: "sponsored", ...result };
+      } catch (error) {
+        if (error instanceof CliError && error.code === "CONFIRMATION_SUBMISSION_PENDING") {
+          const gateway = error.details.gateway as { expected?: { operationId?: unknown } } | undefined;
+          if (gateway?.expected?.operationId !== submission.operationId) throw invalidPreparation();
+          return { orderHandle: handle, mode: "sponsored", status: "pending", operationId: submission.operationId,
+            next: "The saved signature was reaffirmed. Use --resume to reconcile its execution." };
+        }
+        throw error;
+      }
+    }
     if (!submission) {
       if (options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING", message: "There is no pending review submission.",
         remediation: "Check order status, then supply the user's review choice if a new review is wanted." });
@@ -350,12 +404,17 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
       // review cannot be signed while the first is unresolved on chain.
       if (isPendingDirect(record.confirmationTx)) throw directPending(handle, record.confirmationTx!);
       const mode = selectConfirmationMode(signer.describe(), options.submission);
+      if (superseding && mode !== "sponsored") throw new CliError({
+        code: "DASKI_CONFIRMATION_SUPERSESSION_INVALID", message: "Same-nonce supersession requires a sponsored delegated review.",
+        remediation: "Direct attest/revoke does not consume the delegated nonce. Reconcile the live authorization first." });
       const facts = await factsReader(context, record);
       assertCapacity(facts, choice!, handle);
       const acknowledged = options.acknowledgeFinalTransition === true;
       // Revocation preparation carries no acknowledgement: only an attestation
       // can be final, and the gateway's closed request shape rejects the key.
       const prepared = await call(action, { phase: "prepare", submission: mode,
+        ...(mode === "sponsored" ? { reviewProtocol: 2 } : {}),
+        ...(superseding ? { ...(options.supersedesOperationId ? { supersedesOperationId: options.supersedesOperationId } : { supersedesPreparationId: options.supersedesPreparationId }), acknowledgeSameNonce: true } : {}),
         ...(options.revoke ? {} : { confirmation: options.confirmation, acknowledgeFinalTransition: acknowledged }) });
       // Whether this attestation is the final one is a chain fact, decided here
       // for both modes; the gateway's count and flag must agree with it, and
@@ -382,6 +441,8 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
           action: validated.action,
           callHash: canonicalHash(validated.call),
           expected,
+          call: validated.call,
+          choice: choice!,
           state: "prepared",
           preparedAt: new Date().toISOString(),
         };
@@ -390,8 +451,8 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
           ...(warning ? { warning } : {}),
           call: validated.call,
           callHash: tracked.callHash,
-          note: "This CLI validated the call against chain facts and sends no transaction.",
-          next: "Submit the call with the wallet's own tool (for the Circle agent wallet, the circle CLI). " +
+          note: "This call was validated against chain facts. Preparation sends no transaction.",
+          next: "For Circle, use --estimate, then --submit --approve-call <callHash> when explicitly approved and execution is qualified. Or submit with your wallet tool. " +
             `Then record the hash: daski order confirm ${handle} --tx <hash>, and verify it: ` +
             `daski order confirm ${handle} --check.` };
       }
@@ -399,19 +460,37 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
       const typedData = validateConfirmationPreparation(prepared, facts, choice!, acknowledged);
       if (typeof prepared.preparationId !== "string") throw invalidPreparation();
       const signature = await signer.signTypedData(typedData);
-      submission = { action, request: { phase: "submit", submission: "sponsored", preparationId: prepared.preparationId, signature } };
+      submission = { action, profileId: facts.profile!.id, typedData, request: { phase: "submit", submission: "sponsored", reviewProtocol: 2, preparationId: prepared.preparationId, signature } };
       updateOrder(record.intentId, { confirmationSubmission: submission, readCapability: undefined });
     }
     try {
       const result = await call(submission.action, submission.request);
-      updateOrder(record.intentId, { confirmationSubmission: undefined, readCapability: undefined });
+      if (result.state !== "final" && result.state !== "completed") throw new CliError({
+        code: "DASKI_CONFIRMATION_STATUS_UNKNOWN", message: "The gateway returned a review state that does not prove completion.",
+        remediation: "The signed journal is preserved. Use --resume after the gateway reconciles the operation.",
+        details: { gateway: result } });
+      updateOrder(record.intentId, { confirmationSubmission: undefined, readCapability: undefined,
+        confirmationHistory: [...(latest(record).confirmationHistory ?? []), { submission, outcome: result, archivedAt: new Date().toISOString() }] });
       return { orderHandle: record.handle, mode: "sponsored", ...result };
     } catch (error) {
-      if (error instanceof CliError && error.code === "CONFIRMATION_SUBMISSION_PENDING") return {
-        orderHandle: record.handle, mode: "sponsored", status: "pending", preparationId: submission.request.preparationId,
-        next: `Run daski order confirm ${options.handle} --resume to check the same submission.` };
-      if (error instanceof CliError && REFUSED_BEFORE_ADMISSION.has(error.code)) {
-        updateOrder(record.intentId, { confirmationSubmission: undefined });
+      if (error instanceof CliError) {
+        const gateway = error.details.gateway as Record<string, unknown> | undefined;
+        const detail = (gateway?.expected && typeof gateway.expected === "object" ? gateway.expected : gateway) as Record<string, unknown> | undefined;
+        if (submission.operationId && typeof detail?.operationId === "string" && detail.operationId !== submission.operationId) throw new CliError({
+          code: "DASKI_CONFIRMATION_MISMATCH", message: "The gateway response identifies a different review operation.",
+          remediation: "Keep the saved journal and reconcile its original operation." });
+        submission = { ...submission,
+          ...(typeof detail?.operationId === "string" ? { operationId: detail.operationId } : {}),
+          lastDisposition: { code: error.code, ...(detail ?? {}) } };
+        updateOrder(record.intentId, { confirmationSubmission: submission });
+        if (error.code === "CONFIRMATION_SUBMISSION_FAILED" && detail?.safeRetired === true && typeof detail.operationId === "string") {
+          updateOrder(record.intentId, { confirmationSubmission: undefined,
+            confirmationHistory: [...(latest(record).confirmationHistory ?? []), { submission, outcome: detail, archivedAt: new Date().toISOString() }] });
+        }
+        if (error.code === "CONFIRMATION_SUBMISSION_PENDING") return {
+          orderHandle: record.handle, mode: "sponsored", status: "pending", preparationId: submission.request.preparationId,
+          ...(submission.operationId ? { operationId: submission.operationId } : {}),
+          next: `Run daski order confirm ${options.handle} --resume to check the same submission.` };
       }
       if (error instanceof CliError && error.code === "CONFIRMATION_PREPARATION_STALE") {
         throw new CliError({
@@ -428,6 +507,83 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
       throw error;
     }
   });
+}
+
+async function manageCircleReview(context: CommandContext, record: OrderRecord, options: ConfirmationOptions,
+  signer: SignerDescription, factsReader: typeof readConfirmationFacts,
+  adapterFactory: () => DirectReviewSubmissionAdapter): Promise<Record<string, unknown>> {
+  const tracked = record.confirmationTx;
+  const handle = record.handle ?? options.handle;
+  if (options.qualifyCircleExecution && (context.profile.chainId !== 84532 || process.env.DASKI_CONFORMANCE_SPEND_OK !== "1")) throw new CliError({
+    code: "DASKI_CIRCLE_CONFORMANCE_REFUSED", message: "Candidate Circle execution is restricted to explicitly authorized Base Sepolia conformance.",
+    remediation: "After testnet spending approval, set DASKI_CONFORMANCE_SPEND_OK=1 and approve the exact saved call. This flag never bypasses mainnet qualification." });
+  if (Number(Boolean(options.estimate)) + Number(Boolean(options.submit)) + Number(Boolean(options.resume)) !== 1 ||
+      options.tx || options.check || options.abandon || options.reaffirm || options.confirmation !== undefined) throw new CliError({
+    code: "DASKI_CONFIRMATION_FLAGS_INVALID", message: "Choose exactly one direct review action.",
+    remediation: "Use --estimate, --submit --approve-call <callHash>, or --resume separately." });
+  if (!tracked?.call || !tracked.choice || tracked.state === "abandoned") throw new CliError({
+    code: "DASKI_CONFIRMATION_NOT_PREPARED", message: "There is no saved validated call for this direct review.",
+    remediation: "Prepare the chosen review first, then approve its displayed callHash." });
+  if (record.confirmationSubmission) throw new CliError({ code: "DASKI_CONFIRMATION_PENDING",
+    message: "A sponsored authorization is still unresolved.", remediation: "Reconcile it before executing a direct review." });
+  if (signer.provider !== "circle-agent" || signer.accountType !== "contract") throw new CliError({
+    code: "DASKI_CONFIRMATION_ADAPTER_UNSUPPORTED", message: "Automatic direct review submission is qualified only for the Circle agent adapter.",
+    remediation: "Use your wallet's own tool for the validated call, then record --tx and --check." });
+  if (canonicalHash(tracked.call) !== tracked.callHash || tracked.call.chainId !== context.profile.chainId ||
+      !isAddressEqual(tracked.call.to, context.profile.easAddress) ||
+      (tracked.vendor && (!isAddressEqual(tracked.vendor.wallet, context.payerAddress) || tracked.vendor.chainId !== context.profile.chainId))) throw invalidCall("saved call binding differs");
+  const adapter = adapterFactory();
+  if (options.resume) {
+    if (!tracked.vendor) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING",
+      message: "Circle submission has not started.", remediation: "Preparation is not approval; use --estimate or explicitly approve --submit." });
+    const request = { mode: "lookup" as const, wallet: context.payerAddress, call: tracked.call, idempotencyKey: tracked.vendor.idempotencyKey };
+    const found = await adapter.lookup(request, tracked.vendor.transactionId);
+    const hashes = [...new Set([...tracked.vendor.hashes, ...found.hashes])];
+    const updated = { ...tracked, vendor: { ...tracked.vendor, ...(found.transactionId ? { transactionId: found.transactionId } : {}), hashes },
+      ...(hashes.length ? { txHash: hashes[hashes.length - 1]! } : {}) };
+    updateOrder(record.intentId, { confirmationTx: updated });
+    for (const txHash of hashes) {
+      try {
+        const result = await checkDirectRecord(context, record, { ...updated, txHash }, handle, { orderHandle: handle, mode: "direct" });
+        if (result.state === "observed") return result;
+      } catch (error) {
+        if (!(error instanceof CliError) || error.code !== "DASKI_CONFIRMATION_RECEIPT_UNRELATED") throw error;
+        // An ERC-4337 outer success can contain an inner revert. Keep the journal.
+      }
+    }
+    return { orderHandle: handle, mode: "direct", state: "submitted", transactionId: updated.vendor.transactionId ?? null,
+      hashes, next: hashes.length ? "Wait for finalized EAS evidence, then use --resume again."
+        : "Vendor identity or exact-call discovery is unresolved. Keep this journal; --resume only reads and never executes again." };
+  }
+  if (tracked.vendor || tracked.txHash || tracked.state !== "prepared") throw directPending(handle, tracked);
+  const capabilities = (await context.metadata()).confirmation?.directReview;
+  if (options.submit && capabilities?.circleExecute !== true && !options.qualifyCircleExecution) throw new CliError({
+    code: "DASKI_CIRCLE_EXECUTION_NOT_QUALIFIED", message: "Circle review execution is not yet qualified for this gateway.",
+    remediation: "Execution requires a recorded live conformance result for the shipped adapter. Estimation remains separate and does not submit." });
+  if (options.estimate && capabilities?.circleEstimate !== true) throw new CliError({
+    code: "DASKI_CIRCLE_ESTIMATE_NOT_QUALIFIED", message: "This gateway does not advertise the Circle estimation capability.",
+    remediation: "Update the buyer and gateway before estimating this saved review." });
+  if (options.submit && options.approveCallHash !== tracked.callHash) throw new CliError({
+    code: "DASKI_CONFIRMATION_APPROVAL_REQUIRED", message: "Explicit approval must name this prepared callHash.",
+    remediation: "Show the prepared review to the user, then pass --submit --approve-call <callHash> for that exact call." });
+  const walletCode = await context.chain.getCode(context.payerAddress);
+  if (!walletCode || walletCode === "0x") throw invalidCall("payer wallet is not deployed");
+  const facts = await factsReader(context, record);
+  validateDirectCall(tracked.call, facts, tracked.choice, context.profile.easAddress);
+  const idempotencyKey = randomUUID();
+  const request = { mode: options.estimate ? "estimate" as const : "execute" as const, wallet: context.payerAddress, call: tracked.call, idempotencyKey };
+  if (options.estimate) return { orderHandle: handle, mode: "direct", state: "prepared", callHash: tracked.callHash,
+    estimate: await adapter.estimate(request), note: "Estimation did not submit the review." };
+  const started: ConfirmationTxRecord = { ...tracked, state: "submitted", vendor: {
+    provider: "circle-agent", packageVersion: adapter.packageVersion, idempotencyKey, wallet: context.payerAddress,
+    chainId: context.profile.chainId, conformanceCandidate: options.qualifyCircleExecution === true, submissionStarted: new Date().toISOString(), hashes: [] } };
+  updateOrder(record.intentId, { confirmationTx: started });
+  const result = await adapter.submit(request);
+  const updated: ConfirmationTxRecord = { ...started, ...(result.txHash ? { txHash: result.txHash } : {}),
+    vendor: { ...started.vendor!, ...(result.transactionId ? { transactionId: result.transactionId } : {}), hashes: result.txHash ? [result.txHash] : [] } };
+  updateOrder(record.intentId, { confirmationTx: updated });
+  return { orderHandle: handle, mode: "direct", state: "submitted", transactionId: result.transactionId ?? null,
+    txHash: result.txHash ?? null, conformanceCandidate: options.qualifyCircleExecution === true, next: "Use --resume to verify final EAS evidence. Vendor completion alone is not review success." };
 }
 
 function assertCapacity(facts: ConfirmationFacts, choice: Choice, handle: string): void {
@@ -601,6 +757,9 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
   // transaction provably not this call. A revert in a block that is not yet final
   // settles nothing: a reorganization can re-include the transaction against
   // different state.
+  if (tracked.vendor) throw new CliError({
+    code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE", message: "Circle execution was started and has no resolved transaction hash.",
+    remediation: "Use --resume for read-only vendor lookup. Keep the saved idempotency key; do not abandon or execute again." });
   let unrelatedReceipt: string | undefined;
   if (tracked.txHash) {
     const receipt = await context.chain.getTransactionReceipt(tracked.txHash);
@@ -868,7 +1027,7 @@ function reviewEffect(check: Record<string, unknown>, tracked: ConfirmationTxRec
 }
 
 /** Read the deployment pins separately, then verify the selected order and EAS nonce on chain. */
-export async function readConfirmationFacts(context: CommandContext, record: OrderRecord): Promise<ConfirmationFacts> {
+export async function readConfirmationFacts(context: CommandContext, record: OrderRecord, profileReader = discoverEasReviewProfile): Promise<ConfirmationFacts> {
   const status = await readWithCapability(context, record, { toolName: "daski_get_order_status", action: "status", request: {} });
   if (typeof status.orderKey !== "string" || !HEX32.test(status.orderKey)) throw invalidPreparation();
   const pins = (await context.metadata()).confirmationSigning;
@@ -876,12 +1035,13 @@ export async function readConfirmationFacts(context: CommandContext, record: Ord
   if (pins.chainId !== context.profile.chainId) throw invalidPreparation();
   if (!isAddressEqual(pins.eas, context.profile.easAddress)) throw easAddressMismatch(pins.eas, context.profile.easAddress, context.profile.chainId);
   const orderKey = status.orderKey as Hex;
-  const [current, nonce] = await Promise.all([
+  const [current, nonce, profile] = await Promise.all([
     context.chain.readContract<{
       orderKey: Hex; providerAgentId: bigint; payer: Address; providerOwner: Address; providerAgentWallet: Address;
       confirmationSubmissions: number; outcomeRecorded: boolean; reputationEligible: boolean; currentConfirmationUid: Hex;
     }>({ address: pins.reputationStorage, abi: REPUTATION_ABI, functionName: "getRecord", args: [orderKey] }),
     context.chain.readContract<bigint>({ address: pins.eas, abi: EAS_ABI, functionName: "getNonce", args: [context.payerAddress] }),
+    profileReader(context.chain, pins.chainId, pins.eas),
   ]);
   if (current.orderKey !== orderKey || getAddress(current.payer) !== context.payerAddress ||
       String(current.providerAgentId) !== record.providerAgentId || !current.outcomeRecorded || !current.reputationEligible) throw invalidPreparation();
@@ -889,7 +1049,7 @@ export async function readConfirmationFacts(context: CommandContext, record: Ord
   // contract refuses to register a zero wallet, so a zero here is a record
   // this CLI does not understand.
   if (current.providerAgentWallet === ZERO_ADDRESS) throw invalidPreparation();
-  return { chainId: pins.chainId, eas: pins.eas, schemaUid: pins.schemaUid, reputationStorage: pins.reputationStorage, orderKey,
+  return { chainId: pins.chainId, profile, eas: pins.eas, schemaUid: pins.schemaUid, reputationStorage: pins.reputationStorage, orderKey,
     recipient: getAddress(current.providerAgentWallet),
     currentUid: current.currentConfirmationUid, nonce: nonce.toString(), submissionsUsed: Number(current.confirmationSubmissions) };
 }

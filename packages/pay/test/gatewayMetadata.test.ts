@@ -83,7 +83,7 @@ test("gateway refusals that this CLI can act on name the flag, and the retryable
       error.details.retryable === true && /retry/i.test(error.remediation));
 });
 
-test("no code path constructs a sending wallet client or a transaction", () => {
+test("no generic wallet transaction client is constructed; Circle reviews use their scoped subprocess policy", () => {
   let directory = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 6 && !statSync(join(directory, "src"), { throwIfNoEntry: false })?.isDirectory(); depth += 1) {
     directory = dirname(directory);
@@ -103,4 +103,12 @@ test("no code path constructs a sending wallet client or a transaction", () => {
     const source = readFileSync(file, "utf8");
     for (const token of forbidden) assert.ok(!source.includes(token), `${file} mentions ${token}`);
   }
+});
+
+test("new review errors distinguish live authorization, safe retirement and incompatible EAS", () => {
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_AUTHORIZATION_STILL_LIVE", { expected: { operationId: "op" } }) ?? "", /--reaffirm/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_AUTHORIZATION_STILL_LIVE", { expected: { preparationId: "prep" } }) ?? "", /--supersedes-preparation/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_FAILED", { expected: { safeRetired: true } }) ?? "", /archived/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_FAILED", { expected: { safeRetired: false } }) ?? "", /preserved/);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_NONCE_BUSY", {}) ?? "", /five minutes alone does not invalidate/);
 });
