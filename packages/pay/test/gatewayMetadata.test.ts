@@ -83,7 +83,7 @@ test("gateway refusals that this CLI can act on name the flag, and the retryable
       error.details.retryable === true && /retry/i.test(error.remediation));
 });
 
-test("no code path constructs a sending wallet client or a transaction", () => {
+test("no generic wallet transaction client is constructed; Circle reviews use their scoped subprocess policy", () => {
   let directory = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 6 && !statSync(join(directory, "src"), { throwIfNoEntry: false })?.isDirectory(); depth += 1) {
     directory = dirname(directory);

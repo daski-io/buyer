@@ -1,3 +1,4 @@
+import { EAS_REVIEW_PROFILES } from "../src/chain/easProfiles.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -15,13 +16,13 @@ import { CliError } from "../src/cli/errors.js";
 
 const account = privateKeyToAccount(`0x${"11".repeat(32)}`);
 const ZERO_UID = `0x${"00".repeat(32)}` as Hex;
-const facts: ConfirmationFacts = { chainId: 84532, eas: "0x2222222222222222222222222222222222222222",
+const facts: ConfirmationFacts = { profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: "0x2222222222222222222222222222222222222222",
   schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
   orderKey: canonicalHash("order"), recipient: account.address,
   currentUid: canonicalHash("previous review"), nonce: "4", submissionsUsed: 1 };
 function preparation() {
   const now = Math.floor(Date.now() / 1000);
-  return { preparationId: "preparation-fixture", orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 1,
+  return { preparationId: "preparation-fixture", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: String(now + 300), admissionExpiresAt: String(now + 300), orderKey: facts.orderKey, currentRefUid: facts.currentUid, submissionsUsed: 1,
     revocationAvailable: true, finalAttestation: false,
     signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: facts.chainId, verifyingContract: facts.eas },
       primaryType: "Attest", types: { Attest: [
@@ -112,4 +113,20 @@ test("review retries preserve the EAS signature and read access uses grant-read 
     if (previous === undefined) delete process.env.DASKI_HOME; else process.env.DASKI_HOME = previous;
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("legacy native signing excludes value and deadline, and never trusts gateway domain/types", () => {
+  const f = { ...facts, chainId: 8453, profile: EAS_REVIEW_PROFILES[8453]! };
+  const modern = preparation();
+  const { deadline: _deadline, value: _value, ...message } = modern.signableTypedData.message;
+  const p = { ...modern, profileId: f.profile.id, domainVersion: "1.0.1", signedDeadline: null,
+    signableTypedData: { ...modern.signableTypedData,
+      domain: { ...modern.signableTypedData.domain, chainId: 8453, version: "1.0.1" },
+      types: { Attest: modern.signableTypedData.types.Attest.filter(field => field.name !== "value" && field.name !== "deadline") }, message } };
+  const typed = validateConfirmationPreparation(p, f, "Confirmed", false);
+  assert.equal(typed.message.deadline, undefined);
+  assert.equal(typed.message.value, undefined);
+  assert.throws(() => validateConfirmationPreparation({ ...p, signedDeadline: "0" }, f, "Confirmed", false));
+  assert.throws(() => validateConfirmationPreparation({ ...p, signableTypedData: modern.signableTypedData }, f, "Confirmed", false));
+  assert.throws(() => validateConfirmationPreparation({ ...p, signableTypedData: { ...p.signableTypedData, message: { ...message, deadline: "0" } } }, f, "Confirmed", false));
 });

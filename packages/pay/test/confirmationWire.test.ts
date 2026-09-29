@@ -1,3 +1,4 @@
+import { EAS_REVIEW_PROFILES } from "../src/chain/easProfiles.js";
 /**
  * The confirmation requests this CLI sends, proved against the gateway's
  * closed request shapes vendored under test/fixtures/gateway-wire/: every
@@ -32,6 +33,9 @@ function fixtureDirectory(): string {
 
 interface Shapes {
   schemaVersion: number;
+  directShapes: Record<"confirmation" | "revoke-confirmation", { prepare: string[]; submit: string[]; check: string[] }>;
+  reviewProtocol: number;
+  reaffirm: string[];
   submissionModes: string[];
   sponsoredRequires: string;
   shapes: Record<"confirmation" | "revoke-confirmation", { prepare: string[]; submit: string[]; check: string[] }>;
@@ -47,7 +51,7 @@ const TX = `0x${"aa".repeat(32)}` as Hex;
 const BLOCK_42 = canonicalHash("block-42");
 const BLOCK_50 = canonicalHash("block-50");
 const facts: ConfirmationFacts = {
-  chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
+  profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
   orderKey: canonicalHash("order"), recipient: RECIPIENT, currentUid: ZERO_UID, nonce: "0", submissionsUsed: 0,
 };
 const active = { ...facts, currentUid: UID, submissionsUsed: 1 };
@@ -65,7 +69,7 @@ function directCall(action: "attest" | "revoke", f: ConfirmationFacts) {
 function sponsoredPreparation(action: "attest" | "revoke", f: ConfirmationFacts) {
   const deadline = String(Math.floor(Date.now() / 1000) + 300);
   const common = { schema: f.schemaUid, value: "0", nonce: f.nonce, deadline };
-  return { preparationId: "prep", orderKey: f.orderKey, currentRefUid: f.currentUid, submissionsUsed: f.submissionsUsed, finalAttestation: false,
+  return { preparationId: "prep", profileId: "eas-native-1.2.0", domainVersion: "1.2.0", signedDeadline: deadline, admissionExpiresAt: deadline, orderKey: f.orderKey, currentRefUid: f.currentUid, submissionsUsed: f.submissionsUsed, finalAttestation: false,
     signableTypedData: { domain: { name: "EAS", version: "1.2.0", chainId: f.chainId, verifyingContract: f.eas },
       types: action === "attest"
         ? { Attest: [{ name: "schema", type: "bytes32" }, { name: "recipient", type: "address" }, { name: "expirationTime", type: "uint64" }, { name: "revocable", type: "bool" }, { name: "refUID", type: "bytes32" }, { name: "data", type: "bytes" }, { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint64" }] }
@@ -133,8 +137,8 @@ async function withStore(run: () => Promise<void>): Promise<void> {
 }
 
 const keysOf = (request: Record<string, unknown>) => Object.keys(request).sort();
-const shape = (action: "attest" | "revoke", phase: "prepare" | "submit" | "check") =>
-  [...shapes.shapes[action === "attest" ? "confirmation" : "revoke-confirmation"][phase]].sort();
+const shape = (action: "attest" | "revoke", phase: "prepare" | "submit" | "check", direct = false) =>
+  [...(direct ? shapes.directShapes : shapes.shapes)[action === "attest" ? "confirmation" : "revoke-confirmation"][phase]].sort();
 
 test("the vendored shapes are the gateway's current ones", () => {
   assert.equal(shapes.schemaVersion, 1);
@@ -166,8 +170,8 @@ for (const action of ["attest", "revoke"] as const) {
       const checked = await confirmOrder(context, findByIntent("intent")!, { handle: "handle", json: true, check: true });
       assert.equal(checked.state, "observed");
       assert.deepEqual(sent.map((entry) => entry.request.phase), ["prepare", "check"]);
-      assert.deepEqual(keysOf(sent[0]!.request), shape(action, "prepare"), "prepare");
-      assert.deepEqual(keysOf(sent[1]!.request), shape(action, "check"), "check");
+      assert.deepEqual(keysOf(sent[0]!.request), shape(action, "prepare", true), "prepare");
+      assert.deepEqual(keysOf(sent[1]!.request), shape(action, "check", true), "check");
       assert.equal(sent[0]!.request.submission, "direct");
       assert.equal(sent[1]!.request.submission, "direct");
     });

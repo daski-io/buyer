@@ -39,3 +39,14 @@ doctor's pending-conformance warning; the gateway's `signerClis.circle-agent`
 moves to the version the run used, together with its pin on this package and
 the harness pin. Base mainnet additionally requires
 `CONFORMANCE_EVIDENCE_RECORDED=1` next to that evidence.
+
+## Direct review execution qualification
+
+Circle signing conformance does not qualify the new execution adapter. Keep
+confirmation.directReview.circleExecute disabled until an explicitly authorized
+live run records the shipped buyer and Circle entrypoint versions, estimation,
+callHash-approved submit, timeout/read-only resume, replacement or revocation,
+and intent-bound finalized EAS evidence. Use the [direct review workflow](direct-reviews.md).
+If vendor history cannot expose an exact-call transaction ID or idempotency-key
+mapping after a timeout, record that limitation and retain the unresolved journal;
+do not manufacture a fresh key or claim execution conformance from estimation.

@@ -42,7 +42,11 @@ export interface ReadCapability {
 /** A sponsored review submission retained for retries while sponsorship is pending. */
 export interface ConfirmationSubmissionRecord {
   action: "confirmation" | "revoke-confirmation";
-  request: { phase: "submit"; submission: "sponsored"; preparationId: string; signature: string };
+  request: { phase: "submit"; submission: "sponsored"; preparationId: string; signature: string; reviewProtocol?: 2 };
+  operationId?: string;
+  profileId?: string;
+  typedData?: import("@daski/x402-scheme").TypedDataRequest;
+  lastDisposition?: Record<string, unknown>;
 }
 
 export type ConfirmationTxState = "prepared" | "submitted" | "observed" | "abandoned";
@@ -68,6 +72,12 @@ export interface ConfirmationTxRecord {
   action: "attest" | "revoke";
   callHash: Hex;
   expected: ConfirmationTxExpected;
+  call?: import("../commands/confirmation.js").DirectCall;
+  choice?: "Confirmed" | "NotConfirmed" | "revoke";
+  vendor?: {
+    provider: "circle-agent"; packageVersion: string; idempotencyKey: string; wallet: Address; chainId: number;
+    submissionStarted: string; transactionId?: string; hashes: Hex[];
+  };
   txHash?: Hex | undefined;
   state: ConfirmationTxState;
   /** The attestation the observed receipt created or revoked. */
@@ -93,6 +103,8 @@ export interface OrderRecord {
   authorizationNonce?: string | undefined;
   readCapability?: ReadCapability | undefined;
   confirmationSubmission?: ConfirmationSubmissionRecord | undefined;
+  /** Immutable signed submissions retained after final or safely retired disposition. */
+  confirmationHistory?: { submission: ConfirmationSubmissionRecord; outcome: Record<string, unknown>; archivedAt: string }[];
   /** The direct-mode confirmation in flight or last observed, if any. */
   confirmationTx?: ConfirmationTxRecord | undefined;
   createdAt: string;

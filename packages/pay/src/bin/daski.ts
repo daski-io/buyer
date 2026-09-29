@@ -173,10 +173,13 @@ async function main(argv: string[]): Promise<number> {
         case "confirm":
         case "revoke-confirmation":
           assertKnownFlags(flags, [...GLOBAL_FLAGS, "choice", "resume", "acknowledge-final-transition",
-            "submission", "tx", "check", "abandon"]);
+            "submission", "tx", "check", "abandon", "reaffirm", "supersedes-operation", "supersedes-preparation", "acknowledge-same-nonce", "estimate", "submit", "approve-call"]);
           emit(await orderConfirm({ ...base, confirmation: stringFlag(flags, "choice"),
             revoke: command[1] === "revoke-confirmation", resume: boolFlag(flags, "resume"),
             acknowledgeFinalTransition: boolFlag(flags, "acknowledge-final-transition"),
+            estimate: boolFlag(flags, "estimate"), submit: boolFlag(flags, "submit"), approveCallHash: stringFlag(flags, "approve-call"),
+            reaffirm: boolFlag(flags, "reaffirm"), supersedesOperationId: stringFlag(flags, "supersedes-operation"),
+            supersedesPreparationId: stringFlag(flags, "supersedes-preparation"), acknowledgeSameNonce: boolFlag(flags, "acknowledge-same-nonce"),
             submission: stringFlag(flags, "submission"), tx: stringFlag(flags, "tx"),
             check: boolFlag(flags, "check"), abandon: boolFlag(flags, "abandon") }), output);
           return 0;

@@ -12,7 +12,7 @@ The buyer side of Daski: a CLI for purchasing service outcomes and the x402 clie
 Install the release pinned by your gateway, state where the CLI runs, then diagnose the existing configuration before choosing a signer:
 
 ```bash
-npm install -g @daski/pay@0.4.6
+npm install -g @daski/pay@0.5.0
 export DASKI_HOST_CLASS=durable   # or ephemeral on an agent-managed, shared, or resettable host
 daski doctor --json
 ```
@@ -47,7 +47,7 @@ daski order confirm <handle> --choice Confirmed|NotConfirmed --json
 daski order revoke-confirmation <handle> --json
 ```
 
-The CLI picks the mode by signer. Plain wallets are sponsored: the CLI rebuilds the review message from chain facts, the wallet signs, and Daski submits it; on `CONFIRMATION_SUBMISSION_PENDING` run `--resume`. Contract wallets submit directly: the CLI validates the prepared EAS call against chain facts and the profile's pinned EAS address, prints it, and sends nothing; submit it with the wallet's own tool, then `--tx <hash>` records it and `--check` verifies the receipt in the canonical chain, the attestation that binds to the prepared call, and the gateway's finalized read at or past the receipt's block. A hash recorded by mistake can be replaced or abandoned once its transaction is finalized, canonical, and provably unrelated; a revert is abandoned once its block is finalized. Up to three confirmations can be submitted per order; the current one can always be revoked.
+The CLI picks the mode by signer. Plain wallets are sponsored: the CLI rebuilds the review message from chain facts, the wallet signs, and Daski submits it; on `CONFIRMATION_SUBMISSION_PENDING` run `--resume`. Contract wallets prepare a direct call: the CLI validates the prepared EAS call against chain facts and the profile's pinned EAS address, prints it, and sends nothing by default. Circle can estimate with --estimate and explicitly submit with --submit --approve-call <callHash> after separate execution qualification; submit it with the wallet's own tool, then `--tx <hash>` records it and `--check` verifies the receipt in the canonical chain, the attestation that binds to the prepared call, and the gateway's finalized read at or past the receipt's block. A hash recorded by mistake can be replaced or abandoned once its transaction is finalized, canonical, and provably unrelated; a revert is abandoned once its block is finalized. Up to three confirmations can be submitted per order; the current one can always be revoked.
 
 ## Spending settings
 
