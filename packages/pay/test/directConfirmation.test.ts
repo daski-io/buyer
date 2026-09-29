@@ -1060,3 +1060,69 @@ test("candidate Circle execution requires explicit testnet spend consent and nev
     if (saved === undefined) delete process.env.DASKI_CONFORMANCE_SPEND_OK; else process.env.DASKI_CONFORMANCE_SPEND_OK = saved;
   }
 });
+
+test("an upgraded buyer explicitly replaces an expired unadmitted pre-protocol journal and preserves its original signature", async () => {
+  await withStore(async record => {
+    const { context, gateway, calls } = fixture("eoa");
+    const historicalId = "00000000-0000-4000-8000-000000000101";
+    const replacementId = "00000000-0000-4000-8000-000000000201";
+    const oldTyped = structuredClone(sponsoredAttestPreparation().signableTypedData) as TypedDataRequest;
+    oldTyped.message.deadline = String(Math.floor(Date.now() / 1000) - 600);
+    const oldSignature = await payer.signTypedData(oldTyped as never);
+    // This is the persisted shape from the old buyer: no protocol, operation,
+    // profile, or typed-data fields were recorded before the submit response.
+    const historical = { action: "confirmation" as const, request: { phase: "submit" as const, submission: "sponsored" as const,
+      preparationId: historicalId, signature: oldSignature } };
+    upsertOrder({ ...record, confirmationSubmission: historical });
+    gateway.prepared = { ...sponsoredAttestPreparation(), preparationId: replacementId };
+    const originalCall = context.client.callTool;
+    const originalSign = context.signer.signTypedData.bind(context.signer);
+    const innerSignatures: TypedDataRequest[] = [];
+    context.signer.signTypedData = async data => {
+      if (data.primaryType === "Attest") innerSignatures.push(data);
+      return originalSign(data);
+    };
+    const submissions: Record<string, unknown>[] = [];
+    context.client.callTool = async (name, args) => {
+      const request = args.request as Record<string, unknown>;
+      if (args.authorization && request.phase === "prepare") {
+        assert.deepEqual({ ...request }, { phase: "prepare", submission: "sponsored", reviewProtocol: 2,
+          supersedesPreparationId: historicalId, acknowledgeSameNonce: true,
+          confirmation: "Confirmed", acknowledgeFinalTransition: false });
+        // The gateway separately proves final-chain expiry before returning
+        // this replacement. The buyer never infers expiry from its own clock.
+      }
+      if (args.authorization && request.phase === "submit") {
+        submissions.push(request);
+        return request.preparationId === historicalId
+          ? { content: [], isError: true, structuredContent: { code: "CONFIRMATION_CLIENT_UPGRADE_REQUIRED" } }
+          : { content: [], isError: true, structuredContent: { code: "CONFIRMATION_SUBMISSION_PENDING",
+            expected: { operationId: "replacement-operation" } } };
+      }
+      return originalCall(name, args);
+    };
+    await assert.rejects(confirmOrder(context, current(), { ...options, resume: true }, factsReader()),
+      code("CONFIRMATION_CLIENT_UPGRADE_REQUIRED"));
+    assert.deepEqual(submissions[0], historical.request, "resume does not rewrite the old signed request");
+    assert.equal(current().confirmationSubmission!.request.signature, oldSignature);
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed" }, factsReader()),
+      code("DASKI_CONFIRMATION_PENDING"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "Confirmed",
+      supersedesPreparationId: historicalId }, factsReader()));
+    assert.equal(innerSignatures.length, 0, "a blocked legacy journal cannot silently obtain another signature");
+    const replaced = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed",
+      supersedesPreparationId: historicalId, acknowledgeSameNonce: true }, factsReader());
+    assert.equal(replaced.status, "pending");
+    assert.equal(replaced.operationId, "replacement-operation");
+    assert.equal(calls.filter(call => call.request.phase === "prepare").length, 1);
+    assert.equal(innerSignatures.length, 1);
+    assert.deepEqual(innerSignatures[0], gateway.prepared.signableTypedData);
+    assert.equal(submissions[1]!.reviewProtocol, 2);
+    assert.equal(submissions[1]!.preparationId, replacementId);
+    assert.notEqual(submissions[1]!.signature, oldSignature);
+    assert.equal(current().confirmationSubmission!.operationId, "replacement-operation");
+    assert.equal(current().confirmationSubmission!.profileId, "eas-native-1.2.0");
+    assert.deepEqual(current().confirmationHistory![0]!.submission.request, historical.request);
+    assert.equal(current().confirmationHistory![0]!.submission.operationId, undefined);
+  });
+});
