@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.1 — unreleased
+
+### @daski/pay
+
+- Patch the transitive fast-uri dependency to include its host parsing fix.
+- Refresh the compact Bazaar discovery fixtures paired with the gateway.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.5.0 — unreleased
 
 ### @daski/pay
