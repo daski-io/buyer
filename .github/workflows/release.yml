@@ -32,7 +32,7 @@ permissions:
   id-token: write   # npm trusted publishing (OIDC) and provenance
 
 concurrency:
-  group: publish-${{ inputs.package }}-${{ github.ref }}
+  group: publish-workflow-${{ inputs.package }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
