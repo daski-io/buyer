@@ -6,7 +6,7 @@ on:
   # here: production promotion reads that run as the proof for the exact
   # commit it fast-forwards main to.
   push:
-    branches: [main, sandbox, develop]
+    branches: [main, sandbox, develop, 'hotfix/**']
   pull_request:
 
 permissions:

@@ -32,6 +32,7 @@ const INTENT_ID = "int_00000000-0000-4000-8000-000000000002";
 const PAYER = `0x${"a".repeat(40)}` as Address;
 
 function fixtureDirectory(): string {
+  if (process.env.DASKI_GATEWAY_WIRE_FIXTURES) return process.env.DASKI_GATEWAY_WIRE_FIXTURES;
   let directory = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 8; depth += 1) {
     const candidate = join(directory, "test", "fixtures", "gateway-wire");

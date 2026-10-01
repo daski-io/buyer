@@ -22,6 +22,7 @@ import { DEFAULT_CONFIG, EAS_PREDEPLOY } from "../src/config.js";
 import { findByIntent, upsertOrder } from "../src/store/orders.js";
 
 function fixtureDirectory(): string {
+  if (process.env.DASKI_GATEWAY_WIRE_FIXTURES) return process.env.DASKI_GATEWAY_WIRE_FIXTURES;
   let directory = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 8; depth += 1) {
     const candidate = join(directory, "test", "fixtures", "gateway-wire");

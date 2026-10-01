@@ -3,6 +3,15 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## Release tooling — unreleased
+
+- Prepare exact source tags only after CI and explicit coordinator handover.
+- Record published package source, integrity and registry attestation reference;
+  preserve the pinned scheme publication barrier.
+- Allow the compatibility runner to supply the exact gateway fixture set to
+  offline tests. This tooling change does not alter package runtime bytes or
+  allocate a new package version.
+
 ## 0.5.1 — unreleased
 
 ### @daski/pay

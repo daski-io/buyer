@@ -2,6 +2,8 @@ name: Release
 run-name: ${{ inputs.release_attempt || format('Publish {0}', inputs.package) }}
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       release_attempt:
@@ -35,6 +37,14 @@ concurrency:
 
 jobs:
   publish:
+    if: github.event_name == 'workflow_dispatch' || vars.RELEASE_ENGINE_HANDOVER == 'enabled'
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.package)) || fromJSON('["@daski/x402-scheme","@daski/pay"]') }}
+    concurrency:
+      group: publish-${{ matrix.package }}-${{ github.ref }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +59,7 @@ jobs:
       - run: npm test
       - run: node scripts/package-artifacts.mjs --verify .scratch/package-proof/proof.json
       - name: Prove the exact scheme dependency before CLI publication
-        if: inputs.package == '@daski/pay'
+        if: matrix.package == '@daski/pay'
         run: node scripts/wait-for-scheme.mjs
 
       # Trusted publishing: npm exchanges this job's OIDC token for a short-lived
@@ -57,8 +67,14 @@ jobs:
       # lists this repository and workflow as its trusted publisher on
       # npmjs.com (Settings -> Trusted publishing -> GitHub Actions:
       # daski-io / buyer / release.yml). Provenance is generated automatically.
+      - name: Observe existing immutable publication
+        id: publication
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: node scripts/publication-status.mjs
       - name: Publish with provenance
-        run: npm publish --workspace "${{ inputs.package }}" --tag "${{ inputs.dist_tag }}" --provenance --access public
+        if: steps.publication.outputs.publish == 'true'
+        run: npm publish --workspace "${{ matrix.package }}" --tag "${{ inputs.dist_tag || 'next' }}" --provenance --access public
 
       # Per §5: a SHA256SUMS file ships with every release so installers can
       # verify what they got against what was published.
@@ -72,9 +88,18 @@ jobs:
           tarball="$(npm pack --silent)"
           sha256sum "$tarball" | tee SHA256SUMS
         env:
-          PACKAGE: ${{ inputs.package }}
+          PACKAGE: ${{ matrix.package }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sha256sums
+          name: sha256sums-${{ strategy.job-index }}
           path: packages/*/SHA256SUMS
+      - name: Record published package identity
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: node scripts/publication-record.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buyer-publication-${{ strategy.job-index }}-${{ github.sha }}
+          path: package-publication.json
+          if-no-files-found: error

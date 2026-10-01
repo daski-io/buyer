@@ -1,0 +1,29 @@
+name: Source release
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [develop, 'hotfix/**']
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: source-publication
+  cancel-in-progress: false
+jobs:
+  tag:
+    if: vars.RELEASE_ENGINE_HANDOVER == 'enabled' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Tag the tested source without a generated release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: node scripts/source-release.mjs
