@@ -3,6 +3,13 @@ import {readFileSync} from "node:fs";
 import {execFileSync} from "node:child_process";
 import {resolve} from "node:path";
 import {fileURLToPath} from "node:url";
+// Include package contents and every shared input used by the pinned tsc/npm
+// build. Comparing package trees is deliberately conservative: a same-version
+// source release is a no-op only when its publishable inputs are unchanged.
+export const PACKAGE_INPUTS=[
+ "packages/pay","packages/x402-scheme","package.json","package-lock.json",
+ ".npmrc",".npmignore",":(glob)tsconfig*.json",":(glob)LICENSE*",":(glob)README*",
+];
 export function sourceRelease({exec=execFileSync,read=readFileSync,env=process.env}={}) {
 const commit=env.SOURCE_SHA,repo=env.GITHUB_REPOSITORY;
 if(!/^[a-f0-9]{40}$/.test(commit??"") || repo!=="daski-io/buyer") throw new Error("Exact trusted source release identity required");
@@ -24,6 +31,11 @@ if(refs.trim()) {
   for(const path of ["packages/pay/package.json","packages/x402-scheme/package.json"]) {
    const manifest=JSON.parse(exec("git",["show",actual+":"+path],{encoding:"utf8"}));
    if(manifest.version!==pay.version)throw new Error("Existing version tag does not describe these package versions");
+  }
+  try {
+   exec("git",["diff","--quiet",actual,commit,"--",...PACKAGE_INPUTS],{stdio:["ignore","pipe","pipe"]});
+  } catch {
+   throw new Error("Package contents or build inputs changed since "+tag+"; bump both package versions and the exact scheme pin before source publication");
   }
   return {status:"UNCHANGED_VERSION",tag,commit:actual};
  }
