@@ -4,7 +4,7 @@
  * Unknown code, domains or type hashes fail before a payer signs anything.
  */
 import { hashDomain, keccak256, parseAbi, type Address, type Hex } from "viem";
-import type { ChainReader } from "./reader.js";
+import { readContracts, type ChainReader } from "./reader.js";
 import { CliError } from "../cli/errors.js";
 
 export type EasReviewProfileId = "eas-native-1.0.1" | "eas-native-1.2.0";
@@ -47,11 +47,12 @@ export async function discoverEasReviewProfile(chain: ChainReader, chainId: numb
   const profile = EAS_REVIEW_PROFILES[chainId];
   if (!profile || eas.toLowerCase() !== "0x4200000000000000000000000000000000000021" || !chain.getStorageAt) throw incompatibleEas();
   const blockNumber = await chain.getFinalBlockNumber();
-  const [slot, code, version, domain, attest, revoke] = await Promise.all([
+  const [slot, code, [version, domain, attest, revoke]] = await Promise.all([
     chain.getStorageAt(eas, IMPLEMENTATION_SLOT, blockNumber),
     chain.getCode(profile.implementation, blockNumber),
-    ...["version", "getDomainSeparator", "getAttestTypeHash", "getRevokeTypeHash"].map(functionName =>
-      chain.readContract<string>({ address: eas, abi: EAS_IDENTITY_ABI, functionName, args: [], blockNumber })),
+    // One batched eth_call: a public RPC refuses a burst of separate ones.
+    readContracts(chain, ["version", "getDomainSeparator", "getAttestTypeHash", "getRevokeTypeHash"].map(functionName =>
+      ({ address: eas, abi: EAS_IDENTITY_ABI, functionName, args: [] })), blockNumber) as Promise<readonly (string | undefined)[]>,
   ]);
   if (!slot || !code || code === "0x" || slot.slice(-40).toLowerCase() !== profile.implementation.slice(2).toLowerCase() ||
       keccak256(code) !== profile.codeHash || version !== profile.contractVersion ||

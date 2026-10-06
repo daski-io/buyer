@@ -51,7 +51,7 @@ import {
 } from "viem";
 import { discoverEasReviewProfile, type EasReviewProfile } from "../chain/easProfiles.js";
 import type { ChainReader, TransactionReceiptLike } from "../chain/reader.js";
-import { finalityTagFor } from "../chain/reader.js";
+import { finalityTagFor, readContracts } from "../chain/reader.js";
 import { CliError } from "../cli/errors.js";
 import type { CommandContext } from "../context.js";
 import { callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
@@ -1035,12 +1035,16 @@ export async function readConfirmationFacts(context: CommandContext, record: Ord
   if (pins.chainId !== context.profile.chainId) throw invalidPreparation();
   if (!isAddressEqual(pins.eas, context.profile.easAddress)) throw easAddressMismatch(pins.eas, context.profile.easAddress, context.profile.chainId);
   const orderKey = status.orderKey as Hex;
-  const [current, nonce, profile] = await Promise.all([
-    context.chain.readContract<{
+  // The record and nonce share one batched eth_call, and the profile check
+  // another: a public RPC refuses a burst of separate ones.
+  const [[current, nonce], profile] = await Promise.all([
+    readContracts(context.chain, [
+      { address: pins.reputationStorage, abi: REPUTATION_ABI, functionName: "getRecord", args: [orderKey] },
+      { address: pins.eas, abi: EAS_ABI, functionName: "getNonce", args: [context.payerAddress] },
+    ]) as Promise<readonly [{
       orderKey: Hex; providerAgentId: bigint; payer: Address; providerOwner: Address; providerAgentWallet: Address;
       confirmationSubmissions: number; outcomeRecorded: boolean; reputationEligible: boolean; currentConfirmationUid: Hex;
-    }>({ address: pins.reputationStorage, abi: REPUTATION_ABI, functionName: "getRecord", args: [orderKey] }),
-    context.chain.readContract<bigint>({ address: pins.eas, abi: EAS_ABI, functionName: "getNonce", args: [context.payerAddress] }),
+    }, bigint]>,
     profileReader(context.chain, pins.chainId, pins.eas),
   ]);
   if (current.orderKey !== orderKey || getAddress(current.payer) !== context.payerAddress ||

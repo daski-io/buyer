@@ -9,17 +9,33 @@
  *
  * The reader is an interface so `doctor` and the confirmation flow can be
  * exercised against a scripted chain in tests.
+ *
+ * Public RPCs admit only a few `eth_call`s per client in a short window and
+ * refuse the rest (https://mainnet.base.org among them), so a command that
+ * needs several contract values reads them through `readContracts`: one call.
  */
 import {
-  createPublicClient, http, HttpRequestError, TimeoutError, BaseError,
+  createPublicClient, http, HttpRequestError, RpcError, RpcRequestError, TimeoutError, BaseError,
   type Abi, type Address, type Hex,
 } from "viem";
 import { CliError } from "../cli/errors.js";
+import { redactRpcUrl } from "../cli/redact.js";
 
 /** The bound on one `eth_call` used to verify a contract signature. */
 export const ERC1271_CALL_GAS = 1_000_000n;
 /** One deadline covering the code lookup and the call. */
 export const ERC1271_CALL_TIMEOUT_MS = 5_000;
+
+/** Multicall3 at its address on every chain that carries it; Base and Base Sepolia preinstall it. */
+export const MULTICALL3_ADDRESS: Address = "0xcA11bde05977b3631167028862bE2a173976CA11";
+
+/** One contract read in a batch. */
+export interface ContractRead {
+  address: Address;
+  abi: Abi;
+  functionName: string;
+  args: readonly unknown[];
+}
 
 export interface ReceiptLog {
   address: Address;
@@ -69,16 +85,86 @@ export interface ChainReader {
   getBlockHash(blockNumber: bigint): Promise<Hex>;
   /** A contract read, at the latest state or pinned to a block number. */
   readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[]; blockNumber?: bigint }): Promise<T>;
+  /**
+   * Contract reads answered together by one Multicall3 `eth_call`, in order,
+   * at the latest state or pinned to a block number. Callers go through
+   * `readContracts`, which reads one at a time from a reader without it.
+   */
+  readContracts?(args: { reads: readonly ContractRead[]; blockNumber?: bigint }): Promise<readonly unknown[]>;
 }
 
-function rpcUnavailable(rpcUrl: string, error: unknown): CliError {
+/** Several contract reads in one call where the reader batches, otherwise one at a time; results keep their order. */
+export function readContracts(chain: ChainReader, reads: readonly ContractRead[], blockNumber?: bigint): Promise<readonly unknown[]> {
+  const pinned = blockNumber === undefined ? {} : { blockNumber };
+  if (chain.readContracts) return chain.readContracts({ reads, ...pinned });
+  return Promise.all(reads.map((read) => chain.readContract({ ...read, ...pinned })));
+}
+
+/** JSON-RPC codes that refuse a client over its rate: EIP-1474's limit exceeded, and proxyd's (Base's public RPC). */
+const RATE_LIMIT_CODES: ReadonlySet<number> = new Set([-32005, -32016]);
+
+interface RpcAnswer { status?: number; code?: number; message?: string }
+
+/** What the RPC answered, when it answered: the HTTP status and the JSON-RPC error. */
+function rpcAnswer(error: unknown): RpcAnswer {
+  if (!(error instanceof BaseError)) return {};
+  const answer: RpcAnswer = {};
+  const failed = error.walk((cause) => cause instanceof HttpRequestError);
+  if (failed instanceof HttpRequestError) {
+    if (failed.status !== undefined) answer.status = failed.status;
+    // A refused HTTP request carries the body's JSON-RPC error, if any, as its details.
+    try {
+      const body = JSON.parse(failed.details) as { code?: unknown; message?: unknown };
+      if (typeof body.code === "number") answer.code = body.code;
+      if (typeof body.message === "string") answer.message = body.message;
+    } catch {
+      if (failed.details) answer.message = failed.details;
+    }
+  }
+  const refused = error.walk((cause) => cause instanceof RpcError || cause instanceof RpcRequestError);
+  if (refused instanceof RpcError || refused instanceof RpcRequestError) {
+    answer.code = refused.code;
+    if (refused.details) answer.message = refused.details;
+  }
+  return answer;
+}
+
+function isRateLimited(answer: RpcAnswer): boolean {
+  return answer.status === 429 || (answer.code !== undefined && RATE_LIMIT_CODES.has(answer.code)) ||
+    /rate.?limit|too many requests/i.test(answer.message ?? "");
+}
+
+function describeAnswer(answer: RpcAnswer): string {
+  const head = [answer.status === undefined ? "" : `HTTP ${answer.status}`,
+    answer.code === undefined ? "" : `RPC error ${answer.code}`].filter(Boolean).join(", ");
+  return head && answer.message ? `${head}: ${answer.message}` : head || answer.message || "";
+}
+
+/** A failed read, named for what the RPC said; the endpoint is printed without the path or query a key may sit in. */
+function rpcFailure(rpcUrl: string, error: unknown): CliError {
+  const answer = rpcAnswer(error);
+  const answered = describeAnswer(answer);
+  const details = { retryable: true, ...(answer.status === undefined ? {} : { httpStatus: answer.status }),
+    ...(answer.code === undefined ? {} : { rpcErrorCode: answer.code }) };
+  if (isRateLimited(answer)) {
+    return new CliError({
+      code: "DASKI_RPC_RATE_LIMITED",
+      message: `The RPC at ${redactRpcUrl(rpcUrl)} refused the read over its rate limit (${answered || "rate limited"}).`,
+      remediation:
+        "Nothing was decided from this read. Wait several seconds before re-running and do not retry in a " +
+        "loop: the endpoint counts refused reads too. Public endpoints such as https://mainnet.base.org admit " +
+        "only a few reads per client; set rpcUrl for the profile to a dedicated endpoint.",
+      details,
+    });
+  }
+  const first = error instanceof Error ? error.message.split("\n")[0] : String(error);
   return new CliError({
     code: "DASKI_RPC_UNAVAILABLE",
-    message: `The RPC at ${rpcUrl} did not answer: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+    message: `The RPC at ${redactRpcUrl(rpcUrl)} did not answer: ${first}${answered ? ` (${answered})` : ""}`,
     remediation:
       "Nothing was decided from this read. Check connectivity or set a working rpcUrl for " +
       "the profile, then re-run.",
-    details: { retryable: true },
+    details,
   });
 }
 
@@ -95,20 +181,20 @@ export function createChainReader(rpcUrl: string, finalityTag: FinalityTag, time
       try {
         return await client.getCode({ address, ...(blockNumber === undefined ? {} : { blockNumber }) });
       } catch (error) {
-        throw rpcUnavailable(rpcUrl, error);
+        throw rpcFailure(rpcUrl, error);
       }
     },
     async getStorageAt(address, slot, blockNumber) {
       try { return await client.getStorageAt({ address, slot, blockNumber }); }
-      catch (error) { throw rpcUnavailable(rpcUrl, error); }
+      catch (error) { throw rpcFailure(rpcUrl, error); }
     },
     async call({ to, data, gas }) {
       try {
         const result = await client.call({ to, data, gas });
         return { data: result.data, reverted: false };
       } catch (error) {
-        // A transport failure is unknown, never invalid; a revert is a final answer.
-        if (isTransportFailure(error)) throw rpcUnavailable(rpcUrl, error);
+        // A transport failure or a refusal is unknown, never invalid; a revert is a final answer.
+        if (isTransportFailure(error) || isRateLimited(rpcAnswer(error))) throw rpcFailure(rpcUrl, error);
         return { data: undefined, reverted: true };
       }
     },
@@ -126,28 +212,37 @@ export function createChainReader(rpcUrl: string, finalityTag: FinalityTag, time
         if (error instanceof BaseError && error.name === "TransactionReceiptNotFoundError") return null;
         if (error instanceof BaseError &&
             error.walk((cause) => (cause as Error).name === "TransactionReceiptNotFoundError") !== null) return null;
-        throw rpcUnavailable(rpcUrl, error);
+        throw rpcFailure(rpcUrl, error);
       }
     },
     async getFinalBlockNumber() {
       try {
         return (await client.getBlock({ blockTag: finalityTag })).number;
       } catch (error) {
-        throw rpcUnavailable(rpcUrl, error);
+        throw rpcFailure(rpcUrl, error);
       }
     },
     async getBlockHash(blockNumber) {
       try {
         return (await client.getBlock({ blockNumber })).hash;
       } catch (error) {
-        throw rpcUnavailable(rpcUrl, error);
+        throw rpcFailure(rpcUrl, error);
       }
     },
     async readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[]; blockNumber?: bigint }) {
       try {
         return await client.readContract(args as never) as T;
       } catch (error) {
-        throw rpcUnavailable(rpcUrl, error);
+        throw rpcFailure(rpcUrl, error);
+      }
+    },
+    async readContracts({ reads, blockNumber }) {
+      try {
+        // batchSize 0: never split the batch, so it stays one eth_call.
+        return await client.multicall({ contracts: reads as never, allowFailure: false, batchSize: 0,
+          multicallAddress: MULTICALL3_ADDRESS, ...(blockNumber === undefined ? {} : { blockNumber }) }) as readonly unknown[];
+      } catch (error) {
+        throw rpcFailure(rpcUrl, error);
       }
     },
   };

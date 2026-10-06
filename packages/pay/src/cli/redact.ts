@@ -13,7 +13,9 @@
  * already get a key into a printed field can trivially reshape it.
  *
  * So the signals used here are the ones that actually discriminate: the field
- * name a value arrived under, and the unmistakable shape of a seed phrase.
+ * name a value arrived under, and the unmistakable shape of a seed phrase. An
+ * `rpcUrl` keeps only its scheme and host, since providers embed API keys in
+ * the rest.
  */
 
 /** BIP-39 style phrases: twelve or more lowercase words in a row. */
@@ -42,10 +44,25 @@ export interface RedactOptions {
   fieldName?: string | undefined;
 }
 
+/**
+ * An RPC endpoint as it may be printed: scheme and host. Anything past the
+ * host prints as an ellipsis; a bare public endpoint prints unchanged.
+ */
+export function redactRpcUrl(rpcUrl: string): string {
+  try {
+    const url = new URL(rpcUrl);
+    const bare = url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password;
+    return bare ? url.origin : `${url.origin}/…`;
+  } catch {
+    return "[redacted]";
+  }
+}
+
 export function redactValue(value: unknown, options: RedactOptions = {}): unknown {
   const { fieldName } = options;
   if (fieldName && KEYLIKE_FIELDS.has(fieldName.toLowerCase())) return "[redacted]";
   if (options.signatures && fieldName?.toLowerCase() === "signature") return "[redacted]";
+  if (fieldName?.toLowerCase() === "rpcurl" && typeof value === "string") return redactRpcUrl(value);
 
   if (typeof value === "string") return value.replace(MNEMONIC_PATTERN, "[redacted]");
   if (Array.isArray(value)) {

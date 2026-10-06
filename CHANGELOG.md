@@ -3,6 +3,18 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.2 — unreleased
+
+### @daski/pay
+
+- Delivery reviews on Base mainnet work with the default public RPC again. The review preflight read six contract values as six separate `eth_call`s, and `https://mainnet.base.org` admits five per client, so mainnet reviews, revocations, estimates and submissions failed with `DASKI_RPC_UNAVAILABLE` nearly every time, and retrying repeated the refusal. The reads now go through Multicall3 in two calls: the order record and EAS nonce at the latest state, and the EAS identity getters at the final block.
+- A rate-limit refusal (HTTP 429, or JSON-RPC `-32005` or `-32016`) is reported as `DASKI_RPC_RATE_LIMITED`. Every RPC failure now carries the RPC's own answer, such as an archive-state refusal, with `httpStatus` and `rpcErrorCode` in its details. A refused contract-signature check is reported as unknown instead of being read as a revert, which looked like an invalid signature.
+- RPC endpoints are printed as scheme and host only, in errors and in the `doctor` report, since providers put API keys in the rest of the URL.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## Release tooling — unreleased
 
 - Prepare exact source tags only after CI and explicit coordinator handover.

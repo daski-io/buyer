@@ -385,6 +385,26 @@ test("chain facts refuse a gateway whose EAS pin differs from the profile's befo
   });
 });
 
+test("chain facts read the order record and EAS nonce in one batched read when the reader batches", async () => {
+  await withStore(async (record) => {
+    const { context, chain } = fixture("contract");
+    chain.record = { orderKey: facts.orderKey, providerAgentId: 1n, payer: payer.address, providerOwner: REPUTATION,
+      providerAgentWallet: RECIPIENT, confirmationSubmissions: 1, outcomeRecorded: true,
+      reputationEligible: true, currentConfirmationUid: UID };
+    const single = context.chain.readContract;
+    const batches: string[][] = [];
+    context.chain = { ...context.chain,
+      readContract: async () => { throw new Error("an unbatched read"); },
+      readContracts: async ({ reads, blockNumber }) => {
+        batches.push(reads.map((read) => `${read.functionName}${blockNumber === undefined ? "" : `@${blockNumber}`}`));
+        return Promise.all(reads.map((read) => single(read)));
+      } };
+    const read = await readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES[84532]!);
+    assert.deepEqual(read, { ...facts, currentUid: UID, submissionsUsed: 1 });
+    assert.deepEqual(batches, [["getRecord", "getNonce"]], "both at the latest state, in one call");
+  });
+});
+
 test("a wrong successful hash can be corrected or abandoned only once it is finalized and provably not this call", async () => {
   await withStore(async (record) => {
     const { context, chain } = fixture("contract");

@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { redactValue, redactText } from "../src/cli/redact.js";
+import { redactRpcUrl, redactValue, redactText } from "../src/cli/redact.js";
 
 const KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
@@ -90,4 +90,15 @@ test("the fields the CLI exists to print survive redaction", () => {
   };
   const redacted = redactValue(payload) as typeof payload;
   assert.deepEqual(redacted, payload);
+});
+
+test("an RPC endpoint prints as scheme and host, since providers put API keys in the rest", () => {
+  assert.equal(redactRpcUrl("https://mainnet.base.org"), "https://mainnet.base.org", "a bare public endpoint is unchanged");
+  assert.equal(redactRpcUrl("https://base-mainnet.infura.io/v3/0123456789abcdef"), "https://base-mainnet.infura.io/…");
+  assert.equal(redactRpcUrl("https://rpc.example/?apikey=s3cret"), "https://rpc.example/…");
+  assert.equal(redactRpcUrl("https://user:s3cret@rpc.example"), "https://rpc.example/…");
+  assert.equal(redactRpcUrl("not a url s3cret"), "[redacted]");
+  const report = redactValue({ chain: { rpcUrl: "https://base-mainnet.infura.io/v3/0123456789abcdef", chainId: 8453 } }) as
+    { chain: { rpcUrl: string; chainId: number } };
+  assert.deepEqual(report.chain, { rpcUrl: "https://base-mainnet.infura.io/…", chainId: 8453 });
 });

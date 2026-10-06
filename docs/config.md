@@ -47,6 +47,8 @@ The generated file also includes a disabled mainnet profile. Enable it when the 
 
 `rpcUrl` is used for reads only: balances, contract code, receipts, attestations, and the ERC-1271 self-test. The CLI never sends a transaction through it.
 
+Delivery reviews also read contract state at the chain's final block, which on Base mainnet trails the head by tens of minutes, so the endpoint must serve state at that block; some free endpoints refuse such reads as archive requests. Public endpoints also limit how many `eth_call`s one client may make in a short window. The CLI batches the reads behind a review into two calls, but on mainnet a dedicated endpoint is the dependable choice. A refused read is reported as `DASKI_RPC_RATE_LIMITED` or `DASKI_RPC_UNAVAILABLE` with the RPC's own answer; the CLI prints an endpoint only as its scheme and host, since providers put API keys in the rest of the URL.
+
 Version 1 configuration remains readable. Upgrades preserve its values, including old default budgets, because existing files do not record whether the user selected those values. The explicit budget command writes version 2 when changing settings.
 
 <a id="caps"></a>

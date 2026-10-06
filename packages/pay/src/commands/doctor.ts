@@ -17,6 +17,7 @@ import { getAddress, isAddressEqual, type Address } from "viem";
 import type { SignerAdapter } from "@daski/x402-scheme";
 import { createChainReader, finalityTagFor, type ChainReader, type FinalityTag } from "../chain/reader.js";
 import { CliError } from "../cli/errors.js";
+import { redactRpcUrl } from "../cli/redact.js";
 import {
   permissionWarnings, applyCapOverrides, loadConfig, CONFIG_DOC, SIGNER_KINDS, type SignerKind,
 } from "../config.js";
@@ -251,7 +252,7 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       addIssue({
         severity: "warning",
         code: "DASKI_RPC_UNAVAILABLE",
-        message: `Could not read balances from ${profile.rpcUrl}: ${(error as Error).message}`,
+        message: `Could not read balances from ${redactRpcUrl(profile.rpcUrl)}: ${(error as Error).message.split("\n")[0]}`,
         remediation: `Set a working rpcUrl for the "${loaded.profileName}" profile in ${configPath()}`,
       });
     }
