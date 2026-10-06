@@ -95,11 +95,15 @@ export class Catalog {
     this.#now = now;
   }
 
-  /** `daski_get_outcome`, cached. This is also the price and terms source. */
-  async getOutcome(providerAgentId: string, outcomeId: string): Promise<OutcomeSummary> {
+  /**
+   * `daski_get_outcome`, cached. This is also the price and terms source.
+   * `refresh` skips a fresh cached copy, for a caller that found it disagrees
+   * with what a challenge binds.
+   */
+  async getOutcome(providerAgentId: string, outcomeId: string, options: { refresh?: boolean } = {}): Promise<OutcomeSummary> {
     const key = `${this.#client.gatewayUrl}|${providerAgentId}|${outcomeId}`;
     const cache = readCache();
-    const cached = fresh(cache.outcomes[key], this.#now());
+    const cached = options.refresh ? undefined : fresh(cache.outcomes[key], this.#now());
     if (cached) return cached;
 
     const result = await this.#client.callTool("daski_get_outcome", {

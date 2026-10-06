@@ -29,21 +29,28 @@ const requirement: PaymentRequirement = { scheme: "exact", network: profile.netw
   amount: "27100000", payTo: splitter, maxTimeoutSeconds: 280,
   extra: { name: "USDC", version: "2", assetTransferMethod: "eip3009" } };
 const approvedTerms = { gatewayUrl: profile.gatewayUrl, payer: payer.address, providerAgentId: "1", outcomeId: "form-entity", requirement, binding };
+// The listing's legal terms as the catalog serves them; the challenge carries only their hash.
+const catalogTerms = { marketplaceTermsUrl: "https://daski.example/terms", marketplacePrivacyUrl: "https://daski.example/privacy",
+  providerLegalName: "Fixture Provider", providerTermsUrl: "https://provider.example/terms", providerPrivacyUrl: "https://provider.example/privacy" };
 
 async function withFixture(run: (args: { options: BuyOptions; context: CommandContext; signatures: TypedDataRequest[];
-  submissions: PaymentSubmission[]; state: { sufficient: boolean; ambiguous: boolean; gatewayState: string } }) => Promise<void>) {
+  submissions: PaymentSubmission[]; state: { sufficient: boolean; ambiguous: boolean; gatewayState: string;
+    catalogTerms: Record<string, unknown>[]; outcomeReads: boolean[] } }) => Promise<void>) {
   const before = process.env.DASKI_HOME;
   const home = mkdtempSync(join(tmpdir(), "daski-buy-flow-"));
   process.env.DASKI_HOME = home;
   const signatures: TypedDataRequest[] = [];
   const submissions: PaymentSubmission[] = [];
-  const state = { sufficient: true, ambiguous: false, gatewayState: "SETTLE_INVOKED" };
+  // Each catalog read returns the next listed terms, the last one repeating.
+  const state = { sufficient: true, ambiguous: false, gatewayState: "SETTLE_INVOKED",
+    catalogTerms: [catalogTerms] as Record<string, unknown>[], outcomeReads: [] as boolean[] };
   const json = (body: Record<string, unknown>) => ({ content: [], structuredContent: body });
   const context = { loaded: loadConfig(), profileName: "sandbox", profile: { ...profile }, payerAddress: payer.address,
     client: { callCount: 0, hasTool: async () => true,
       callTool: async (name: string, _args: unknown, meta?: Record<string, unknown>) => {
         if (name === "daski_get_payment_challenge") return json({ paymentRequired: { x402Version: 2, resource, accepts: [requirement],
-          extensions: { "daski-order-binding": binding, "payment-identifier": { info: { id: intentId } } } },
+          extensions: { "daski-order-binding": binding, "payment-identifier": { info: { id: intentId } },
+            "daski-order-terms": { termsHash: canonicalHash(catalogTerms), commissionBps: 1000 } } },
           preflight: { sufficient: state.sufficient, usdcBalance: "10000000", network: profile.network } });
         if (name === "daski_buy_outcome") {
           submissions.push(meta!["x402/payment"] as PaymentSubmission);
@@ -54,8 +61,11 @@ async function withFixture(run: (args: { options: BuyOptions; context: CommandCo
           state: state.gatewayState, providerAgentId: "1", outcomeId: "form-entity", grossAmount: requirement.amount, createdAt: new Date().toISOString() }] });
         throw new Error(`Unexpected tool ${name}`);
       } },
-    catalog: { getOutcome: async () => ({ payTo: splitter, token: profile.usdcAddress, serviceName: "Entity formation",
-      terms: { providerLegalName: "Fixture Provider", providerTermsUrl: "https://provider.example/terms" } }) },
+    catalog: { getOutcome: async (_provider: string, _outcome: string, options?: { refresh?: boolean }) => {
+      state.outcomeReads.push(options?.refresh === true);
+      const terms = state.catalogTerms[Math.min(state.outcomeReads.length, state.catalogTerms.length) - 1];
+      return { payTo: splitter, token: profile.usdcAddress, serviceName: "Entity formation", commissionBps: 9999, terms };
+    } },
     signer: { getAddress: async () => payer.address, describe: () => ({ provider: "fixture", accountType: "eoa" }),
       signTypedData: async (data: TypedDataRequest) => { signatures.push(data); return payer.signTypedData(data as never); } },
     policy: { payerAddress: payer.address, chainId: profile.chainId, canonicalToken: profile.usdcAddress,
@@ -77,7 +87,10 @@ test("a 27.10 quote needs approval, then buys once with the existing signer and 
       assert.ok(error instanceof CliError);
       assert.equal(error.code, "DASKI_HUMAN_APPROVAL_REQUIRED");
       approvalId = (error.details?.approval as { id: string }).id;
-      assert.equal((error.details?.approvalSummary as { provider: string }).provider, "Fixture Provider");
+      // Names and links come from the catalog terms the challenge's hash binds; the commission from the challenge.
+      assert.deepEqual(error.details?.approvalSummary, { what: "Entity formation", price: "27.1 USDC", paysTo: splitter,
+        provider: "Fixture Provider", commissionBps: 1000, providerTerms: "https://provider.example/terms",
+        marketplaceTerms: "https://daski.example/terms" });
       return true;
     });
     assert.equal(signatures.length, 0);
@@ -133,6 +146,30 @@ test("a refusal after submit without paymentMayHaveSettled is reconciled with th
       (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_UNRESOLVED_NO_ORDER");
     assert.equal(findByIntent(intentId)?.state, "NOT_SETTLED");
     assert.equal(signatures.length, 1, "nothing is re-signed");
+  });
+});
+
+test("terms the challenge does not bind are read again once, then refused before anything is signed", async () => {
+  const stale = { ...catalogTerms, providerTermsUrl: "https://provider.example/old-terms" };
+  await withFixture(async ({ options, context, signatures, state }) => {
+    // A cached copy from before the provider changed its terms: one fresh read shows the bound ones.
+    state.catalogTerms = [stale, catalogTerms];
+    await assert.rejects(runBuy(options, async () => context), (error: unknown) => {
+      assert.ok(error instanceof CliError);
+      assert.equal(error.code, "DASKI_HUMAN_APPROVAL_REQUIRED");
+      assert.equal((error.details?.approvalSummary as { providerTerms: string }).providerTerms, "https://provider.example/terms");
+      return true;
+    });
+    assert.deepEqual(state.outcomeReads, [false, true]);
+    assert.equal(signatures.length, 0);
+  });
+  await withFixture(async ({ options, context, signatures, state }) => {
+    state.catalogTerms = [stale];
+    await assert.rejects(runBuy({ ...options, approved: purchaseApproval(approvedTerms).id }, async () => context),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_ORDER_TERMS_MISMATCH");
+    assert.deepEqual(state.outcomeReads, [false, true], "one fresh read, never a loop");
+    assert.equal(signatures.length, 0);
+    assert.equal(listOrders().length, 0);
   });
 });
 

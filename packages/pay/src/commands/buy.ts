@@ -11,6 +11,7 @@ import { CliError } from "../cli/errors.js";
 import { note } from "../cli/output.js";
 import { createContext, type ContextOptions, type CommandContext } from "../context.js";
 import { approvePurchase, nextPurchaseApproval } from "./approval.js";
+import type { Catalog, OutcomeSummary } from "../gateway/catalog.js";
 import { GatewayClient } from "../gateway/client.js";
 import {
   authorizePayment,
@@ -78,7 +79,8 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
     const approval = nextPurchaseApproval({ gatewayUrl: context.profile.gatewayUrl,
       payer: context.payerAddress, providerAgentId: options.providerAgentId, outcomeId: options.outcomeId,
       requirement: challenge.requirement, binding: challenge.binding }, context.profileName);
-    const outcome = await context.catalog.getOutcome(options.providerAgentId, options.outcomeId);
+    const outcome = await outcomeBoundToTerms(context.catalog, options.providerAgentId, options.outcomeId,
+      challenge.challenge.extensions);
     const summary = approvalSummary(challenge.challenge.extensions, outcome, amountAtomic, preflight);
     if (preflight?.sufficient === false) {
       // The gateway already read the payer's balance: a signature now would be
@@ -266,10 +268,40 @@ async function reconcile(
 }
 
 /**
+ * The catalog outcome whose terms the challenge binds. A challenge's
+ * `daski-order-terms` carries the commission and only a hash of the terms, so
+ * the provider's legal name and the terms links come from the catalog, and are
+ * shown only when they hash to what the payment is bound to. A cached copy
+ * that differs is read once more before the purchase is refused.
+ */
+async function outcomeBoundToTerms(
+  catalog: Catalog, providerAgentId: string, outcomeId: string,
+  extensions: Record<string, unknown> | undefined,
+): Promise<OutcomeSummary> {
+  const termsHash = (extensions?.["daski-order-terms"] as { termsHash?: unknown } | undefined)?.termsHash;
+  const outcome = await catalog.getOutcome(providerAgentId, outcomeId);
+  if (typeof termsHash !== "string" || bindsTerms(outcome.terms, termsHash)) return outcome;
+  const refreshed = await catalog.getOutcome(providerAgentId, outcomeId, { refresh: true });
+  if (bindsTerms(refreshed.terms, termsHash)) return refreshed;
+  throw new CliError({
+    code: "DASKI_ORDER_TERMS_MISMATCH",
+    message: `The terms this challenge binds differ from the terms the catalog lists for ${providerAgentId}/${outcomeId}.`,
+    remediation:
+      "Nothing was signed. Re-run the command; if this persists, do not purchase and report it to the gateway operator.",
+    details: { termsHash },
+  });
+}
+
+function bindsTerms(terms: Record<string, unknown> | undefined, termsHash: string): boolean {
+  return terms !== undefined && canonicalHash(terms).toLowerCase() === termsHash.toLowerCase();
+}
+
+/**
  * The human-facing summary. The gateway's prepare tool ships a one-sentence
  * `approvalSummary` in its preflight; it leads when present, and the rest is
  * assembled from the order terms and the catalog, so the operator sees who is
- * being paid and under whose terms either way.
+ * being paid and under whose terms either way. The commission comes from the
+ * order terms; the names and links from the catalog terms they bind.
  */
 function approvalSummary(
   extensions: Record<string, unknown> | undefined,
@@ -281,14 +313,15 @@ function approvalSummary(
 ): Record<string, unknown> {
   const supplied = preflight?.approvalSummary ?? extensions?.approvalSummary;
   if (supplied && typeof supplied === "object") return supplied as Record<string, unknown>;
-  const terms = extensions?.["daski-order-terms"] as Record<string, unknown> | undefined ?? outcome.terms;
+  const order = extensions?.["daski-order-terms"] as Record<string, unknown> | undefined;
+  const terms = outcome.terms;
   return {
     ...(typeof supplied === "string" ? { gateway: supplied } : {}),
     what: [outcome.serviceName, outcome.skillName].filter(Boolean).join(" / ") || "Daski outcome",
     price: formatUsdc(amountAtomic),
     paysTo: outcome.payTo,
     provider: terms?.providerLegalName ?? outcome.providerAudience ?? "unknown",
-    commissionBps: terms?.commissionBps ?? outcome.commissionBps ?? null,
+    commissionBps: order?.commissionBps ?? outcome.commissionBps ?? null,
     providerTerms: terms?.providerTermsUrl ?? null,
     marketplaceTerms: terms?.marketplaceTermsUrl ?? null,
   };
