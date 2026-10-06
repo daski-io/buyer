@@ -68,7 +68,8 @@ test("review retries preserve the EAS signature and read access uses grant-read 
   const profile = DEFAULT_CONFIG.profiles.sandbox!;
   const signatures: TypedDataRequest[] = [];
   const submitted: unknown[] = [];
-  let pending = true;
+  // The gateway's answer to a submit: queued, parked for its operator, or done.
+  let answer: "pending" | "operator_attention" | "live_operator_attention" | "completed" = "pending";
   const json = (structuredContent: Record<string, unknown>, isError = false) => ({ content: [], structuredContent, isError });
   const signer: SignerAdapter = { getAddress: async () => account.address,
     describe: () => ({ provider: "local", accountType: "eoa", conformance: "verified" }),
@@ -89,7 +90,12 @@ test("review retries preserve the EAS signature and read access uses grant-read 
       if (action === "grant-read") return json({ readCapability: "fixture-capability", expiresAt: Math.floor(Date.now() / 1000) + 600 });
       if (request.phase === "prepare") { assert.equal(request.submission, "sponsored", "an EOA signer is sponsored"); return json(preparation()); }
       submitted.push(request);
-      return pending ? json({ code: "CONFIRMATION_SUBMISSION_PENDING" }, true) : json({ state: "completed" });
+      // An EAS 1.0.1 signature has no deadline, so a parked one is answered as still live.
+      if (answer === "live_operator_attention") return json({ code: "CONFIRMATION_AUTHORIZATION_STILL_LIVE", retryable: false,
+        expected: { operationId: "op-1", safeRetired: false, disposition: "operator_attention" } }, true);
+      return answer === "completed" ? json({ state: "completed" })
+        : json({ code: "CONFIRMATION_SUBMISSION_PENDING", retryable: answer === "pending",
+          expected: { operationId: "op-1", disposition: answer } }, true);
     } } } as unknown as CommandContext;
   try {
     const record = upsertOrder({ intentId: "intent", handle: "handle", profile: "sandbox", providerAgentId: "1", outcomeId: "form",
@@ -101,11 +107,32 @@ test("review retries preserve the EAS signature and read access uses grant-read 
     await readWithCapability(context, record, read);
     await readWithCapability(context, findByIntent("intent")!, read);
     assert.equal(signatures.length, 1, "read capability is cached and reused");
-    assert.equal((await confirmOrder(context, findByIntent("intent")!, { handle: "handle", json: true, confirmation: "Confirmed" }, async () => facts)).status, "pending");
+    const queued = await confirmOrder(context, findByIntent("intent")!, { handle: "handle", json: true, confirmation: "Confirmed" }, async () => facts);
+    // One key, `state`, as a final review reports it, with when to look again.
+    assert.equal(queued.state, "pending");
+    assert.equal(queued.status, undefined);
+    assert.equal(queued.operationId, "op-1");
+    assert.equal(queued.pollAfterSeconds, 30);
     assert.equal(signatures.filter((data) => data.primaryType === "Attest").length, 1);
-    pending = false;
+    // A review the gateway parked for its operator is not pending: polling cannot move it.
+    answer = "operator_attention";
+    const held = await confirmOrder(context, findByIntent("intent")!, { handle: "handle", json: true, resume: true }, async () => { throw new Error("resume must reuse its preparation"); });
+    assert.equal(held.state, "attention");
+    assert.equal(held.disposition, "operator_attention");
+    assert.equal(held.pollAfterSeconds, undefined);
+    assert.match(String(held.next), /operator must resolve.*daski_contact_order_support.*op-1/s);
+    assert.equal(findByIntent("intent")?.confirmationSubmission?.operationId, "op-1", "the saved signature is kept for the operator");
+    answer = "live_operator_attention";
+    const live = await confirmOrder(context, findByIntent("intent")!, { handle: "handle", json: true, resume: true }, async () => { throw new Error("resume must reuse its preparation"); });
+    assert.equal(live.state, "attention");
+    assert.equal(live.orderHandle, "handle");
+    assert.match(String(live.next), /daski order confirm handle --resume/);
+    assert.equal(findByIntent("intent")?.confirmationSubmission?.operationId, "op-1");
+    answer = "completed";
     await confirmOrder(context, findByIntent("intent")!, { handle: "handle", json: true, resume: true }, async () => { throw new Error("resume must reuse its preparation"); });
     assert.deepEqual(submitted[0], submitted[1]);
+    assert.deepEqual(submitted[1], submitted[2]);
+    assert.deepEqual(submitted[2], submitted[3]);
     assert.equal((submitted[0] as { submission?: string }).submission, "sponsored", "the submit request names its mode");
     assert.equal(signatures.filter((data) => data.primaryType === "Attest").length, 1);
     assert.equal(findByIntent("intent")?.confirmationSubmission, undefined);

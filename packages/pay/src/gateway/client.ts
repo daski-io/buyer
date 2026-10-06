@@ -367,6 +367,22 @@ export function isRetryableGatewayCode(code: string | undefined): boolean {
 }
 
 /**
+ * A sponsored review the gateway has parked for its operator. It still
+ * answers `CONFIRMATION_SUBMISSION_PENDING`, or `CONFIRMATION_AUTHORIZATION_STILL_LIVE`
+ * when its signature has no deadline, but no retry or reaffirmation moves it.
+ */
+export function reviewHeldForOperator(body: Record<string, unknown> | undefined): boolean {
+  return (body?.expected as { disposition?: unknown } | undefined)?.disposition === "operator_attention";
+}
+
+/** What a payer does about a review its gateway parked for the operator. */
+export function reviewNeedsOperator(operationId?: unknown): string {
+  return "Daski's operator must resolve this review; neither resuming nor reaffirming it will move it. Keep the saved review and do not " +
+    "sign another. Contact support for this order (daski_contact_order_support)" +
+    (typeof operationId === "string" ? ` and quote operation ${operationId}.` : ".");
+}
+
+/**
  * Remediations for gateway refusals whose next step is a flag of this CLI.
  * The gateway's own `next_action` speaks in tool terms; these speak in
  * command terms, and win when the code is one the CLI knows how to act on.
@@ -389,10 +405,15 @@ export function gatewayRefusalRemediation(
           "further submission for it.";
     case "CONFIRMATION_AUTHORIZATION_STILL_LIVE": {
       const expected = body?.expected as { operationId?: unknown; preparationId?: unknown } | undefined;
+      if (reviewHeldForOperator(body)) return reviewNeedsOperator(expected?.operationId);
       return typeof expected?.operationId === "string"
         ? "The saved signature is still live. Use --reaffirm to relay the same choice, or explicitly choose --supersedes-operation <id> --acknowledge-same-nonce. The first valid alternative to execute wins."
         : "Issued review data may already have been signed. To replace it, explicitly pass --supersedes-preparation <id> --acknowledge-same-nonce with the chosen review; a local timeout does not invalidate a legacy signature.";
     }
+    case "CONFIRMATION_SUBMISSION_PENDING":
+      return reviewHeldForOperator(body)
+        ? reviewNeedsOperator((body?.expected as { operationId?: unknown } | undefined)?.operationId)
+        : undefined;
     case "CONFIRMATION_SUBMISSION_FAILED": {
       const expected = body?.expected as { safeRetired?: unknown } | undefined;
       return expected?.safeRetired === true

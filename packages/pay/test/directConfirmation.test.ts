@@ -551,7 +551,7 @@ test("a stale answer on --resume is ambiguous: the journal is kept, its remediat
       return original(name, args);
     };
     const pending = await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader());
-    assert.equal(pending.status, "pending");
+    assert.equal(pending.state, "pending");
     assert.equal(current().confirmationSubmission?.request.preparationId, "prep");
 
     answer = { code: "CONFIRMATION_PREPARATION_STALE", message: "The preparation has expired." };
@@ -1132,7 +1132,7 @@ test("an upgraded buyer explicitly replaces an expired unadmitted pre-protocol j
     assert.equal(innerSignatures.length, 0, "a blocked legacy journal cannot silently obtain another signature");
     const replaced = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed",
       supersedesPreparationId: historicalId, acknowledgeSameNonce: true }, factsReader());
-    assert.equal(replaced.status, "pending");
+    assert.equal(replaced.state, "pending");
     assert.equal(replaced.operationId, "replacement-operation");
     assert.equal(calls.filter(call => call.request.phase === "prepare").length, 1);
     assert.equal(innerSignatures.length, 1);

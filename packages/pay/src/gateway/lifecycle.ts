@@ -20,6 +20,7 @@ import {
   GatewayClient,
   gatewayRefusalRemediation,
   isRetryableGatewayCode,
+  reviewHeldForOperator,
   unreadableResultError,
   type McpToolResult,
 } from "./client.js";
@@ -144,7 +145,7 @@ export function lifecycleFailure(toolName: string, result: McpToolResult): CliEr
     details: {
       tool: toolName,
       gateway: body ?? describeResult(result),
-      ...(isRetryableGatewayCode(code) ? { retryable: true } : {}),
+      ...(isRetryableGatewayCode(code) && !reviewHeldForOperator(body) ? { retryable: true } : {}),
     },
   });
 }

@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CliError } from "../src/cli/errors.js";
 import { gatewayRefusalRemediation, isRetryableGatewayCode } from "../src/gateway/client.js";
-import { callAuthorizedLifecycleTool } from "../src/gateway/lifecycle.js";
+import { callAuthorizedLifecycleTool, lifecycleFailure } from "../src/gateway/lifecycle.js";
 import { parseGatewayMetadata, readGatewayMetadata } from "../src/gateway/metadata.js";
 import { NOT_DEPLOYED_REMEDIATION } from "../src/signers/contract.js";
 
@@ -111,4 +111,18 @@ test("new review errors distinguish live authorization, safe retirement and inco
   assert.match(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_FAILED", { expected: { safeRetired: true } }) ?? "", /archived/);
   assert.match(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_FAILED", { expected: { safeRetired: false } }) ?? "", /preserved/);
   assert.match(gatewayRefusalRemediation("CONFIRMATION_NONCE_BUSY", {}) ?? "", /five minutes alone does not invalidate/);
+  // A queued review is retried; one parked for the operator is not, whatever an older gateway says.
+  const queued = { code: "CONFIRMATION_SUBMISSION_PENDING", retryable: true, expected: { operationId: "op", disposition: "pending" } };
+  const held = { ...queued, expected: { operationId: "op", disposition: "operator_attention" } };
+  assert.equal(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_PENDING", queued), undefined);
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_SUBMISSION_PENDING", held) ?? "", /operator must resolve.*quote operation op\./s);
+  const failure = (body: Record<string, unknown>) => lifecycleFailure("daski_confirm_delivery", { content: [], structuredContent: body, isError: true });
+  assert.equal(failure(queued).details.retryable, true);
+  assert.equal(failure(held).details.retryable, undefined);
+  assert.match(failure(held).remediation, /daski_contact_order_support/);
+  // Without a signed deadline (EAS 1.0.1) the parked review is still live: reaffirming is refused too.
+  const live = { code: "CONFIRMATION_AUTHORIZATION_STILL_LIVE", retryable: false,
+    expected: { operationId: "op", safeRetired: false, disposition: "operator_attention" } };
+  assert.match(gatewayRefusalRemediation("CONFIRMATION_AUTHORIZATION_STILL_LIVE", live) ?? "", /neither resuming nor reaffirming.*quote operation op\./s);
+  assert.doesNotMatch(gatewayRefusalRemediation("CONFIRMATION_AUTHORIZATION_STILL_LIVE", live) ?? "", /Use --reaffirm/);
 });

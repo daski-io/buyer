@@ -54,6 +54,7 @@ import type { ChainReader, TransactionReceiptLike } from "../chain/reader.js";
 import { finalityTagFor, readContracts } from "../chain/reader.js";
 import { CliError } from "../cli/errors.js";
 import type { CommandContext } from "../context.js";
+import { reviewNeedsOperator } from "../gateway/client.js";
 import { callAuthorizedLifecycleTool } from "../gateway/lifecycle.js";
 import { confirmationPinsMissing, easAddressMismatch } from "../gateway/metadata.js";
 import {
@@ -387,10 +388,11 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
         return { orderHandle: handle, mode: "sponsored", ...result };
       } catch (error) {
         if (error instanceof CliError && error.code === "CONFIRMATION_SUBMISSION_PENDING") {
-          const gateway = error.details.gateway as { expected?: { operationId?: unknown } } | undefined;
+          const gateway = error.details.gateway as { expected?: Record<string, unknown> } | undefined;
           if (gateway?.expected?.operationId !== submission.operationId) throw invalidPreparation();
-          return { orderHandle: handle, mode: "sponsored", status: "pending", operationId: submission.operationId,
-            next: "The saved signature was reaffirmed. Use --resume to reconcile its execution." };
+          return unfinishedSponsoredReview(handle, context.profile.chainId, gateway.expected,
+            { operationId: submission.operationId },
+            `The saved signature was reaffirmed. Use daski order confirm ${handle} --resume to reconcile its execution.`);
         }
         throw error;
       }
@@ -487,10 +489,13 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
           updateOrder(record.intentId, { confirmationSubmission: undefined,
             confirmationHistory: [...(latest(record).confirmationHistory ?? []), { submission, outcome: detail, archivedAt: new Date().toISOString() }] });
         }
-        if (error.code === "CONFIRMATION_SUBMISSION_PENDING") return {
-          orderHandle: record.handle, mode: "sponsored", status: "pending", preparationId: submission.request.preparationId,
-          ...(submission.operationId ? { operationId: submission.operationId } : {}),
-          next: `Run daski order confirm ${options.handle} --resume to check the same submission.` };
+        // A delegated signature without a deadline (EAS 1.0.1, Base mainnet)
+        // stays live while parked, so the gateway answers still-live for it.
+        if (error.code === "CONFIRMATION_SUBMISSION_PENDING" ||
+            (error.code === "CONFIRMATION_AUTHORIZATION_STILL_LIVE" && detail?.disposition === "operator_attention")) return unfinishedSponsoredReview(handle,
+          context.profile.chainId, detail,
+          { preparationId: submission.request.preparationId, operationId: submission.operationId },
+          `Run daski order confirm ${options.handle} --resume to check the same submission.`);
       }
       if (error instanceof CliError && error.code === "CONFIRMATION_PREPARATION_STALE") {
         throw new CliError({
@@ -794,6 +799,31 @@ function finalityNote(chainId: number): string {
   return finalityTagFor(chainId) === "finalized"
     ? "Finality on Base mainnet (the finalized tag) takes minutes to tens of minutes."
     : "The sandbox treats Base Sepolia's safe tag as final; it lags the head by minutes.";
+}
+
+/** How long to wait before resuming a pending sponsored review: a fraction of the chain's finality lag. */
+function reviewPollSeconds(chainId: number): number {
+  return finalityTagFor(chainId) === "finalized" ? 120 : 30;
+}
+
+/**
+ * A sponsored review the gateway has not finished. `pending` waits for the
+ * chain, so it says when to look again. `attention` means the gateway has
+ * parked it for its operator: resuming does not move it, and the saved
+ * signature must be kept, since the operator may find it can still execute.
+ * Both use `state`, the key a final review reports too.
+ */
+function unfinishedSponsoredReview(handle: string, chainId: number, gateway: Record<string, unknown> | undefined,
+  ids: { preparationId?: unknown; operationId?: string | undefined }, pendingNext: string): Record<string, unknown> {
+  const disposition = typeof gateway?.disposition === "string" ? gateway.disposition : undefined;
+  const base = { orderHandle: handle, mode: "sponsored",
+    ...(ids.preparationId === undefined ? {} : { preparationId: ids.preparationId }),
+    ...(ids.operationId ? { operationId: ids.operationId } : {}),
+    ...(disposition ? { disposition } : {}) };
+  if (disposition === "operator_attention") return { ...base, state: "attention",
+    next: `${reviewNeedsOperator(ids.operationId)} Once it is resolved, daski order confirm ${handle} --resume reports the outcome.` };
+  return { ...base, state: "pending", pollAfterSeconds: reviewPollSeconds(chainId),
+    next: `${pendingNext} ${finalityNote(chainId)}` };
 }
 
 /** The receipt's block in the profile RPC's final view. */
