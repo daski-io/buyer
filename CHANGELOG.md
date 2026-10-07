@@ -35,6 +35,9 @@ share a version.
 
 ## Release tooling — unreleased
 
+- Record a publication once npm serves the new version with its provenance, and
+  wait up to 30 minutes for the exact scheme before publishing the CLI: npm took
+  about twelve minutes to serve 0.5.2, which failed both jobs on first attempt.
 - Prepare exact source tags only after CI and explicit coordinator handover.
 - Record published package source, integrity and registry attestation reference;
   preserve the pinned scheme publication barrier.

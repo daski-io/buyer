@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 
+// npm can take over ten minutes to serve a new version (0.5.2 took about twelve).
 export async function waitForScheme({ sha, version, request = fetch,
-  deadline = Date.now() + 600_000, now = Date.now,
+  deadline = Date.now() + 1_800_000, now = Date.now,
   pause = ms => new Promise(r => setTimeout(r, ms)), install = installAndVerify } = {}) {
   if (!/^[a-f0-9]{40}$/.test(sha ?? "") || !/^\d+\.\d+\.\d+$/.test(version ?? "")) throw new Error("An exact release SHA and version are required");
   while (now() < deadline) {
@@ -33,7 +34,7 @@ async function installAndVerify(version, remaining) {
   const deadline = Date.now() + remaining;
   try {
     writeFileSync(join(directory, "package.json"), '{"private":true,"name":"scheme-proof","version":"1.0.0"}');
-    for (const args of [["install", "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", "@daski/x402-scheme@" + version], ["audit", "signatures", "--json"]]) {
+    for (const args of [["install", "--prefer-online", "--ignore-scripts", "--no-audit", "--no-fund", "--save-exact", "@daski/x402-scheme@" + version], ["audit", "signatures", "--json"]]) {
       if (Date.now() >= deadline) throw new Error("Scheme verification deadline reached");
       await new Promise((resolve, reject) => {
         const child = spawn("npm", args, { cwd: directory, stdio: ["ignore", "pipe", "pipe"], timeout: Math.min(180_000, deadline - Date.now()), killSignal: "SIGKILL" });
