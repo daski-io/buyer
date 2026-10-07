@@ -2,7 +2,7 @@
  * Child-scoped Circle transport policy. Inputs are a buyer-validated EAS call,
  * never arbitrary CLI commands. No credentials are persisted or returned here.
  *
- * The pinned CLIs (1.0.0, 1.1.4) run `wallet execute` as: list the wallets,
+ * The pinned CLIs (1.1.4, 1.2.0) run `wallet execute` as: list the wallets,
  * POST the contract execution, read the encrypted challenge, POST its
  * approval, poll the user challenge until COMPLETE, then poll the transaction
  * the challenge names (GET /v1/w3s/transactions/<id>) until it is terminal.
@@ -12,9 +12,14 @@
  */
 import { encodeFunctionData, parseAbi, type Address, type Hex } from "viem";
 import type { DirectCall } from "../commands/confirmation.js";
+/**
+ * dist/index.js SHA-256 of each @circle-fin/cli release whose review requests
+ * this policy was checked against. 1.2.0 sends exactly 1.1.4's. Circle's own
+ * version policy refuses every command below 1.1.4, so 1.0.0 is not run.
+ */
 export const CIRCLE_REVIEW_ENTRY_HASHES: Readonly<Record<string, string>> = {
-  "1.0.0": "40508e51b251c0c7b696a3ee30f2c21b7052b00b483ec4fc2d64811135ea6df0",
   "1.1.4": "89f8610b586ca929c3419779405b59618c60be10836bc4428d21c75a7c18f6a4",
+  "1.2.0": "feb24e3d404b41bfda54ff69b397c892a3c007487f7831904c2617d036afd9b9",
 };
 export type CircleReviewMode = "estimate" | "execute" | "lookup";
 export interface CircleReviewRequest {

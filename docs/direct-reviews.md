@@ -26,18 +26,20 @@ candidate lane never bypasses mainnet qualification. A signing or estimation
 conformance result does not enable execution.
 
 The adapter verifies the installed @circle-fin/cli package identity and exact
-dist/index.js SHA-256 for version 1.0.0 or 1.1.4. Unknown or changed
-entrypoints are refused before anything is sent. It starts a dedicated Node
-child without a shell, preload hooks, proxy overrides or Daski environment
-secrets. It never edits the installed CLI. The child permits, at the official
-Circle agent endpoint of the profile's environment, only the requests those
-CLIs send for one `wallet execute`: the wallet listing, the contract execution
-request, Circle's configuration and the bound challenge, that challenge's
-approval, and reads of the one transaction the completed challenge names. It
-corrects only the approved EAS attest/revoke tuple. All destination, wallet,
-chain, ABI parameters, zero value and idempotency fields must match; the
-re-encoded calldata must be exact. Transfer, deploy, cancel, accelerate,
-arbitrary requests and cross-environment requests fail.
+dist/index.js SHA-256 for version 1.1.4 or 1.2.0, whose review requests are
+identical. Circle's own version policy refuses every command below 1.1.4, so
+1.0.0 is not run. Unknown or changed entrypoints are refused before anything is
+sent. It starts a dedicated Node child without a shell, preload hooks, proxy
+overrides or Daski environment secrets. It never edits the installed CLI. The
+child permits, at the official Circle agent endpoint of the profile's
+environment, only the requests those CLIs send for one `wallet execute`: the
+wallet listing, the contract execution request, Circle's configuration and the
+bound challenge, that challenge's approval, and reads of the one transaction
+the completed challenge names. It corrects only the approved EAS attest/revoke
+tuple. All destination, wallet, chain, ABI parameters, zero value and
+idempotency fields must match; the re-encoded calldata must be exact. Transfer,
+deploy, cancel, accelerate, arbitrary requests and cross-environment requests
+fail.
 
 This child runs within Circle's credential boundary: the pinned CLI can read
 its existing userToken, encryptionKey, encryptedUserSecret and storageKey.

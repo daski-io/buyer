@@ -26,7 +26,7 @@ function body(r: CircleReviewRequest) {
 }
 const root = "https://agentic-wallet.circle.com/proxy/test";
 test("both pinned Circle artifacts require identical bounded tuple correction for attest and revoke", () => {
-  assert.deepEqual(Object.keys(CIRCLE_REVIEW_ENTRY_HASHES), ["1.0.0", "1.1.4"]);
+  assert.deepEqual(Object.keys(CIRCLE_REVIEW_ENTRY_HASHES), ["1.1.4", "1.2.0"]);
   for (const action of ["attest", "revoke"] as const) {
     for (const mode of ["estimate", "execute"] as const) {
       const r = request(mode, action), b = body(r);
@@ -88,7 +88,7 @@ test("review subprocess strips credentials from Daski, preload hooks and proxy o
 });
 
 /**
- * The request sequence @circle-fin/cli 1.0.0 and 1.1.4 send for an agent
+ * The request sequence @circle-fin/cli 1.1.4 and 1.2.0 send for an agent
  * wallet's `wallet execute` (dist/index.js: resolveWallet, handleAgentExecute,
  * executeChallenge, pollChallenge, pollTransaction), in order.
  */
