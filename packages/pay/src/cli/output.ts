@@ -1,6 +1,7 @@
 /**
  * Output. Two modes, one rule: everything is redacted on the way out.
  */
+import { BaseError } from "viem";
 import { redactValue } from "./redact.js";
 import { CliError } from "./errors.js";
 
@@ -42,7 +43,8 @@ function errorPayload(error: unknown): Record<string, unknown> {
   }
   return {
     error: "DASKI_UNEXPECTED_ERROR",
-    message: error instanceof Error ? error.message : String(error),
+    // A viem error's full message carries the request URL, where RPC providers put API keys.
+    message: error instanceof BaseError ? error.shortMessage : error instanceof Error ? error.message : String(error),
     remediation: "Re-run with --json for the full payload, and report this if it persists.",
   };
 }

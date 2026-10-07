@@ -2,6 +2,7 @@
  * Balance reads. RPC only, never a signing path.
  */
 import { createPublicClient, erc20Abi, formatUnits, http, type Address } from "viem";
+import { rpcFailure } from "../chain/reader.js";
 
 export interface Balances {
   nativeWei: string;
@@ -16,6 +17,7 @@ export async function readBalances(options: {
   usdcAddress: Address;
 }): Promise<Balances> {
   const client = createPublicClient({ transport: http(options.rpcUrl) });
+  // A viem error's message ends with the full request URL, where providers put API keys.
   const [native, usdc] = await Promise.all([
     client.getBalance({ address: options.address }),
     client.readContract({
@@ -24,7 +26,7 @@ export async function readBalances(options: {
       functionName: "balanceOf",
       args: [options.address],
     }) as Promise<bigint>,
-  ]);
+  ]).catch((error: unknown) => { throw rpcFailure(options.rpcUrl, error); });
   return {
     nativeWei: native.toString(),
     native: `${formatUnits(native, 18)} ETH`,

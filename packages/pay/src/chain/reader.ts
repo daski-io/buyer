@@ -141,7 +141,7 @@ function describeAnswer(answer: RpcAnswer): string {
 }
 
 /** A failed read, named for what the RPC said; the endpoint is printed without the path or query a key may sit in. */
-function rpcFailure(rpcUrl: string, error: unknown): CliError {
+export function rpcFailure(rpcUrl: string, error: unknown): CliError {
   const answer = rpcAnswer(error);
   const answered = describeAnswer(answer);
   const details = { retryable: true, ...(answer.status === undefined ? {} : { httpStatus: answer.status }),
