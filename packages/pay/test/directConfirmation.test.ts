@@ -23,6 +23,7 @@ import type { CommandContext } from "../src/context.js";
 import { DEFAULT_CONFIG, EAS_PREDEPLOY } from "../src/config.js";
 import { parseGatewayMetadata } from "../src/gateway/metadata.js";
 import { findByIntent, updateOrder, upsertOrder, type OrderRecord } from "../src/store/orders.js";
+import { createCircleReviewAdapter, spawnCircleReview } from "../src/signers/circleReview.js";
 
 const code = (wanted: string) => (error: unknown): boolean => error instanceof CliError && error.code === wanted;
 const payer = privateKeyToAccount(`0x${"11".repeat(32)}`);
@@ -1184,6 +1185,28 @@ test("a Circle run that never sent an approval restores the prepared review, whi
     assert.equal(current().confirmationTx?.vendor?.challengeId, "c-1");
     assert.equal(current().confirmationTx?.vendor?.fromBlock, "100");
     assert.deepEqual(current().confirmationTx?.vendor?.hashes, [TX]);
+  });
+});
+
+test("a Circle run that cannot create its progress file starts nothing and restores the prepared review", async () => {
+  await withStore(async record => {
+    const { context } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    // The real runner; it stops before any child, so the entry is never read.
+    const adapter = () => createCircleReviewAdapter({ entry: join(tmpdir(), "no-circle-entry.js"), run: spawnCircleReview, packageVersion: "1.1.4" });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    const prepared = current().confirmationTx!;
+    const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+    const missing = join(tmpdir(), `daski-no-temp-${process.pid}`, "missing");
+    for (const key of Object.keys(saved)) process.env[key] = missing;
+    try {
+      await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter),
+        (error: unknown) => error instanceof CliError && error.code === "DASKI_CIRCLE_REVIEW_NOT_STARTED" &&
+          /progress file/.test(String(error.details.reason)));
+    } finally {
+      for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    assert.deepEqual(current().confirmationTx, prepared, "nothing reached Circle, so the review stays prepared and can be submitted again");
   });
 });
 

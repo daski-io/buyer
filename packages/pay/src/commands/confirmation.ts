@@ -604,7 +604,7 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
           : "The Circle review did not reach Circle; nothing was sent.",
         remediation: `The prepared review is kept. Check the Circle session with circle wallet status; if it expired, ${loginHint(circleChainName(context.profile.chainId))}. ` +
           `Then repeat daski order confirm ${handle} --submit --approve-call ${tracked.callHash}.`,
-        details: { circleProgress: progress } });
+        details: { circleProgress: progress, reason: (error as CliError).message } });
     }
     // Possibly executing: keep the journal with every identity Circle gave.
     if (progress) updateOrder(record.intentId, { confirmationTx: withCircleProgress(started, progress) });

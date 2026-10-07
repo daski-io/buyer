@@ -56,7 +56,8 @@ forwarding it: the execution request, the challenge Circle issued, that
 challenge's approval, and the transaction and state the challenge names. A
 step that cannot be recorded is not forwarded. Circle executes only an
 approved challenge, so a run that recorded no approval (an expired session, a
-refused request) restores the prepared review and answers
+refused request, or a run that could not create its progress file and so never
+started) restores the prepared review and answers
 `DASKI_CIRCLE_REVIEW_NOT_STARTED`: nothing was sent, and the same approved
 call can be submitted again. Any other failure, a timeout or an unreadable
 result keeps the record with every identity Circle gave and answers

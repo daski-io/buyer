@@ -104,14 +104,35 @@ function readProgress(path: string): CircleReviewProgress {
     return { ...circleReviewProgress(""), uncertain: true };
   }
 }
+/** Removes a run's progress directory; one left behind holds no secret and decides nothing. */
+function removeProgress(directory: string): void {
+  try { rmSync(directory, { recursive: true, force: true }); } catch { /* Kept for the system's temporary cleanup. */ }
+}
+/** A private directory holding an empty progress file, or undefined when none can be made. */
+function progressDirectory(): string | undefined {
+  let directory: string | undefined;
+  try {
+    directory = mkdtempSync(join(tmpdir(), "daski-circle-review-"));
+    writeFileSync(join(directory, "progress.jsonl"), "", { mode: 0o600 });
+    return directory;
+  } catch {
+    if (directory) removeProgress(directory);
+    return undefined;
+  }
+}
 export const spawnCircleReview: CircleReviewRunner = (entry, request) => {
   assertCircleReviewRequest(request);
-  const directory = mkdtempSync(join(tmpdir(), "daski-circle-review-"));
+  // The child forwards nothing it cannot record, so a run without a progress
+  // file never starts. It fails as a run that sent nothing, which restores the
+  // prepared review instead of leaving it submitted with nothing to resume.
+  const directory = progressDirectory();
+  if (!directory) return Promise.reject(failure("DASKI_CIRCLE_REVIEW_UNKNOWN",
+    "The Circle review process could not start: it could not create its progress file in the system's temporary directory.",
+    circleReviewProgress("")));
   const progressFile = join(directory, "progress.jsonl");
-  writeFileSync(progressFile, "", { mode: 0o600 });
   const settle = (): CircleReviewProgress => {
     const progress = readProgress(progressFile);
-    rmSync(directory, { recursive: true, force: true });
+    removeProgress(directory);
     return progress;
   };
   return new Promise((resolve, reject) => {
