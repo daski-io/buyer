@@ -1,16 +1,20 @@
 /**
  * Dedicated child entry point. Never preload into the buyer or alter the
  * installed vendor. The pinned vendor retains its existing credential store.
+ * Each step that decides what Circle can execute is appended to the parent's
+ * progress file before it is forwarded; a step that cannot be recorded is not
+ * forwarded.
  */
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { CIRCLE_REVIEW_ENTRY_HASHES, circleReviewArguments, circleReviewFetchPolicy, type CircleReviewRequest } from "./circleReviewTransport.js";
 
 async function main(): Promise<void> {
   const entry = process.argv[2];
-  if (!entry) throw new Error("Missing vendor entry");
+  const progress = process.argv[3];
+  if (!entry || !progress) throw new Error("Missing vendor entry or progress file");
   const pkg = JSON.parse(readFileSync(join(dirname(entry), "..", "package.json"), "utf8")) as { name: string; version: string };
   if (pkg.name !== "@circle-fin/cli" || CIRCLE_REVIEW_ENTRY_HASHES[pkg.version] !== createHash("sha256").update(readFileSync(entry)).digest("hex")) throw new Error("Vendor integrity mismatch");
   const chunks: Buffer[] = [];
@@ -22,7 +26,8 @@ async function main(): Promise<void> {
   }
   const request = JSON.parse(Buffer.concat(chunks).toString("utf8")) as CircleReviewRequest;
   const args = circleReviewArguments(request);
-  globalThis.fetch = circleReviewFetchPolicy(request, globalThis.fetch);
+  globalThis.fetch = circleReviewFetchPolicy(request, globalThis.fetch,
+    (event) => appendFileSync(progress, JSON.stringify(event) + "\n"));
   process.argv = [process.execPath, entry, ...args];
   await import(pathToFileURL(entry).href);
 }

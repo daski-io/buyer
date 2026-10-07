@@ -24,9 +24,10 @@ apart from its main ones, so every Circle step below carries `--testnet`.
    DASKI_KEY_BACKEND=circle-agent DASKI_CONFORMANCE_SPEND_OK=1 npm run conformance -- --profile sandbox --signer circle-agent --confirm
    ```
 
-   For the contract signer the suite stops at the validated EAS call; submit
-   it through the circle CLI and record it with
-   `daski order confirm <handle> --tx <hash>` followed by `--check`.
+   For the contract signer the suite stops at the validated EAS call. Its
+   review goes through this CLI's Circle adapter, never `circle wallet
+   execute`, which cannot send the tuple argument as given; see
+   [direct reviews](direct-reviews.md) and the qualification below.
 4. Record both runs with the release evidence: the exact Circle CLI version
    (`circle --version`), the gateway version from `/.well-known/mcp.json`, and
    the facilitator responses.

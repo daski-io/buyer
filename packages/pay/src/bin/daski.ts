@@ -47,7 +47,11 @@ Commands
   order confirm <handle> --choice <Confirmed|NotConfirmed> [--submission <sponsored|direct>]
                                       Record the user's delivery review; the mode follows the signer
   order revoke-confirmation <handle>  Withdraw the active review
-  order confirm <handle> --resume     Reconcile a pending sponsored submission
+  order confirm <handle> --estimate   Circle: estimate the saved direct review; sends nothing
+  order confirm <handle> --submit --approve-call <callHash>
+                                      Circle: submit the approved direct review once the
+                                      gateway advertises confirmation.directReview.circleExecute
+  order confirm <handle> --resume     Reconcile a pending sponsored or Circle submission; never executes again
   order confirm <handle> --tx <hash>  Direct mode: record the hash the wallet's tool reported
   order confirm <handle> --check      Direct mode: verify the receipt, attestation and final state
   order confirm <handle> --abandon    Direct mode: drop a record with no executable transaction

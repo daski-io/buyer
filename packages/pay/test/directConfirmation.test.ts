@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
 import { encodeEventTopics, encodeFunctionData, keccak256, type Address, type Hex } from "viem";
 import { canonicalHash, type SignerDescription, type TypedDataRequest } from "@daski/x402-scheme";
-import type { ChainReader, TransactionReceiptLike } from "../src/chain/reader.js";
+import type { ChainLog, ChainReader, TransactionReceiptLike } from "../src/chain/reader.js";
 import { CliError } from "../src/cli/errors.js";
 import {
   confirmOrder, confirmationData, EAS_ABI, FINAL_ATTESTATION_WARNING, readConfirmationFacts,
@@ -22,7 +22,7 @@ import {
 import type { CommandContext } from "../src/context.js";
 import { DEFAULT_CONFIG, EAS_PREDEPLOY } from "../src/config.js";
 import { parseGatewayMetadata } from "../src/gateway/metadata.js";
-import { findByIntent, upsertOrder, type OrderRecord } from "../src/store/orders.js";
+import { findByIntent, updateOrder, upsertOrder, type OrderRecord } from "../src/store/orders.js";
 
 const code = (wanted: string) => (error: unknown): boolean => error instanceof CliError && error.code === wanted;
 const payer = privateKeyToAccount(`0x${"11".repeat(32)}`);
@@ -85,7 +85,9 @@ interface Fixture {
     /** Attestations by uid for batched receipts; falls back to `attestation`. */
     attestations: Map<Hex, Attestation>;
     /** Every reader call, in order, for ordering assertions. */
-    log: string[] };
+    log: string[];
+    /** Mined EAS logs the fixture RPC returns to a matching getLogs. */
+    logs: ChainLog[] };
   gateway: { prepared: Record<string, unknown>; check: Record<string, unknown>; eas: Address };
 }
 
@@ -94,7 +96,7 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
   const signer = { getAddress: async () => payer.address, describe: () => description(accountType),
     signTypedData: async (data: TypedDataRequest) => payer.signTypedData(data as never) };
   const calls: Fixture["calls"] = [];
-  const chainState: Fixture["chain"] = { receipt: null, attestation: attestation(), finalized: 100n, canonical: new Map(), attestations: new Map(), log: [] };
+  const chainState: Fixture["chain"] = { receipt: null, attestation: attestation(), finalized: 100n, canonical: new Map(), attestations: new Map(), log: [], logs: [] };
   const gateway: Fixture["gateway"] = { prepared: { submissionsUsed: 0, revocationAvailable: false, finalAttestation: false, call: attestCall() },
     check: { lastObserved: null, confirmedCurrent: null, submissionsUsed: 0, observedBlock: null, finalizedBlock: null }, eas: EAS_PREDEPLOY };
   const reader: ChainReader = {
@@ -103,6 +105,11 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
     getTransactionReceipt: async (hash) => { assert.equal(hash, TX); chainState.log.push("receipt"); return chainState.receipt; },
     getFinalBlockNumber: async () => { chainState.log.push("final"); return chainState.finalized; },
     getBlockHash: async (number) => { chainState.log.push(`blockHash:${number}`); return chainState.canonical.get(number) ?? blockHashAt(number); },
+    getLogs: async ({ address, topics, fromBlock, toBlock }) => {
+      chainState.log.push(`logs:${fromBlock}-${toBlock}`);
+      return chainState.logs.filter(log => log.address.toLowerCase() === address.toLowerCase() && log.blockNumber >= fromBlock &&
+        log.blockNumber <= toBlock && topics.every((topic, index) => log.topics[index]?.toLowerCase() === topic.toLowerCase()));
+    },
     readContract: async <T,>(args: { functionName: string; args: readonly unknown[]; blockNumber?: bigint }): Promise<T> => {
       chainState.log.push(`${args.functionName}${args.blockNumber === undefined ? "" : `@${args.blockNumber}`}`);
       if (args.functionName === "getAttestation") return (chainState.attestations.get(args.args[0] as Hex) ?? chainState.attestation) as T;
@@ -1064,7 +1071,7 @@ test("candidate Circle execution requires explicit testnet spend consent and nev
         modes: ["direct"], directReview: { circleEstimate: true, circleExecute: false } } });
       let executions = 0;
       const adapter = () => ({ packageVersion: "1.0.0", estimate: async () => ({}),
-        submit: async () => { executions++; return { transactionId: "candidate" }; },
+        submit: async () => { executions++; return { transactionId: "candidate", progress: { executionRequested: true, approvalSent: true, uncertain: false } }; },
         lookup: async () => ({ hashes: [] }) });
       await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
       const submit = { ...options, submit: true, approveCallHash: current().confirmationTx!.callHash, qualifyCircleExecution: true };
@@ -1144,5 +1151,165 @@ test("an upgraded buyer explicitly replaces an expired unadmitted pre-protocol j
     assert.equal(current().confirmationSubmission!.profileId, "eas-native-1.2.0");
     assert.deepEqual(current().confirmationHistory![0]!.submission.request, historical.request);
     assert.equal(current().confirmationHistory![0]!.submission.operationId, undefined);
+  });
+});
+
+const circleExecution = () => parseGatewayMetadata({ confirmation: {
+  modes: ["direct"], directReview: { circleEstimate: true, circleExecute: true } } });
+/** A failed vendor run as the runner reports it: the code, and what the child recorded. */
+const vendorFailure = (circleProgress: Record<string, unknown>) => new CliError({ code: "DASKI_CIRCLE_REVIEW_UNKNOWN",
+  message: "Circle did not return a definitive review result.", remediation: "Keep the saved review journal.",
+  details: { circleProgress: { executionRequested: true, approvalSent: false, uncertain: false, ...circleProgress } } });
+
+test("a Circle run that never sent an approval restores the prepared review, which can then be submitted", async () => {
+  await withStore(async record => {
+    const { context } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    let attempts = 0;
+    const adapter = () => ({ packageVersion: "1.1.4", estimate: async () => ({}),
+      submit: async () => {
+        attempts++;
+        if (attempts === 1) throw vendorFailure({ challengeId: "refused-challenge" });
+        return { transactionId: "tx-1", txHash: TX, state: "COMPLETE",
+          progress: { executionRequested: true, challengeId: "c-1", approvalSent: true, transactionId: "tx-1", uncertain: false } };
+      },
+      lookup: async () => ({ hashes: [] }) });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    const prepared = current().confirmationTx!;
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter),
+      code("DASKI_CIRCLE_REVIEW_NOT_STARTED"));
+    assert.deepEqual(current().confirmationTx, prepared, "nothing could execute, so the prepared review is restored as it was");
+    const submitted = await confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter);
+    assert.equal(submitted.transactionId, "tx-1");
+    assert.equal(current().confirmationTx?.vendor?.challengeId, "c-1");
+    assert.equal(current().confirmationTx?.vendor?.fromBlock, "100");
+    assert.deepEqual(current().confirmationTx?.vendor?.hashes, [TX]);
+  });
+});
+
+test("an approved or uncertain Circle run keeps every identity, and --resume finds the review on chain when Circle cannot be read", async () => {
+  await withStore(async record => {
+    const { context, chain, gateway } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    let lookups = 0;
+    const adapter = () => ({ packageVersion: "1.1.4", estimate: async () => ({}),
+      submit: async () => { throw vendorFailure({ challengeId: "c-1", approvalSent: true }); },
+      lookup: async () => { lookups++; throw new CliError({ code: "DASKI_CIRCLE_REVIEW_UNKNOWN", message: "unreadable", remediation: "keep" }); } });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    const callHash = current().confirmationTx!.callHash;
+    chain.finalized = 40n;
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: callHash }, factsReader(), adapter),
+      code("DASKI_CIRCLE_REVIEW_UNKNOWN"));
+    assert.equal(current().confirmationTx?.state, "submitted");
+    assert.equal(current().confirmationTx?.vendor?.challengeId, "c-1");
+    assert.equal(current().confirmationTx?.vendor?.fromBlock, "40", "the final height before submission bounds the chain search");
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, check: true }),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_CONFIRMATION_TX_NOT_RECORDED" && /--resume/.test(error.remediation));
+    chain.finalized = 100n;
+    const nothing = await confirmOrder(context, current(), { ...options, resume: true }, factsReader(), adapter);
+    assert.equal(nothing.state, "submitted");
+    assert.equal(nothing.vendorLookup, "unavailable");
+    assert.ok(chain.log.includes("logs:40-100"));
+    // The review lands in block 42; the chain shows it while Circle still cannot be read.
+    const topics = encodeEventTopics({ abi: EAS_ABI, eventName: "Attested",
+      args: { recipient: RECIPIENT, attester: payer.address, schemaUID: facts.schemaUid } }) as Hex[];
+    const stranger = encodeEventTopics({ abi: EAS_ABI, eventName: "Attested",
+      args: { recipient: RECIPIENT, attester: "0x5555555555555555555555555555555555555555", schemaUID: facts.schemaUid } }) as Hex[];
+    chain.logs = [{ address: EAS_PREDEPLOY, topics: stranger, data: canonicalHash("someone else"), transactionHash: `0x${"bb".repeat(32)}`, blockNumber: 41n },
+      { address: EAS_PREDEPLOY, topics, data: UID, transactionHash: TX, blockNumber: 42n }];
+    chain.receipt = receipt();
+    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID }, finalizedBlock: block(50) };
+    const observed = await confirmOrder(context, current(), { ...options, resume: true }, factsReader(), adapter);
+    assert.equal(observed.state, "observed");
+    assert.equal(current().confirmationTx?.txHash, TX);
+    assert.equal(lookups, 2);
+  });
+});
+
+test("a started Circle execution takes the hash recorded with --tx and closes on --check", async () => {
+  await withStore(async record => {
+    const { context, chain, gateway } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    const adapter = () => ({ packageVersion: "1.1.4", estimate: async () => ({}),
+      submit: async () => { throw vendorFailure({ approvalSent: true }); }, lookup: async () => ({ hashes: [] }) });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: current().confirmationTx!.callHash }, factsReader(), adapter));
+    const recorded = await confirmOrder(context, current(), { ...options, tx: TX });
+    assert.equal(recorded.state, "submitted");
+    assert.deepEqual(current().confirmationTx?.vendor?.hashes, [TX]);
+    chain.receipt = receipt();
+    gateway.check = { confirmedCurrent: { state: "Confirmed", currentUid: UID }, finalizedBlock: block(50) };
+    const observed = await confirmOrder(context, current(), { ...options, check: true });
+    assert.equal(observed.state, "observed");
+  });
+});
+
+test("a started Circle execution is abandoned only once Circle reports its transaction failed", async () => {
+  await withStore(async record => {
+    const { context } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    let state = "SENT";
+    const adapter = () => ({ packageVersion: "1.1.4", estimate: async () => ({}),
+      submit: async () => { throw vendorFailure({ approvalSent: true, challengeId: "c-1", transactionId: "tx-1", state: "SENT" }); },
+      lookup: async () => ({ transactionId: "tx-1", hashes: [], state }) });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: current().confirmationTx!.callHash }, factsReader(), adapter));
+    assert.equal(current().confirmationTx?.vendor?.state, "SENT");
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"));
+    state = "FAILED";
+    const failed = await confirmOrder(context, current(), { ...options, resume: true }, factsReader(), adapter);
+    assert.equal(failed.vendorState, "FAILED");
+    assert.match(String(failed.next), /--abandon/);
+    const abandoned = await confirmOrder(context, current(), { ...options, abandon: true });
+    assert.equal(abandoned.state, "abandoned");
+  });
+});
+
+test("a call prepared before 0.5.0 is restored by preparing the same choice; another choice is refused", async () => {
+  await withStore(async record => {
+    const { context, gateway } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    let estimates = 0;
+    const adapter = () => ({ packageVersion: "1.1.4", estimate: async () => { estimates++; return { gasLimit: "180000" }; },
+      submit: async () => { throw new Error("not submitted in this test"); }, lookup: async () => ({ hashes: [] }) });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    // What 0.4.x saved: the hash and binding, not the call or the choice.
+    const { call: _call, choice: _choice, ...legacy } = current().confirmationTx!;
+    updateOrder("intent", { confirmationTx: { ...legacy, preparedAt: "2026-09-29T20:28:19.981Z" } });
+    await assert.rejects(confirmOrder(context, current(), { ...options, estimate: true }, factsReader(), adapter),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_CONFIRMATION_NOT_PREPARED" && /earlier buyer/.test(error.remediation));
+    gateway.prepared = { ...gateway.prepared, call: attestCall(facts, "NotConfirmed") };
+    await assert.rejects(confirmOrder(context, current(), { ...options, confirmation: "NotConfirmed" }, factsReader(), adapter),
+      code("DASKI_CONFIRMATION_TX_PENDING"));
+    assert.equal(current().confirmationTx?.call, undefined, "a different call never replaces the saved one");
+    gateway.prepared = { ...gateway.prepared, call: attestCall() };
+    const restored = await confirmOrder(context, current(), { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    assert.equal(restored.restored, true);
+    assert.equal(restored.callHash, legacy.callHash);
+    assert.equal(current().confirmationTx?.preparedAt, "2026-09-29T20:28:19.981Z");
+    assert.equal(current().confirmationTx?.choice, "Confirmed");
+    await confirmOrder(context, current(), { ...options, estimate: true }, factsReader(), adapter);
+    assert.equal(estimates, 1);
+  });
+});
+
+test("the chain search stays within a public RPC's 500-block log range and a bounded window after submission", async () => {
+  await withStore(async record => {
+    const { context, chain } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    const adapter = () => ({ packageVersion: "1.1.4", estimate: async () => ({}),
+      submit: async () => { throw vendorFailure({ approvalSent: true }); }, lookup: async () => ({ hashes: [] }) });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    chain.finalized = 1000n;
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: current().confirmationTx!.callHash }, factsReader(), adapter));
+    chain.finalized = 9000n;
+    chain.log.length = 0;
+    const pending = await confirmOrder(context, current(), { ...options, resume: true }, factsReader(), adapter);
+    assert.equal(pending.chainSearch, "searched");
+    const ranges = chain.log.filter(entry => entry.startsWith("logs:")).map(entry => entry.slice(5).split("-").map(BigInt) as [bigint, bigint]);
+    assert.ok(ranges.every(([from, to]) => to - from < 500n));
+    assert.deepEqual(ranges[0], [1000n, 1499n]);
+    assert.deepEqual(ranges.at(-1), [4000n, 4000n], "the window ends 3,000 blocks past the recorded height");
   });
 });

@@ -77,6 +77,12 @@ export interface ConfirmationTxRecord {
   vendor?: {
     provider: "circle-agent"; packageVersion: string; idempotencyKey: string; wallet: Address; chainId: number;
     submissionStarted: string; transactionId?: string; hashes: Hex[]; conformanceCandidate?: boolean;
+    /** The profile chain's final height read before submission, decimal; the review cannot land below it. */
+    fromBlock?: string;
+    /** The challenge Circle issued for this execution. */
+    challengeId?: string;
+    /** Circle's last reported state for the transaction, such as COMPLETE or FAILED. */
+    state?: string;
   };
   txHash?: Hex | undefined;
   state: ConfirmationTxState;

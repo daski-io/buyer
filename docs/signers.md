@@ -114,8 +114,11 @@ zero-value transfer from the wallet to itself with the circle CLI, then
 doctor again.
 
 Delivery confirmations from a contract wallet are submitted directly: the
-CLI validates and prints the EAS call, and the wallet's own tool sends it.
-See the [CLI commands](../packages/pay/README.md).
+CLI validates and prints the EAS call. The Circle agent wallet submits it
+through the CLI's direct-review adapter once the gateway advertises
+`confirmation.directReview.circleExecute`
+([direct reviews](direct-reviews.md)); another contract wallet sends it with
+its own tool. See the [CLI commands](../packages/pay/README.md).
 
 ```bash
 export DASKI_KEY_BACKEND=circle-agent

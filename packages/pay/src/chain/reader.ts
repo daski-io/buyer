@@ -15,7 +15,7 @@
  * needs several contract values reads them through `readContracts`: one call.
  */
 import {
-  createPublicClient, http, HttpRequestError, RpcError, RpcRequestError, TimeoutError, BaseError,
+  createPublicClient, http, HttpRequestError, RpcError, RpcRequestError, TimeoutError, BaseError, toHex,
   type Abi, type Address, type Hex,
 } from "viem";
 import { CliError } from "../cli/errors.js";
@@ -41,6 +41,12 @@ export interface ReceiptLog {
   address: Address;
   topics: readonly Hex[];
   data: Hex;
+}
+
+/** A mined log, with the transaction that emitted it. */
+export interface ChainLog extends ReceiptLog {
+  transactionHash: Hex;
+  blockNumber: bigint;
 }
 
 export interface TransactionReceiptLike {
@@ -91,6 +97,11 @@ export interface ChainReader {
    * `readContracts`, which reads one at a time from a reader without it.
    */
   readContracts?(args: { reads: readonly ContractRead[]; blockNumber?: bigint }): Promise<readonly unknown[]>;
+  /**
+   * One emitter's mined logs whose leading topics match, in an inclusive
+   * block range. Used to find a direct review on chain without the vendor.
+   */
+  getLogs?(args: { address: Address; topics: readonly Hex[]; fromBlock: bigint; toBlock: bigint }): Promise<readonly ChainLog[]>;
 }
 
 /** Several contract reads in one call where the reader batches, otherwise one at a time; results keep their order. */
@@ -232,6 +243,18 @@ export function createChainReader(rpcUrl: string, finalityTag: FinalityTag, time
     async readContract<T>(args: { address: Address; abi: Abi; functionName: string; args: readonly unknown[]; blockNumber?: bigint }) {
       try {
         return await client.readContract(args as never) as T;
+      } catch (error) {
+        throw rpcFailure(rpcUrl, error);
+      }
+    },
+    async getLogs({ address, topics, fromBlock, toBlock }) {
+      try {
+        const logs = await client.request({ method: "eth_getLogs",
+          params: [{ address, topics: [...topics], fromBlock: toHex(fromBlock), toBlock: toHex(toBlock) }] });
+        // A pending log has no transaction or block yet; only mined ones count.
+        return logs.flatMap((log) => log.transactionHash && log.blockNumber
+          ? [{ address: log.address, topics: log.topics, data: log.data, transactionHash: log.transactionHash, blockNumber: BigInt(log.blockNumber) }]
+          : []);
       } catch (error) {
         throw rpcFailure(rpcUrl, error);
       }

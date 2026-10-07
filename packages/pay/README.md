@@ -5,7 +5,7 @@ The Daski buyer CLI obtains a quote, validates and signs an approved payment, an
 ## Setup and purchase
 
 ```bash
-npm install -g @daski/pay@0.5.2
+npm install -g @daski/pay@0.5.3
 export DASKI_HOST_CLASS=durable   # or ephemeral
 daski doctor --json
 ```
@@ -35,7 +35,9 @@ The command returns the actual quote and an approval identifier. After the user 
 | `order cancel <handle>` | Request cancellation |
 | `order confirm <handle> --choice <Confirmed\|NotConfirmed> [--submission <sponsored\|direct>]` | Prepare and validate the user's review; sponsored: sign and submit; direct: print the validated call |
 | `order revoke-confirmation <handle>` | Withdraw the active review, in the same mode |
-| `order confirm <handle> --resume` | Reconcile a stored sponsored submission or a Circle operation; direct resume never executes again |
+| `order confirm <handle> --estimate` | Circle agent wallet: estimate the saved direct review; sends nothing |
+| `order confirm <handle> --submit --approve-call <callHash>` | Circle agent wallet: submit the user-approved direct review through the qualified adapter, once the gateway advertises `confirmation.directReview.circleExecute` |
+| `order confirm <handle> --resume` | Reconcile a stored sponsored submission or a Circle operation through Circle's history and the chain; direct resume never executes again |
 | `order confirm <handle> --tx <hash>` | Direct mode: record the hash the wallet's tool reported (unverified); replaces a final, provably unrelated one |
 | `order confirm <handle> --check [--submission <sponsored\|direct>]` | Verify a pending direct record (the receipt, the EAS event, the attestation, and the gateway's final state at or past the receipt's block); otherwise report the gateway's final state of the review, keeping an observed direct record as history. `--submission direct` returns the recorded evidence of that record, `--submission sponsored` asks the gateway |
 | `order confirm <handle> --abandon` | Direct mode: clear a record whose transaction reverted, was never sent, or is final and provably unrelated |
@@ -57,11 +59,8 @@ Signed sponsorship keeps the preparation, exact signature, profile and operation
 
 ## Documentation
 
-[Policy](../../docs/policy.md) · [Configuration](../../docs/config.md) · [Keys](../../docs/keys.md) · [Signers](../../docs/signers.md) · [Conformance](../../docs/conformance.md)
+[Policy](../../docs/policy.md) · [Configuration](../../docs/config.md) · [Keys](../../docs/keys.md) · [Signers](../../docs/signers.md) · [Direct Circle reviews](../../docs/direct-reviews.md) · [Conformance](../../docs/conformance.md)
 
 ## License
 
 MIT
-
-See [direct Circle reviews](../../docs/direct-reviews.md) for explicit estimation,
-submission approval, credential boundary and read-only recovery.

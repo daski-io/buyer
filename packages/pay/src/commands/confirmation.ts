@@ -43,10 +43,14 @@
  * before the lock, so no passphrase prompt runs inside it.
  */
 import { randomUUID } from "node:crypto";
-import { createCircleReviewAdapter, type DirectReviewSubmissionAdapter } from "../signers/circleReview.js";
+import {
+  circleProgressOf, createCircleReviewAdapter, type CircleLookup, type DirectReviewSubmissionAdapter,
+} from "../signers/circleReview.js";
+import type { CircleReviewProgress } from "../signers/circleReviewTransport.js";
+import { circleChainName, loginHint } from "../signers/circleAgent.js";
 import { canonicalHash, type SignerDescription, type TypedDataRequest } from "@daski/x402-scheme";
 import {
-  decodeEventLog, encodeAbiParameters, encodeFunctionData, getAddress, isAddressEqual, keccak256,
+  decodeEventLog, encodeAbiParameters, encodeEventTopics, encodeFunctionData, getAddress, isAddressEqual, keccak256,
   parseAbi, parseAbiParameters, type Address, type Hex,
 } from "viem";
 import { discoverEasReviewProfile, type EasReviewProfile } from "../chain/easProfiles.js";
@@ -401,11 +405,14 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
       if (options.resume) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING", message: "There is no pending review submission.",
         remediation: "Check order status, then supply the user's review choice if a new review is wanted." });
       const action = options.revoke ? "revoke-confirmation" : "confirmation";
+      const mode = selectConfirmationMode(signer.describe(), options.submission);
       // One review journal per order: a direct submission still prepared or
       // submitted blocks any new preparation, sponsored included, so a second
-      // review cannot be signed while the first is unresolved on chain.
-      if (isPendingDirect(record.confirmationTx)) throw directPending(handle, record.confirmationTx!);
-      const mode = selectConfirmationMode(signer.describe(), options.submission);
+      // review cannot be signed while the first is unresolved on chain. The
+      // one exception is a call an earlier buyer prepared without saving it:
+      // preparing it again restores it, and only when it is the same call.
+      const legacy = mode === "direct" && isLegacyPrepared(record.confirmationTx) ? record.confirmationTx : undefined;
+      if (isPendingDirect(record.confirmationTx) && !legacy) throw directPending(handle, record.confirmationTx!);
       if (superseding && mode !== "sponsored") throw new CliError({
         code: "DASKI_CONFIRMATION_SUPERSESSION_INVALID", message: "Same-nonce supersession requires a sponsored delegated review.",
         remediation: "Direct attest/revoke does not consume the delegated nonce. Reconcile the live authorization first." });
@@ -438,25 +445,36 @@ export async function confirmOrder(context: CommandContext, record: OrderRecord,
 
       if (mode === "direct") {
         const validated = validateDirectCall(prepared.call, facts, choice!, context.profile.easAddress);
+        const callHash = canonicalHash(validated.call);
+        if (legacy && legacy.callHash !== callHash) throw new CliError({ code: "DASKI_CONFIRMATION_TX_PENDING",
+          message: "A direct review an earlier buyer prepared is still saved, and this choice prepares a different call.",
+          remediation: `If that call was never sent, clear it with daski order confirm ${handle} --abandon and prepare again. ` +
+            `If it was sent, record its hash with daski order confirm ${handle} --tx <hash>.` });
         const expected = await expectedBinding(context, facts, validated, signer);
         const tracked: ConfirmationTxRecord = {
           action: validated.action,
-          callHash: canonicalHash(validated.call),
+          callHash,
           expected,
           call: validated.call,
           choice: choice!,
           state: "prepared",
-          preparedAt: new Date().toISOString(),
+          preparedAt: legacy?.preparedAt ?? new Date().toISOString(),
         };
         updateOrder(record.intentId, { confirmationTx: tracked });
+        const circle = signer.describe().provider === "circle-agent";
         return { orderHandle: record.handle, mode, action: validated.action, ...summary,
           ...(warning ? { warning } : {}),
           call: validated.call,
           callHash: tracked.callHash,
-          note: "This call was validated against chain facts. Preparation sends no transaction.",
-          next: "For Circle, use --estimate, then --submit --approve-call <callHash> when explicitly approved and execution is qualified. Or submit with your wallet tool. " +
-            `Then record the hash: daski order confirm ${handle} --tx <hash>, and verify it: ` +
-            `daski order confirm ${handle} --check.` };
+          ...(legacy ? { restored: true } : {}),
+          note: "This call was validated against chain facts. Preparation sends no transaction." +
+            (legacy ? " It is the call an earlier buyer prepared for this order, now saved so it can be estimated and submitted." : ""),
+          next: circle
+            ? `Show the call to the user. Estimate it with daski order confirm ${handle} --estimate. Once the user approves this exact call ` +
+              "and the gateway advertises confirmation.directReview.circleExecute, submit it with " +
+              `daski order confirm ${handle} --submit --approve-call <callHash>, then run --resume until it is observed.`
+            : `Submit the call with the wallet's own tool, then record the hash: daski order confirm ${handle} --tx <hash>, ` +
+              `and verify it: daski order confirm ${handle} --check.` };
       }
 
       const typedData = validateConfirmationPreparation(prepared, facts, choice!, acknowledged);
@@ -528,7 +546,9 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
     remediation: "Use --estimate, --submit --approve-call <callHash>, or --resume separately." });
   if (!tracked?.call || !tracked.choice || tracked.state === "abandoned") throw new CliError({
     code: "DASKI_CONFIRMATION_NOT_PREPARED", message: "There is no saved validated call for this direct review.",
-    remediation: "Prepare the chosen review first, then approve its displayed callHash." });
+    remediation: isLegacyPrepared(tracked)
+      ? `An earlier buyer prepared this review without saving its call. Prepare the same choice again (daski order confirm ${handle} --choice <the same choice>) to restore it, then approve its displayed callHash.`
+      : "Prepare the chosen review first, then approve its displayed callHash." });
   if (record.confirmationSubmission) throw new CliError({ code: "DASKI_CONFIRMATION_PENDING",
     message: "A sponsored authorization is still unresolved.", remediation: "Reconcile it before executing a direct review." });
   if (signer.provider !== "circle-agent" || signer.accountType !== "contract") throw new CliError({
@@ -537,34 +557,16 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
   if (canonicalHash(tracked.call) !== tracked.callHash || tracked.call.chainId !== context.profile.chainId ||
       !isAddressEqual(tracked.call.to, context.profile.easAddress) ||
       (tracked.vendor && (!isAddressEqual(tracked.vendor.wallet, context.payerAddress) || tracked.vendor.chainId !== context.profile.chainId))) throw invalidCall("saved call binding differs");
+  if (options.resume) return resumeCircleReview(context, record, tracked, handle, adapterFactory);
   const adapter = adapterFactory();
-  if (options.resume) {
-    if (!tracked.vendor) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING",
-      message: "Circle submission has not started.", remediation: "Preparation is not approval; use --estimate or explicitly approve --submit." });
-    const request = { mode: "lookup" as const, wallet: context.payerAddress, call: tracked.call, idempotencyKey: tracked.vendor.idempotencyKey };
-    const found = await adapter.lookup(request, tracked.vendor.transactionId);
-    const hashes = [...new Set([...tracked.vendor.hashes, ...found.hashes])];
-    const updated = { ...tracked, vendor: { ...tracked.vendor, ...(found.transactionId ? { transactionId: found.transactionId } : {}), hashes },
-      ...(hashes.length ? { txHash: hashes[hashes.length - 1]! } : {}) };
-    updateOrder(record.intentId, { confirmationTx: updated });
-    for (const txHash of hashes) {
-      try {
-        const result = await checkDirectRecord(context, record, { ...updated, txHash }, handle, { orderHandle: handle, mode: "direct" });
-        if (result.state === "observed") return result;
-      } catch (error) {
-        if (!(error instanceof CliError) || error.code !== "DASKI_CONFIRMATION_RECEIPT_UNRELATED") throw error;
-        // An ERC-4337 outer success can contain an inner revert. Keep the journal.
-      }
-    }
-    return { orderHandle: handle, mode: "direct", state: "submitted", transactionId: updated.vendor.transactionId ?? null,
-      hashes, next: hashes.length ? "Wait for finalized EAS evidence, then use --resume again."
-        : "Vendor identity or exact-call discovery is unresolved. Keep this journal; --resume only reads and never executes again." };
-  }
   if (tracked.vendor || tracked.txHash || tracked.state !== "prepared") throw directPending(handle, tracked);
   const capabilities = (await context.metadata()).confirmation?.directReview;
   if (options.submit && capabilities?.circleExecute !== true && !options.qualifyCircleExecution) throw new CliError({
-    code: "DASKI_CIRCLE_EXECUTION_NOT_QUALIFIED", message: "Circle review execution is not yet qualified for this gateway.",
-    remediation: "Execution requires a recorded live conformance result for the shipped adapter. Estimation remains separate and does not submit." });
+    code: "DASKI_CIRCLE_EXECUTION_NOT_QUALIFIED",
+    message: "This gateway does not advertise Circle review execution (confirmation.directReview.circleExecute) yet.",
+    remediation: `Nothing was sent and the prepared review is kept. Repeat --submit --approve-call ${tracked.callHash} once ` +
+      "daski doctor --json shows gateway.confirmation.directReview.circleExecute: true; estimation is separate and sends nothing. " +
+      "Do not send this call with circle wallet execute: that command passes the tuple argument as a string, which this adapter corrects." });
   if (options.estimate && capabilities?.circleEstimate !== true) throw new CliError({
     code: "DASKI_CIRCLE_ESTIMATE_NOT_QUALIFIED", message: "This gateway does not advertise the Circle estimation capability.",
     remediation: "Update the buyer and gateway before estimating this saved review." });
@@ -579,16 +581,171 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
   const request = { mode: options.estimate ? "estimate" as const : "execute" as const, wallet: context.payerAddress, call: tracked.call, idempotencyKey };
   if (options.estimate) return { orderHandle: handle, mode: "direct", state: "prepared", callHash: tracked.callHash,
     estimate: await adapter.estimate(request), note: "Estimation did not submit the review." };
+  // The final height before anything is sent: the review cannot land below
+  // it, so a later --resume can find it on chain without the vendor.
+  const fromBlock = await context.chain.getFinalBlockNumber();
   const started: ConfirmationTxRecord = { ...tracked, state: "submitted", vendor: {
     provider: "circle-agent", packageVersion: adapter.packageVersion, idempotencyKey, wallet: context.payerAddress,
-    chainId: context.profile.chainId, conformanceCandidate: options.qualifyCircleExecution === true, submissionStarted: new Date().toISOString(), hashes: [] } };
+    chainId: context.profile.chainId, conformanceCandidate: options.qualifyCircleExecution === true, submissionStarted: new Date().toISOString(),
+    fromBlock: fromBlock.toString(), hashes: [] } };
   updateOrder(record.intentId, { confirmationTx: started });
-  const result = await adapter.submit(request);
-  const updated: ConfirmationTxRecord = { ...started, ...(result.txHash ? { txHash: result.txHash } : {}),
-    vendor: { ...started.vendor!, ...(result.transactionId ? { transactionId: result.transactionId } : {}), hashes: result.txHash ? [result.txHash] : [] } };
+  let result: Awaited<ReturnType<DirectReviewSubmissionAdapter["submit"]>>;
+  try {
+    result = await adapter.submit(request);
+  } catch (error) {
+    const progress = circleProgressOf(error);
+    if (progress && !progress.approvalSent && !progress.uncertain) {
+      // Circle executes only an approved challenge, and no approval left the
+      // child: nothing can run, so the prepared review is restored as it was.
+      updateOrder(record.intentId, { confirmationTx: tracked });
+      throw new CliError({ code: "DASKI_CIRCLE_REVIEW_NOT_STARTED",
+        message: progress.executionRequested
+          ? "Circle refused or did not answer the review request before any approval; nothing was sent."
+          : "The Circle review did not reach Circle; nothing was sent.",
+        remediation: `The prepared review is kept. Check the Circle session with circle wallet status; if it expired, ${loginHint(circleChainName(context.profile.chainId))}. ` +
+          `Then repeat daski order confirm ${handle} --submit --approve-call ${tracked.callHash}.`,
+        details: { circleProgress: progress } });
+    }
+    // Possibly executing: keep the journal with every identity Circle gave.
+    if (progress) updateOrder(record.intentId, { confirmationTx: withCircleProgress(started, progress) });
+    throw error;
+  }
+  const updated = withCircleProgress(started, result.progress, result);
   updateOrder(record.intentId, { confirmationTx: updated });
-  return { orderHandle: handle, mode: "direct", state: "submitted", transactionId: result.transactionId ?? null,
-    txHash: result.txHash ?? null, conformanceCandidate: options.qualifyCircleExecution === true, next: "Use --resume to verify final EAS evidence. Vendor completion alone is not review success." };
+  return { orderHandle: handle, mode: "direct", state: "submitted", transactionId: updated.vendor!.transactionId ?? null,
+    txHash: updated.txHash ?? null, vendorState: updated.vendor!.state ?? null, conformanceCandidate: options.qualifyCircleExecution === true,
+    next: `Use daski order confirm ${handle} --resume to verify final EAS evidence. Vendor completion alone is not review success.` };
+}
+
+/** Folds what a vendor run reported into the journal; identities only accumulate. */
+function withCircleProgress(tracked: ConfirmationTxRecord, progress: CircleReviewProgress,
+  result?: { transactionId?: string; txHash?: Hex; state?: string }): ConfirmationTxRecord {
+  const vendor = tracked.vendor!;
+  const transactionId = vendor.transactionId ?? result?.transactionId ?? progress.transactionId;
+  const txHash = result?.txHash ?? progress.txHash;
+  const state = result?.state ?? progress.state;
+  const hashes = txHash ? [...new Set([...vendor.hashes, txHash])] : vendor.hashes;
+  return { ...tracked, ...(hashes.length ? { txHash: hashes[hashes.length - 1]! } : {}),
+    vendor: { ...vendor, ...(progress.challengeId ? { challengeId: progress.challengeId } : {}),
+      ...(transactionId ? { transactionId } : {}), ...(state ? { state } : {}), hashes } };
+}
+
+/** Circle states after which its transaction never executes. */
+const CIRCLE_FAILED_STATES: ReadonlySet<string> = new Set(["FAILED", "DENIED", "CANCELLED"]);
+
+/**
+ * `--resume` for a started Circle review: read-only. Circle's history is
+ * asked for the transaction (by the challenge's transaction ID, the
+ * idempotency key, or the exact call after the submission started), the
+ * chain is searched for the review itself, and every candidate hash is
+ * verified exactly as --check verifies one. It never executes, cancels or
+ * accelerates anything.
+ */
+async function resumeCircleReview(context: CommandContext, record: OrderRecord, tracked: ConfirmationTxRecord, handle: string,
+  adapterFactory: () => DirectReviewSubmissionAdapter): Promise<Record<string, unknown>> {
+  const vendor = tracked.vendor;
+  if (!vendor) throw new CliError({ code: "DASKI_CONFIRMATION_NOT_PENDING",
+    message: "Circle submission has not started.", remediation: "Preparation is not approval; use --estimate or explicitly approve --submit." });
+  const request = { mode: "lookup" as const, wallet: context.payerAddress, call: tracked.call!, idempotencyKey: vendor.idempotencyKey };
+  let found: CircleLookup = { hashes: [] };
+  let vendorLookup: "matched" | "unmatched" | "unavailable" = "unmatched";
+  try {
+    found = await adapterFactory().lookup(request, { transactionId: vendor.transactionId, notBefore: vendor.submissionStarted });
+    if (found.transactionId || found.hashes.length) vendorLookup = "matched";
+  } catch (error) {
+    // The chain still answers when Circle cannot; a lookup failure decides nothing.
+    if (!(error instanceof CliError)) throw error;
+    vendorLookup = "unavailable";
+  }
+  let updated: ConfirmationTxRecord = { ...tracked,
+    vendor: { ...vendor, ...(!vendor.transactionId && found.transactionId ? { transactionId: found.transactionId } : {}),
+      ...(found.state ? { state: found.state } : {}), hashes: [...new Set([...vendor.hashes, ...found.hashes])] } };
+  const verify = async (candidates: readonly Hex[]): Promise<Record<string, unknown> | undefined> => {
+    if (!candidates.length) return undefined;
+    updated = { ...updated, vendor: { ...updated.vendor!, hashes: [...new Set([...updated.vendor!.hashes, ...candidates])] } };
+    updated = { ...updated, txHash: updated.vendor!.hashes[updated.vendor!.hashes.length - 1]! };
+    updateOrder(record.intentId, { confirmationTx: updated });
+    for (const txHash of candidates) {
+      try {
+        const result = await checkDirectRecord(context, record, { ...updated, txHash }, handle, { orderHandle: handle, mode: "direct" });
+        if (result.state === "observed") return result;
+      } catch (error) {
+        if (!(error instanceof CliError) || error.code !== "DASKI_CONFIRMATION_RECEIPT_UNRELATED") throw error;
+        // An ERC-4337 outer success can contain an inner revert. Keep the journal.
+      }
+    }
+    return undefined;
+  };
+  updateOrder(record.intentId, { confirmationTx: updated });
+  const byVendor = await verify(updated.vendor!.hashes);
+  if (byVendor) return byVendor;
+  // Circle's history may be unreadable or not name the hash; the review itself is on chain.
+  let chainSearch: "searched" | "unavailable" | "not-recorded" = updated.vendor!.fromBlock === undefined ? "not-recorded" : "searched";
+  let discovered: Hex[] = [];
+  try {
+    discovered = (await discoverReviewTransactions(context, tracked)).filter(hash => !updated.vendor!.hashes.includes(hash));
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    chainSearch = "unavailable";
+  }
+  const byChain = await verify(discovered);
+  if (byChain) return byChain;
+  const hashes = updated.vendor!.hashes;
+  const failed = CIRCLE_FAILED_STATES.has(updated.vendor!.state ?? "");
+  return { orderHandle: handle, mode: "direct", state: "submitted", transactionId: updated.vendor!.transactionId ?? null,
+    vendorState: updated.vendor!.state ?? null, vendorLookup, chainSearch, hashes,
+    next: failed && updated.vendor!.transactionId
+      ? `Circle reports the transaction ${updated.vendor!.state}, and nothing observed on chain carries this review. ` +
+        `Clear it with daski order confirm ${handle} --abandon, then prepare the review again.`
+      : hashes.length ? "Wait for final EAS evidence, then use --resume again."
+        : "Neither Circle nor the chain shows this review yet. Keep this journal; --resume only reads and never executes again." };
+}
+
+/**
+ * How far past the final height recorded before submission the chain is
+ * searched (about 100 minutes of Base blocks, covering mainnet's finality lag
+ * and Circle's own polling), and in what steps: Base's public RPC refuses an
+ * eth_getLogs range over 500 blocks. A later landing is found through Circle's
+ * history or a hash recorded with --tx.
+ */
+const DISCOVERY_SPAN = 3_000n;
+const DISCOVERY_STEP = 500n;
+
+/**
+ * Transactions that carry this review, found on chain without the vendor:
+ * the pinned EAS's Attested (or Revoked) events for the payer as attester,
+ * the prepared recipient and the confirmation schema, from the final height
+ * recorded before submission, whose attestation binds to the prepared call
+ * at the RPC's final height. --check then verifies each one in full.
+ */
+async function discoverReviewTransactions(context: CommandContext, tracked: ConfirmationTxRecord): Promise<Hex[]> {
+  const from = tracked.vendor?.fromBlock;
+  if (!context.chain.getLogs || from === undefined || !/^\d+$/.test(from)) return [];
+  const finalBlock = await context.chain.getFinalBlockNumber();
+  const start = BigInt(from);
+  if (finalBlock < start) return [];
+  const end = finalBlock < start + DISCOVERY_SPAN ? finalBlock : start + DISCOVERY_SPAN;
+  const eventName = tracked.action === "attest" ? "Attested" : "Revoked";
+  const topics = encodeEventTopics({ abi: EAS_ABI, eventName,
+    args: { recipient: tracked.expected.recipient, attester: context.payerAddress, schemaUID: tracked.expected.schema } }) as Hex[];
+  for (let low = start; low <= end; low += DISCOVERY_STEP) {
+    const high = low + DISCOVERY_STEP - 1n < end ? low + DISCOVERY_STEP - 1n : end;
+    for (const log of await context.chain.getLogs({ address: context.profile.easAddress, topics, fromBlock: low, toBlock: high })) {
+      if (!isAddressEqual(log.address, context.profile.easAddress)) continue;
+      let uid: Hex;
+      try {
+        uid = (decodeEventLog({ abi: EAS_ABI, data: log.data, topics: log.topics as [Hex, ...Hex[]] }).args as { uid: Hex }).uid;
+      } catch {
+        continue;
+      }
+      if (tracked.action === "revoke" && !sameHex(uid, tracked.expected.uid ?? "")) continue;
+      // One attestation binds to the prepared call: its refUID admits no second one.
+      if (!bindingMismatch(await readAttestation(context.chain, context.profile.easAddress, uid, finalBlock), tracked, uid)) {
+        return [log.transactionHash.toLowerCase() as Hex];
+      }
+    }
+  }
+  return [];
 }
 
 function assertCapacity(facts: ConfirmationFacts, choice: Choice, handle: string): void {
@@ -611,6 +768,15 @@ function assertCapacity(facts: ConfirmationFacts, choice: Choice, handle: string
 
 function isPendingDirect(tracked: ConfirmationTxRecord | undefined): boolean {
   return tracked !== undefined && (tracked.state === "prepared" || tracked.state === "submitted");
+}
+
+/**
+ * A call prepared before 0.5.0, which saved only its hash and binding: nothing
+ * was recorded as sent, and the call itself must be prepared again to be
+ * estimated or submitted.
+ */
+function isLegacyPrepared(tracked: ConfirmationTxRecord | undefined): tracked is ConfirmationTxRecord {
+  return tracked !== undefined && tracked.state === "prepared" && !tracked.call && !tracked.txHash && !tracked.vendor;
 }
 
 /** A direct record that --tx, --check, or --abandon can act on: anything but none or abandoned. */
@@ -738,7 +904,10 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
       message: `This confirmation was already observed as ${tracked.txHash}.`,
       remediation: "Nothing to record. Prepare a new confirmation if another submission is wanted." });
     let corrected: { previousTxHash: Hex; reason: string } | undefined;
-    if (tracked.state === "submitted" && tracked.txHash !== txHash) {
+    // A started Circle execution may carry several hashes (Circle replaces a
+    // stuck transaction), so a hash is added to it, never swapped; each one is
+    // still bound on chain before the journal closes.
+    if (!tracked.vendor && tracked.state === "submitted" && tracked.txHash !== txHash) {
       // Replacing a recorded hash is a journal correction, allowed only once the
       // recorded transaction is canonical, final, and provably not the
       // prepared call.
@@ -749,7 +918,8 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
           "transaction is final and carries no event that binds to the prepared call; if it reverted, --abandon clears it first." });
       corrected = { previousTxHash: tracked.txHash!, reason: unrelated };
     }
-    updateOrder(record.intentId, { confirmationTx: { ...tracked, txHash, state: "submitted" } });
+    const vendor = tracked.vendor ? { vendor: { ...tracked.vendor, hashes: [...new Set([...tracked.vendor.hashes, txHash])] } } : {};
+    updateOrder(record.intentId, { confirmationTx: { ...tracked, ...vendor, txHash, state: "submitted" } });
     return { ...base, txHash, state: "submitted", verification: "recorded, not yet verified",
       ...(corrected ? { corrected, note: `The previously recorded transaction is final and unrelated to the prepared call (${corrected.reason}); the record now tracks the new hash. ${cancelsNothing}` } : {}),
       next: `Run daski order confirm ${handle} --check once the transaction is mined. ${finalityNote(context.profile.chainId)}` };
@@ -762,25 +932,30 @@ async function manageDirectRecord(context: CommandContext, record: OrderRecord, 
   // transaction provably not this call. A revert in a block that is not yet final
   // settles nothing: a reorganization can re-include the transaction against
   // different state.
-  if (tracked.vendor) throw new CliError({
-    code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE", message: "Circle execution was started and has no resolved transaction hash.",
-    remediation: "Use --resume for read-only vendor lookup. Keep the saved idempotency key; do not abandon or execute again." });
+  // A started Circle execution is abandoned only once Circle reports its
+  // transaction failed, and then only on the same receipt rules as any hash.
+  if (tracked.vendor && !(tracked.vendor.transactionId !== undefined && CIRCLE_FAILED_STATES.has(tracked.vendor.state ?? ""))) throw new CliError({
+    code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE", message: "Circle execution was started and Circle has not reported it failed.",
+    remediation: `Use daski order confirm ${handle} --resume: it reads Circle's record of the transaction and searches the chain, ` +
+      "and never executes. Keep the saved idempotency key; do not abandon or execute again." });
+  const hashes = [...new Set([...(tracked.vendor?.hashes ?? []), ...(tracked.txHash ? [tracked.txHash] : [])])];
   let unrelatedReceipt: string | undefined;
-  if (tracked.txHash) {
-    const receipt = await context.chain.getTransactionReceipt(tracked.txHash);
+  for (const txHash of hashes) {
+    const pinned = { ...tracked, txHash };
+    const receipt = await context.chain.getTransactionReceipt(txHash);
     if (!receipt) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
-      message: `Transaction ${tracked.txHash} has no receipt yet and may still execute.`,
+      message: `Transaction ${txHash} has no receipt yet and may still execute.`,
       remediation: `Wait for it to be mined, then run daski order confirm ${handle} --check. Abandon is allowed only when the receipt is a final revert or the transaction is final and unrelated to this call.` });
     if (receipt.status === "success") {
-      const unrelated = await provenUnrelated(context, tracked, handle, receipt);
+      const unrelated = await provenUnrelated(context, pinned, handle, receipt);
       if (!unrelated) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
-        message: `Transaction ${tracked.txHash} executed; the record cannot be abandoned.`,
+        message: `Transaction ${txHash} executed; the record cannot be abandoned.`,
         remediation: `Verify it with daski order confirm ${handle} --check.` });
       unrelatedReceipt = unrelated;
     } else {
       const view = await receiptView(context, receipt);
       if (!view.final || !view.canonical) throw new CliError({ code: "DASKI_CONFIRMATION_TX_MAY_EXECUTE",
-        message: `Transaction ${tracked.txHash} reverted in ${view.final
+        message: `Transaction ${txHash} reverted in ${view.final
           ? "a block that is not the chain's canonical block at its height"
           : `block ${receipt.blockNumber}, which is not final yet (final block ${view.finalBlock})`}; it may still be re-included.`,
         remediation: `Wait for the block to become final. ${finalityNote(context.profile.chainId)} Then run daski order confirm ${handle} --check and --abandon.` });
@@ -886,7 +1061,9 @@ async function checkDirectRecord(context: CommandContext, record: OrderRecord, t
   }
   if (!tracked.txHash) throw new CliError({ code: "DASKI_CONFIRMATION_TX_NOT_RECORDED",
     message: "The prepared call has no transaction hash recorded yet.",
-    remediation: `Submit it with the wallet's own tool, then record the hash: daski order confirm ${handle} --tx <hash>.` });
+    remediation: tracked.vendor
+      ? `Circle execution was started; use daski order confirm ${handle} --resume to find its transaction through Circle and the chain.`
+      : `Submit it with the wallet's own tool, then record the hash: daski order confirm ${handle} --tx <hash>.` });
   const receipt = await context.chain.getTransactionReceipt(tracked.txHash);
   if (!receipt) {
     return { ...base, txHash: tracked.txHash, state: "submitted", receipt: "pending",
