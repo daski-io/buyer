@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.5 — unreleased
+
+### @daski/pay
+
+- **A Circle direct review executes.** With 0.5.4 Circle accepted the review and its approval, then failed the transaction before broadcasting it (`ESTIMATION_ERROR`): its execution backend cannot encode the review's tuple argument from the CLI's text either, as it refuses the tuple as JSON. Both the estimate and the execution now send the approved call's exact calldata in place of the signature and parameters the CLI builds, and Circle estimates it exactly as it estimated the JSON tuple. Neither earlier attempt reached the chain.
+- `--resume` identifies a Circle transaction listed with null parameters, as Circle lists a call executed from calldata, by the transaction ID its challenge named; it reported `vendorLookup: "unmatched"` for it before.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.5.4 — unreleased
 
 ### @daski/pay

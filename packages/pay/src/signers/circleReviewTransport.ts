@@ -125,12 +125,14 @@ export function circleReviewArguments(request: CircleReviewRequest): string[] {
     ...(request.mode === "estimate" ? ["--estimate"] : ["--idempotency-key", request.idempotencyKey])];
 }
 /**
- * Check that a vendor request carries exactly the approved call, in the form
- * its endpoint parses. Circle's estimate endpoint needs the tuple as JSON and
- * fails to estimate the CLI's text; its execution endpoint parses only the
- * text, the CLI's own form, and refuses JSON as an invalid body (both observed
- * live on Base Sepolia, 2026-10-08). Authentication and other fields stay
- * unchanged.
+ * Check that a vendor request carries exactly the approved call, then send
+ * that call's calldata in place of the signature and parameters the CLI
+ * builds. Circle cannot execute the review's tuple from parameters: its
+ * execution endpoint refuses the tuple as JSON and, given the CLI's text,
+ * fails to estimate the transaction after approval (ESTIMATION_ERROR). With
+ * callData both endpoints take the exact approved call, and the estimate is
+ * the one the JSON tuple gives (all observed live on Base Sepolia,
+ * 2026-10-08). Authentication and other fields stay unchanged.
  */
 export function normalizeCircleReviewBody(request: CircleReviewRequest, body: unknown): Record<string, unknown> {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid Circle body");
@@ -152,7 +154,8 @@ export function normalizeCircleReviewBody(request: CircleReviewRequest, body: un
       encodedCircleTuple(request.call.function, tuple).toLowerCase() !== request.call.calldata.toLowerCase()) {
     throw new Error("Circle tuple differs from approved calldata");
   }
-  return request.mode === "estimate" ? { ...b, abiParameters: [tuple] } : b;
+  const { abiFunctionSignature: _signature, abiParameters: _parameters, ...rest } = b;
+  return { ...rest, callData: request.call.calldata };
 }
 
 /** Circle echoes parameters as sent or as strings; booleans may come back as "true"/"false". */

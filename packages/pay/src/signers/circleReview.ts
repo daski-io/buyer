@@ -195,7 +195,8 @@ export function matchedCircleTransactions(value: unknown, request: CircleReviewR
     : Array.isArray(value && isRecord(value) ? value.data : null) ? (value as { data: unknown[] }).data : [];
   const notBefore = options.notBefore === undefined ? undefined : Date.parse(options.notBefore) - CLOCK_SKEW_MS;
   const matched = rows.filter(isRecord).filter(row => {
-    const carriesCall = row.callData !== undefined || row.calldata !== undefined || row.abiFunctionSignature !== undefined || row.abiParameters !== undefined;
+    // Circle lists a call it executed from calldata with null parameters: that row carries no call.
+    const carriesCall = row.callData != null || row.calldata != null || row.abiFunctionSignature != null || row.abiParameters != null;
     if (options.transactionId) return row.id === options.transactionId && (!carriesCall || circleRowCarriesCall(row, request));
     if (!carriesCall || !circleRowCarriesCall(row, request)) return false;
     if (row.idempotencyKey !== undefined) return row.idempotencyKey === request.idempotencyKey;

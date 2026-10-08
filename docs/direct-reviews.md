@@ -35,10 +35,10 @@ child permits, at the official Circle agent endpoint of the profile's
 environment, only the requests those CLIs send for one `wallet execute`: the
 wallet listing, the contract execution request, Circle's configuration and the
 bound challenge, that challenge's approval, and reads of the one transaction
-the completed challenge names. An estimate carries the approved EAS
-attest/revoke tuple as JSON, which Circle's estimate endpoint needs; an
-execution keeps the CLI's own text form, the only one Circle's execution
-endpoint parses (both observed live on Base Sepolia). All destination, wallet,
+the completed challenge names. Both the estimate and the execution carry the
+approved EAS attest/revoke call's exact calldata in place of the signature and
+parameters the CLI builds: Circle cannot execute the review's tuple argument
+from parameters (observed live on Base Sepolia). All destination, wallet,
 chain, ABI parameters, zero value and idempotency fields must match; the
 re-encoded calldata must be exact. Transfer, deploy, cancel, accelerate,
 arbitrary requests and cross-environment requests fail.
