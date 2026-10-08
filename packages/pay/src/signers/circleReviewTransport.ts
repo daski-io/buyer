@@ -124,7 +124,14 @@ export function circleReviewArguments(request: CircleReviewRequest): string[] {
     "--contract", request.call.to, "--address", request.wallet, "--chain", chain, "--output", "json",
     ...(request.mode === "estimate" ? ["--estimate"] : ["--idempotency-key", request.idempotencyKey])];
 }
-/** Correct exactly one known tuple; authentication and non-target fields stay unchanged. */
+/**
+ * Check that a vendor request carries exactly the approved call, in the form
+ * its endpoint parses. Circle's estimate endpoint needs the tuple as JSON and
+ * fails to estimate the CLI's text; its execution endpoint parses only the
+ * text, the CLI's own form, and refuses JSON as an invalid body (both observed
+ * live on Base Sepolia, 2026-10-08). Authentication and other fields stay
+ * unchanged.
+ */
 export function normalizeCircleReviewBody(request: CircleReviewRequest, body: unknown): Record<string, unknown> {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid Circle body");
   const b = body as Record<string, unknown>;
@@ -145,7 +152,7 @@ export function normalizeCircleReviewBody(request: CircleReviewRequest, body: un
       encodedCircleTuple(request.call.function, tuple).toLowerCase() !== request.call.calldata.toLowerCase()) {
     throw new Error("Circle tuple differs from approved calldata");
   }
-  return { ...b, abiParameters: [tuple] };
+  return request.mode === "estimate" ? { ...b, abiParameters: [tuple] } : b;
 }
 
 /** Circle echoes parameters as sent or as strings; booleans may come back as "true"/"false". */

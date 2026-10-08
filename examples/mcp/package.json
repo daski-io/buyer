@@ -8,7 +8,7 @@
     "start": "node --experimental-strip-types index.ts"
   },
   "dependencies": {
-    "@daski/x402-scheme": "0.5.3",
+    "@daski/x402-scheme": "0.5.4",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@x402/core": "2.24.0",
     "@x402/evm": "2.24.0",

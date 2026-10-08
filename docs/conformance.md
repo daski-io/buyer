@@ -26,7 +26,7 @@ apart from its main ones, so every Circle step below carries `--testnet`.
 
    For the contract signer the suite stops at the validated EAS call. Its
    review goes through this CLI's Circle adapter, never `circle wallet
-   execute`, which cannot send the tuple argument as given; see
+   execute` directly, which keeps no journal to resume or verify it; see
    [direct reviews](direct-reviews.md) and the qualification below.
 4. Record both runs with the release evidence: the exact Circle CLI version
    (`circle --version`), the gateway version from `/.well-known/mcp.json`, and

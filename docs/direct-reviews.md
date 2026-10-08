@@ -18,8 +18,8 @@ separate execution capability, `confirmation.directReview.circleExecute: true`
 in `/.well-known/mcp.json` (`daski doctor --json` shows it). Without it,
 `--submit` refuses with `DASKI_CIRCLE_EXECUTION_NOT_QUALIFIED`, sends nothing
 and keeps the prepared review. Do not send the call with
-`circle wallet execute` instead: that command passes the tuple argument as a
-string, which is what this adapter corrects. An explicitly authorized Base
+`circle wallet execute` instead: only the buyer CLI journals the submission,
+so it can be resumed and verified. An explicitly authorized Base
 Sepolia conformance run can use `--qualify-circle-execution` with
 `DASKI_CONFORMANCE_SPEND_OK=1` to generate the initial evidence; this
 candidate lane never bypasses mainnet qualification. A signing or estimation
@@ -35,11 +35,13 @@ child permits, at the official Circle agent endpoint of the profile's
 environment, only the requests those CLIs send for one `wallet execute`: the
 wallet listing, the contract execution request, Circle's configuration and the
 bound challenge, that challenge's approval, and reads of the one transaction
-the completed challenge names. It corrects only the approved EAS attest/revoke
-tuple. All destination, wallet, chain, ABI parameters, zero value and
-idempotency fields must match; the re-encoded calldata must be exact. Transfer,
-deploy, cancel, accelerate, arbitrary requests and cross-environment requests
-fail.
+the completed challenge names. An estimate carries the approved EAS
+attest/revoke tuple as JSON, which Circle's estimate endpoint needs; an
+execution keeps the CLI's own text form, the only one Circle's execution
+endpoint parses (both observed live on Base Sepolia). All destination, wallet,
+chain, ABI parameters, zero value and idempotency fields must match; the
+re-encoded calldata must be exact. Transfer, deploy, cancel, accelerate,
+arbitrary requests and cross-environment requests fail.
 
 This child runs within Circle's credential boundary: the pinned CLI can read
 its existing userToken, encryptionKey, encryptedUserSecret and storageKey.

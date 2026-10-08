@@ -566,7 +566,7 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
     message: "This gateway does not advertise Circle review execution (confirmation.directReview.circleExecute) yet.",
     remediation: `Nothing was sent and the prepared review is kept. Repeat --submit --approve-call ${tracked.callHash} once ` +
       "daski doctor --json shows gateway.confirmation.directReview.circleExecute: true; estimation is separate and sends nothing. " +
-      "Do not send this call with circle wallet execute: that command passes the tuple argument as a string, which this adapter corrects." });
+      "Do not send this call with circle wallet execute: only the buyer CLI journals the submission, so it can be resumed and verified." });
   if (options.estimate && capabilities?.circleEstimate !== true) throw new CliError({
     code: "DASKI_CIRCLE_ESTIMATE_NOT_QUALIFIED", message: "This gateway does not advertise the Circle estimation capability.",
     remediation: "Update the buyer and gateway before estimating this saved review." });

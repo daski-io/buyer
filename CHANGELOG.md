@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.4 — unreleased
+
+### @daski/pay
+
+- **A Circle direct review can be submitted.** The first live run, on Base Sepolia, found that Circle's two endpoints parse the review's tuple differently: the execution endpoint refuses it as JSON ("Invalid request body") and parses only the CLI's own text, while the estimate endpoint needs the JSON and fails to estimate the text. 0.5.3 sent JSON to both, so every submission answered `DASKI_CIRCLE_REVIEW_NOT_STARTED` having executed nothing. An execution now keeps the CLI's text, still checked to be exactly the approved call before it leaves; an estimate still sends JSON.
+- The guides and `DASKI_CIRCLE_EXECUTION_NOT_QUALIFIED` no longer say that `circle wallet execute` cannot send the tuple: it sends Circle's own form. A Circle review still goes through the buyer CLI, because only it journals the submission so it can be resumed and verified.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.5.3 — unreleased
 
 ### @daski/pay

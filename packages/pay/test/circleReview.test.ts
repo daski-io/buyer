@@ -25,13 +25,14 @@ function body(r: CircleReviewRequest) {
     ...(r.mode === "execute" ? { feeLevel: "MEDIUM", idempotencyKey: r.idempotencyKey } : {}) };
 }
 const root = "https://agentic-wallet.circle.com/proxy/test";
-test("both pinned Circle artifacts require identical bounded tuple correction for attest and revoke", () => {
+test("an estimate carries the exact tuple as JSON and an execution keeps the CLI's exact text, for attest and revoke", () => {
   assert.deepEqual(Object.keys(CIRCLE_REVIEW_ENTRY_HASHES), ["1.1.4", "1.2.0"]);
   for (const action of ["attest", "revoke"] as const) {
     for (const mode of ["estimate", "execute"] as const) {
       const r = request(mode, action), b = body(r);
-      assert.deepEqual(normalizeCircleReviewBody(r, b), { ...b, abiParameters: [circleReviewTuple(r.call)] });
-      assert.throws(() => normalizeCircleReviewBody(r, { ...b, abiParameters: [circleReviewTuple(r.call)] }), "already parsed is not silently corrected twice");
+      // Circle's estimate endpoint needs JSON; its execution endpoint parses only the text (live, 2026-10-08).
+      assert.deepEqual(normalizeCircleReviewBody(r, b), mode === "estimate" ? { ...b, abiParameters: [circleReviewTuple(r.call)] } : b);
+      assert.throws(() => normalizeCircleReviewBody(r, { ...b, abiParameters: [circleReviewTuple(r.call)] }), "a vendor body is never already parsed");
       assert.throws(() => normalizeCircleReviewBody(r, { ...b, contractAddress: wallet }));
       assert.throws(() => normalizeCircleReviewBody(r, { ...b, amount: "1" }));
       assert.throws(() => normalizeCircleReviewBody(r, { ...b, callData: r.call.calldata }));
@@ -58,13 +59,15 @@ test("estimation permits one exact read-only request and cannot create or approv
 test("execute permits only approval of its returned challenge and never transfer or cancel", async () => {
   const r = request("execute");
   const seen: string[] = [];
-  const policy = circleReviewFetchPolicy(r, (async input => { seen.push(String(input)); return new Response(JSON.stringify({ data: { challengeId: "bound-challenge" } })); }) as typeof fetch);
+  const sent: Record<string, unknown>[] = [];
+  const policy = circleReviewFetchPolicy(r, (async (input, init) => { seen.push(String(input)); if (init?.body && init.body !== "encrypted") sent.push(JSON.parse(String(init.body))); return new Response(JSON.stringify({ data: { challengeId: "bound-challenge" } })); }) as typeof fetch);
   await assert.rejects(policy(root + "/v1/w3s/sdk/user/challenges/other/approve", { method: "POST", body: "encrypted" }));
   await policy(root + "/v1/w3s/user/transactions/contractExecution", { method: "POST", body: JSON.stringify(body(r)) });
   await policy(root + "/v1/w3s/sdk/user/challenges/bound-challenge/approve", { method: "POST", body: "encrypted" });
   await assert.rejects(policy(root + "/v1/w3s/user/transactions/transfer", { method: "POST", body: "{}" }));
   await assert.rejects(policy(root + "/v1/w3s/user/transactions/bound-challenge/cancel", { method: "POST", body: "{}" }));
   assert.equal(seen.length, 2);
+  assert.deepEqual(sent[0]!.abiParameters, [JSON.stringify(circleReviewTuple(r.call))], "the execution keeps the CLI's text, which Circle parses");
 });
 test("lookup command is read-only and vendor lineage requires identity plus exact calldata", async () => {
   const r = request("lookup");
