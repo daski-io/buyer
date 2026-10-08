@@ -5,7 +5,7 @@ The Daski buyer CLI obtains a quote, validates and signs an approved payment, an
 ## Setup and purchase
 
 ```bash
-npm install -g @daski/pay@0.5.5
+npm install -g @daski/pay@0.5.6
 export DASKI_HOST_CLASS=durable   # or ephemeral
 daski doctor --json
 ```
@@ -31,7 +31,8 @@ The command returns the actual quote and an approval identifier. After the user 
 | `buy --provider <id> --outcome <id> --request <file.json>` | Quote, approve, validate, sign, submit, and record |
 | `order status <handle>` | Read the gateway's order state using cached read access or a fresh grant-read capability |
 | `order artifact <handle> [--output <file>]` | Save the provider result to a file |
-| `order input <handle> --request <file.json>` | Submit customer input |
+| `order input <handle> --request <file.json>` | Submit the complete corrected request an order's `inputRequest` asks for, as `{"inputText": "...", "data": {...}}` |
+| `order support <handle> --message <text> [--request-id <id>]` | Ask the provider for help; prints the request ID and the Review receipt |
 | `order cancel <handle>` | Request cancellation |
 | `order confirm <handle> --choice <Confirmed\|NotConfirmed> [--submission <sponsored\|direct>]` | Prepare and validate the user's review; sponsored: sign and submit; direct: print the validated call |
 | `order revoke-confirmation <handle>` | Withdraw the active review, in the same mode |

@@ -3,6 +3,18 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.6 — unreleased
+
+### @daski/pay
+
+- **`order status` shows what an order waiting for input holds.** When the provider adds an `inputRequest`, the CLI prints it, with control characters removed. It contains every value on file in the order's own request shape, the values `withheld` for privacy (provide them again), and which fields a correction may change. The order's `documents` are listed with the IDs the provider's download action takes. Before this an `INPUT_REQUIRED` order showed only its state. An answer to `order input` prints the next request when more corrections are needed.
+- **`order support <handle> --message <text>`** contacts the provider through `daski_contact_order_support`. It checks the message before signing (1 to 4000 characters, no control characters), refuses an unquoted multi-word message instead of sending its first word, and generates and prints the request ID; `--request-id` retries a lost response with the same body.
+- An order mutation drops the stored read capability, which the gateway has just invalidated, so the next `order status` does not spend a call on it.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.5.5 — unreleased
 
 ### @daski/pay

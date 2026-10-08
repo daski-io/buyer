@@ -1,5 +1,5 @@
 /**
- * `daski order` — status, artifact, confirm, input, cancel.
+ * `daski order` — status, artifact, confirm, input, support, cancel.
  *
  * These all follow the same shape: resolve the handle from the local store,
  * use a stored read capability if one is still valid, otherwise run the
@@ -20,6 +20,8 @@ import { GatewayClient, gatewayUnsupported } from "../gateway/client.js";
 import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "../gateway/lifecycle.js";
 import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
 import { operationalStatus, supportReply } from "../gateway/operations.js";
+import { inputRequest, orderDocuments } from "../gateway/inputRequest.js";
+import { randomUUID } from "node:crypto";
 import {
   activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord, type ReadCapability,
 } from "../store/orders.js";
@@ -38,6 +40,12 @@ export interface OrderArtifactOptions extends OrderOptions {
 
 export interface OrderInputOptions extends OrderOptions {
   requestFile: string;
+}
+
+export interface OrderSupportOptions extends OrderOptions {
+  message: string;
+  /** Reuse the ID a lost support request printed; a new message needs a new ID. */
+  requestId?: string | undefined;
 }
 
 const READ_CAPABILITY_TOOL = "daski_get_order_access";
@@ -59,6 +67,8 @@ export async function orderStatus(options: OrderOptions): Promise<Record<string,
       state: state ?? record.state,
       operationalStatus: operationalStatus(body),
       supportReply: supportReply(body),
+      inputRequest: inputRequest(body),
+      documents: orderDocuments(body),
       gateway: body,
     };
   });
@@ -115,6 +125,42 @@ export async function orderCancel(options: OrderOptions): Promise<Record<string,
   return mutate(options, "daski_cancel_order", "cancel", {});
 }
 
+const SUPPORT_REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const SUPPORT_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
+
+/** The signed support body the gateway accepts: `{ requestId, message }`, checked before signing. */
+export function supportRequest(message: string, requestId?: string): { requestId: string; message: string } {
+  if (!message.trim() || message.length > 4000 || SUPPORT_CONTROL.test(message)) {
+    throw new CliError({
+      code: "DASKI_SUPPORT_MESSAGE_INVALID",
+      message: "A support message is 1 to 4000 characters of text without control characters.",
+      remediation: 'Pass the whole message as one quoted argument: --message "<text>".',
+    });
+  }
+  const id = requestId ?? `support_${randomUUID().replaceAll("-", "")}`;
+  if (!SUPPORT_REQUEST_ID.test(id)) {
+    throw new CliError({
+      code: "DASKI_SUPPORT_REQUEST_ID_INVALID",
+      message: "A support request ID is 1 to 128 letters, digits, '_' or '-'.",
+      remediation: "Reuse the requestId the earlier attempt printed, or omit --request-id for a new request.",
+    });
+  }
+  return { requestId: id, message };
+}
+
+/**
+ * Ask a person at the provider for help with the order. The accepted receipt
+ * names the Review; the operator's answer appears as `supportReply` on a later
+ * `order status`. Retry a lost response with the same --request-id and the
+ * identical message.
+ */
+export async function orderSupport(options: OrderSupportOptions): Promise<Record<string, unknown>> {
+  const request = supportRequest(options.message, options.requestId);
+  const result = await mutate(options, "daski_contact_order_support", "support", request);
+  const gateway = result.gateway as Record<string, unknown>;
+  return { ...result, requestId: request.requestId, supportReceipt: gateway.supportReceipt };
+}
+
 export async function orderInput(
   options: OrderInputOptions,
 ): Promise<Record<string, unknown>> {
@@ -150,11 +196,17 @@ async function mutate(
       gatewayUrl: context.profile.gatewayUrl,
     });
     const state = gatewayOrderState(body);
-    if (state !== undefined) updateOrder(record.intentId, { state: localOrderState(state, record.handle) });
+    // The gateway invalidates read capabilities after an order mutation;
+    // dropping it here saves the next status read a wasted call.
+    updateOrder(record.intentId, {
+      ...(state !== undefined ? { state: localOrderState(state, record.handle) } : {}),
+      readCapability: undefined,
+    });
     return {
       orderHandle: record.handle ?? options.handle,
       action,
       accepted: true,
+      inputRequest: inputRequest(body),
       gateway: body,
     };
   });

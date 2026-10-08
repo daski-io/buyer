@@ -8,9 +8,15 @@
 export { runBuy, type BuyOptions } from "./commands/buy.js";
 export { runDoctor, type DoctorIssue, type DoctorOptions, type DoctorReport } from "./commands/doctor.js";
 export {
-  orderArtifact, orderCancel, orderConfirm, orderImport, orderInput, orderStatus, orderReconcile,
+  orderArtifact, orderCancel, orderConfirm, orderImport, orderInput, orderStatus, orderReconcile, orderSupport,
+  supportRequest,
   type OrderArtifactOptions, type OrderImportOptions, type OrderInputOptions, type OrderOptions,
+  type OrderSupportOptions,
 } from "./commands/order.js";
+export {
+  inputRequest, orderDocuments,
+  type InputRequestDisplay, type InputRequestField, type OrderDocumentDisplay,
+} from "./gateway/inputRequest.js";
 export {
   selectConfirmationMode, validateConfirmationPreparation, validateDirectCall,
   type ConfirmationFacts, type ConfirmationMode, type ConfirmationOptions, type DirectCall,

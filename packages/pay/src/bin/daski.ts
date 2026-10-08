@@ -12,7 +12,7 @@ import { emit, emitError } from "../cli/output.js";
 import { runBuy } from "../commands/buy.js";
 import { runDoctor } from "../commands/doctor.js";
 import {
-  orderArtifact, orderCancel, orderConfirm, orderImport, orderInput, orderStatus,
+  orderArtifact, orderCancel, orderConfirm, orderImport, orderInput, orderStatus, orderSupport,
   orderReconcile,
 } from "../commands/order.js";
 import { runSignPayment } from "../commands/signPayment.js";
@@ -57,6 +57,8 @@ Commands
   order confirm <handle> --abandon    Direct mode: drop a record with no executable transaction
   order input <handle> --request <file.json>
                                       Submit requested customer input
+  order support <handle> --message <text> [--request-id <id>]
+                                      Ask the provider for help with the order
   order cancel <handle>               Request cancellation
   order reconcile <handle|intentId>   Ask the gateway whether a payment settled; never re-signs
   order import                        Rehydrate the local order store from the gateway's history
@@ -196,13 +198,26 @@ async function main(argv: string[]): Promise<number> {
           assertKnownFlags(flags, [...GLOBAL_FLAGS, "request"]);
           emit(await orderInput({ ...base, requestFile: requireFlag(flags, "request") }), output);
           return 0;
+        case "support":
+          assertKnownFlags(flags, [...GLOBAL_FLAGS, "message", "request-id"]);
+          if (command.length > 3) {
+            // An unquoted message would otherwise be cut at its first word.
+            throw new CliError({
+              code: "DASKI_UNEXPECTED_ARGUMENT",
+              message: `Unexpected argument "${command[3]}" after the order handle.`,
+              remediation: 'Quote the whole message as one argument: --message "<text>".',
+            });
+          }
+          emit(await orderSupport({ ...base, message: requireFlag(flags, "message"),
+            requestId: stringFlag(flags, "request-id") }), output);
+          return 0;
         case "reconcile":
           assertKnownFlags(flags, GLOBAL_FLAGS);
           emit(await orderReconcile(base), output);
           return 0;
         default:
           throw unknownSubcommand("order", command[1],
-            ["status", "artifact", "confirm", "revoke-confirmation", "input", "cancel", "reconcile", "import"]);
+            ["status", "artifact", "confirm", "revoke-confirmation", "input", "support", "cancel", "reconcile", "import"]);
       }
     }
 
