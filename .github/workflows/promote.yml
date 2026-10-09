@@ -1,0 +1,48 @@
+name: Promote
+run-name: ${{ inputs.promotion_attempt || format('Promote {0} to latest', inputs.version) }}
+
+# npm's `latest` follows the buyer the production gateway pins. The release
+# engine dispatches this after a verified mainnet release; testnet releases
+# publish under `next` (release.yml).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact buyer version the production gateway pins
+        required: true
+        type: string
+      promotion_attempt:
+        description: Durable release-engine attempt ID
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write   # npm trusted publishing (OIDC), dist-tags only
+
+concurrency:
+  group: promote-latest
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # dist-tags with trusted publishing need npm 11.21.0 or later.
+      - run: npm install --global npm@11.21.0
+      # Trusted publishing: npm exchanges this job's OIDC token for a short-lived
+      # credential, so no registry token exists anywhere. Each package lists this
+      # workflow as a trusted publisher on npmjs.com that may manage dist-tags
+      # and may not publish (Settings -> Trusted publishing -> GitHub Actions:
+      # daski-io / buyer / promote.yml, Allow npm dist-tag only).
+      - name: Move latest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: node scripts/promote-latest.mjs
