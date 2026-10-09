@@ -72,7 +72,7 @@ async function withRpc(options: { allowance?: number; refuse?: Refusal },
       const { args } = decodeFunctionData({ abi: multicall3Abi, data });
       const calls = args[0] as readonly { target: Address; callData: Hex }[];
       return encodeFunctionResult({ abi: multicall3Abi, functionName: "aggregate3",
-        result: [calls.map((call) => ({ success: true, returnData: answer(call.target, call.callData) }))] as never });
+        result: calls.map((call) => ({ success: true, returnData: answer(call.target, call.callData) })) as never });
     }
     throw new Error(`unexpected ${method}`);
   };
@@ -153,5 +153,9 @@ test("any other refusal stays unavailable and carries the RPC's own words", asyn
       error.code === "DASKI_RPC_UNAVAILABLE" &&
       error.message.includes("(HTTP 403, RPC error -32602: Archive requests require a personal token)") &&
       !error.message.includes(KEY_PATH));
+    // A signature check refused this way is unknown too, not a revert that would read as an invalid signature.
+    await assert.rejects(createChainReader(url, "finalized").call({ to: REPUTATION, data: "0x1626ba7e", gas: 1_000_000n }),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_RPC_UNAVAILABLE" &&
+        error.details.httpStatus === 403 && error.details.rpcErrorCode === -32602);
   });
 });

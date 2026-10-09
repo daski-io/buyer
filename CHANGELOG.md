@@ -3,6 +3,19 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.7 — unreleased
+
+### @daski/pay
+
+- **The MCP SDK moves from 1.30.0 to 1.32.1 and viem from 2.21.55 to 2.57.4**, past advisories against the versions 0.5.6 pins. Through 1.30.1 the SDK's OAuth client could send credentials to an authorization server the MCP server chose (GHSA-6qxp-vccf-f47h); the CLI connects without an auth provider, so it never ran that flow. viem 2.21.55 pinned `ws` 8.18.0, which can disclose uninitialized memory (GHSA-58qx-3vcg-4xpx) and be exhausted by tiny fragments (GHSA-96hv-2xvq-fx4p); viem 2.57.4 pins `ws` 8.21.0. The CLI reads the chain over HTTP and opens no WebSocket.
+- **Both gateways stay reachable.** They answer `/mcp` with a 307 to another host (`sandbox-gateway.daski.io` to `sandbox.daski.io`, `gateway.daski.io` to `daski.io`), and since 1.32 the SDK follows only same-origin redirects unless told otherwise: with 1.32.1 alone, every gateway command would end `DASKI_GATEWAY_UNREACHABLE`. The CLI and the MCP example leave redirects to fetch, as the SDK did before.
+- **A refused RPC request keeps its HTTP status.** viem 2.57 hands on the JSON-RPC error a refused HTTP response carries (a 429, or a 403 such as an archive-state refusal) as the RPC's own answer and drops the status. The chain reader and `wallet balance` fail such a response with its status again, as with 2.21: the message and `httpStatus` name it, `wallet balance` retries it as before, and a signature check refused this way stays unknown (`DASKI_RPC_UNAVAILABLE`) instead of reading as a revert, which is an invalid signature. A refusal without a JSON-RPC error is named by its status text, and no more than 64 KiB of a refused response is read.
+- The repository lockfile also takes the patched hono 4.13.13, ip-address 10.7.3 and proxy-addr 2.0.8, which the MCP SDK brings in, and `npm audit` reports no vulnerabilities. An install of the CLI resolves these itself.
+
+### @daski/x402-scheme
+
+- viem moves from 2.21.55 to 2.57.4, with `ws` 8.21.0, as in @daski/pay; no payment-policy change.
+
 ## 0.5.6 — unreleased
 
 ### @daski/pay

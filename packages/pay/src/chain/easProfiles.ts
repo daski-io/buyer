@@ -56,7 +56,7 @@ export async function discoverEasReviewProfile(chain: ChainReader, chainId: numb
   ]);
   if (!slot || !code || code === "0x" || slot.slice(-40).toLowerCase() !== profile.implementation.slice(2).toLowerCase() ||
       keccak256(code) !== profile.codeHash || version !== profile.contractVersion ||
-      domain?.toLowerCase() !== hashDomain({ types: { EIP712Domain: [{ name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }] }, domain: { name: "EAS", version: profile.domainVersion, chainId, verifyingContract: eas } }).toLowerCase() ||
+      domain?.toLowerCase() !== hashDomain({ types: { EIP712Domain: [{ name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }] }, domain: { name: "EAS", version: profile.domainVersion, chainId: BigInt(chainId), verifyingContract: eas } }).toLowerCase() ||
       attest?.toLowerCase() !== profile.attestTypeHash || revoke?.toLowerCase() !== profile.revokeTypeHash) throw incompatibleEas();
   return profile;
 }

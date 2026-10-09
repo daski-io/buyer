@@ -50,7 +50,8 @@ const signer: SignerAdapter = {
 };
 
 const remote = new Client({ name: "daski-x402-mcp-example", version: "0.1.0" });
-await remote.connect(new StreamableHTTPClientTransport(new URL(`${GATEWAY}/mcp`)) as never);
+// The gateway's /mcp redirects to another host, which the SDK follows only when told to.
+await remote.connect(new StreamableHTTPClientTransport(new URL(`${GATEWAY}/mcp`), { redirectPolicy: "follow" }) as never);
 
 const callJson = async (name: string, args: Record<string, unknown>) => {
   const result = await remote.callTool({ name, arguments: args }) as {

@@ -8,6 +8,7 @@
  * protocol mismatch — never as "not found" or "rejected".
  */
 import assert from "node:assert/strict";
+import { createServer, type RequestListener } from "node:http";
 import { test } from "node:test";
 import {
   GatewayClient,
@@ -154,4 +155,45 @@ test("probe: a transport failure reports unreachable with the cause", async () =
   assert.equal(probe.readableVia, null);
   assert.match(probe.error ?? "", /ECONNREFUSED/);
   assert.equal(target.closed, true);
+});
+
+async function listen(handler: RequestListener): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("no port");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }),
+  };
+}
+
+test("connect: the gateway's redirect of /mcp to another origin is followed, as the gateways redirect theirs", async () => {
+  // A minimal MCP endpoint: JSON answers, no server-initiated stream.
+  const gateway = await listen((request, response) => {
+    if (request.method !== "POST" || request.url !== "/mcp") { response.writeHead(405).end(); return; }
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const message = JSON.parse(body) as { id?: number; method: string; params?: { protocolVersion?: string } };
+      if (message.id === undefined) { response.writeHead(202).end(); return; }
+      const result = message.method === "initialize"
+        ? { protocolVersion: message.params?.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "gateway", version: "0" } }
+        : { tools: [{ name: "daski_get_setup_guide", inputSchema: { type: "object" } }] };
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+    });
+  });
+  // Another port is another origin, as sandbox-gateway.daski.io is to sandbox.daski.io.
+  const front = await listen((request, response) => {
+    request.resume();
+    response.writeHead(307, { location: `${gateway.url}${request.url}` }).end();
+  });
+  const client = new GatewayClient({ gatewayUrl: front.url });
+  try {
+    assert.equal(await client.hasTool("daski_get_setup_guide"), true);
+  } finally {
+    await client.close();
+    await front.close();
+    await gateway.close();
+  }
 });

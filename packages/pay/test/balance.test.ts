@@ -33,6 +33,7 @@ test("a refused balance read is named for the RPC's answer and never prints the 
         usdcAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }), (error: unknown) => {
         assert.ok(error instanceof CliError);
         assert.equal(error.code, code);
+        assert.equal(error.details.httpStatus, status);
         assert.doesNotMatch(JSON.stringify(error.toJSON()), new RegExp(KEY));
         assert.match(error.message, /127\.0\.0\.1:\d+\/…/);
         return true;

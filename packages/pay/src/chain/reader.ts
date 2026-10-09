@@ -184,9 +184,49 @@ function isTransportFailure(error: unknown): boolean {
   return error.walk((cause) => cause instanceof HttpRequestError || cause instanceof TimeoutError) !== null;
 }
 
+/** A JSON-RPC error is a few hundred bytes; a refused response's body is read no further than this. */
+const REFUSAL_BODY_LIMIT = 64 * 1024;
+
+/** A body's text, or undefined once it runs past `limit` bytes. */
+async function readBounded(response: Response, limit: number): Promise<string | undefined> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  for (let size = 0; ;) {
+    const { done, value } = await reader.read();
+    if (done) return Buffer.concat(chunks).toString("utf8");
+    size += value.byteLength;
+    if (size > limit) { await reader.cancel(); return undefined; }
+    chunks.push(value);
+  }
+}
+
+/**
+ * The RPC transport's fetch: a refused HTTP request fails as an
+ * HttpRequestError with its status and the JSON-RPC error its body carries,
+ * as viem 2.21 failed every refused request. viem 2.57 passes that error on
+ * as the RPC's own answer instead: a 429 or 403 lost its status and viem's
+ * retry on it, and a refused signature check read as a revert.
+ */
+export async function rpcFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, init);
+  if (response.ok) return response;
+  const body = await readBounded(response, REFUSAL_BODY_LIMIT);
+  let error: unknown;
+  try {
+    error = body === undefined ? undefined : (JSON.parse(body) as { error?: unknown } | null)?.error;
+  } catch {
+    // Not JSON: the status speaks for it.
+  }
+  throw new HttpRequestError({
+    details: typeof error === "object" && error !== null ? JSON.stringify(error) : response.statusText,
+    headers: response.headers, status: response.status, url: input instanceof Request ? input.url : String(input),
+  });
+}
+
 /** A viem-backed reader for one RPC endpoint, with one deadline per request. */
 export function createChainReader(rpcUrl: string, finalityTag: FinalityTag, timeoutMs = ERC1271_CALL_TIMEOUT_MS): ChainReader {
-  const client = createPublicClient({ transport: http(rpcUrl, { timeout: timeoutMs, retryCount: 0 }) });
+  const client = createPublicClient({ transport: http(rpcUrl, { timeout: timeoutMs, retryCount: 0, fetchFn: rpcFetch }) });
   return {
     async getCode(address, blockNumber) {
       try {

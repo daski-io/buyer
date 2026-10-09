@@ -91,7 +91,12 @@ export class GatewayClient {
     });
     try {
       await client.connect(
-        new StreamableHTTPClientTransport(new URL(`${this.gatewayUrl}/mcp`)) as never,
+        // Both gateways answer /mcp with a 307 to another host (sandbox-gateway.daski.io to
+        // sandbox.daski.io, gateway.daski.io to daski.io). The SDK follows only same-origin
+        // redirects unless told to leave them to fetch, as it did before 1.32. The configured
+        // gateway decides where its requests go either way, and this client has no OAuth
+        // provider whose credentials a redirect could carry elsewhere.
+        new StreamableHTTPClientTransport(new URL(`${this.gatewayUrl}/mcp`), { redirectPolicy: "follow" }) as never,
       );
     } catch (error) {
       throw new CliError({
