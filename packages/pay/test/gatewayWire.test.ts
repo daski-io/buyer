@@ -19,7 +19,11 @@ import {
   validateOrderActionChallenge,
   validateWalletActionChallenge,
 } from "@daski/x402-scheme";
-import { GatewayClient, gatewayRefusalRemediation, type McpToolResult } from "../src/gateway/client.js";
+import type { CliError } from "../src/cli/errors.js";
+import {
+  GatewayClient, gatewayRefusalRemediation, isRetryableGatewayCode, type McpToolResult,
+} from "../src/gateway/client.js";
+import { lifecycleFailure } from "../src/gateway/lifecycle.js";
 
 type Json = Record<string, unknown>;
 
@@ -60,6 +64,9 @@ const railErrors = fixture<{
   walletAuthorizationInvalid: { error: Json };
   authorizationWindow: { error: Json };
   artifactNotAvailable: { error: Json };
+  orderActionUnsupported: { error: Json };
+  orderActionConflict: { error: Json };
+  providerLifecycleUnavailable: { error: Json };
   requestSchemaInvalid: { error: Json };
   mcpWalletAccessDenied: McpToolResult;
 }>("standard-rail-error.json");
@@ -165,4 +172,37 @@ test("standard-rail-error: the MCP refusal and the HTTP envelopes carry their co
   assert.equal(railErrors.requestSchemaInvalid.error.code, "REQUEST_SCHEMA_INVALID");
   assert.equal(railErrors.artifactNotAvailable.error.code, "ARTIFACT_NOT_AVAILABLE");
   assert.ok(gatewayRefusalRemediation("ARTIFACT_NOT_AVAILABLE", railErrors.artifactNotAvailable.error)?.includes("daski order status"));
+});
+
+test("standard-rail-error: the provider's named order-action refusals are read with command-term remediations", () => {
+  // The MCP server relays a gateway refusal as the tool error { ...error, next_action }.
+  const relayed = (error: Json): McpToolResult => {
+    const payload = { ...error, next_action: "gateway tool-term guidance" };
+    return { isError: true, content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+  };
+  const unsupported = railErrors.orderActionUnsupported.error;
+  const conflict = railErrors.orderActionConflict.error;
+  const unavailable = railErrors.providerLifecycleUnavailable.error;
+  assert.deepEqual([unsupported.code, unsupported.retryable], ["ORDER_ACTION_UNSUPPORTED", false]);
+  assert.deepEqual([conflict.code, conflict.retryable], ["ORDER_ACTION_CONFLICT", false]);
+  assert.deepEqual([unavailable.code, unavailable.retryable, unavailable.requiresNewSignature],
+    ["PROVIDER_LIFECYCLE_UNAVAILABLE", true, true]);
+
+  const failures = [unsupported, conflict, unavailable].map((error) =>
+    lifecycleFailure("daski_contact_order_support", relayed(error)));
+  assert.deepEqual(failures.map((failure) => failure.code),
+    ["ORDER_ACTION_UNSUPPORTED", "ORDER_ACTION_CONFLICT", "PROVIDER_LIFECYCLE_UNAVAILABLE"]);
+  for (const failure of failures) {
+    assert.notEqual(failure.remediation, "gateway tool-term guidance", "the CLI's command terms win");
+    assert.match(failure.remediation, /daski order status <handle>/);
+  }
+  const [unsupportedFailure, conflictFailure, unavailableFailure] = failures as [CliError, CliError, CliError];
+  assert.match(unsupportedFailure.remediation, /does not offer this action.*nothing changed\. Do not retry it/s);
+  assert.match(conflictFailure.remediation, /keeps what it accepted first.*without --request-id/s);
+  assert.match(unavailableFailure.remediation, /may already have taken effect\. Wait 10 seconds.*at most three times.*--request-id/s);
+  // Only the unavailable provider may be retried; the conflicting and unsupported actions are final.
+  assert.deepEqual(failures.map((failure) => failure.details.retryable), [undefined, undefined, true]);
+  assert.equal(isRetryableGatewayCode("PROVIDER_LIFECYCLE_UNAVAILABLE"), true);
+  assert.equal(isRetryableGatewayCode("ORDER_ACTION_UNSUPPORTED"), false);
+  assert.equal(isRetryableGatewayCode("ORDER_ACTION_CONFLICT"), false);
 });

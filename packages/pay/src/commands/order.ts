@@ -50,6 +50,16 @@ export interface OrderSupportOptions extends OrderOptions {
 
 const READ_CAPABILITY_TOOL = "daski_get_order_access";
 
+/**
+ * Read refusals that come after the gateway accepted the read capability: the
+ * order has no artifact yet, or the provider refused the read by name. A
+ * provider that could not serve it right now is read again later with the same
+ * capability, so none of them costs a new grant-read signature.
+ */
+const CAPABILITY_ACCEPTED = new Set([
+  "ARTIFACT_NOT_AVAILABLE", "ORDER_ACTION_UNSUPPORTED", "ORDER_ACTION_CONFLICT", "PROVIDER_LIFECYCLE_UNAVAILABLE",
+]);
+
 export async function orderStatus(options: OrderOptions): Promise<Record<string, unknown>> {
   return withOrder(options, async (context, record) => {
     const body = await readWithCapability(context, record, {
@@ -154,11 +164,41 @@ export function supportRequest(message: string, requestId?: string): { requestId
  * `order status`. Retry a lost response with the same --request-id and the
  * identical message.
  */
-export async function orderSupport(options: OrderSupportOptions): Promise<Record<string, unknown>> {
+export async function orderSupport(
+  options: OrderSupportOptions,
+  contextFactory: OrderContextFactory = createContext,
+): Promise<Record<string, unknown>> {
   const request = supportRequest(options.message, options.requestId);
-  const result = await mutate(options, "daski_contact_order_support", "support", request);
+  let result: Record<string, unknown>;
+  try {
+    result = await mutate(options, "daski_contact_order_support", "support", request, contextFactory);
+  } catch (error) {
+    throw supportFailure(error, request.requestId, options.handle);
+  }
   const gateway = result.gateway as Record<string, unknown>;
   return { ...result, requestId: request.requestId, supportReceipt: gateway.supportReceipt };
+}
+
+/**
+ * A refused support request carries its request ID: a retry must keep it
+ * while the provider may already have recorded the request, and an ID this
+ * CLI generated would otherwise be lost with the error.
+ */
+function supportFailure(error: unknown, requestId: string, handle: string): unknown {
+  if (!(error instanceof CliError)) return error;
+  const remediation = error.code === "PROVIDER_LIFECYCLE_UNAVAILABLE"
+    ? "The provider could not take the support request right now, and it may already have recorded it. Wait " +
+      `10 seconds and send it again with the same --message and --request-id ${requestId}, at most three times, ` +
+      `so the provider records it once. Then check the order with daski order status ${handle}.`
+    : error.code === "ORDER_ACTION_CONFLICT"
+      ? `Support request ${requestId} is already bound to a different message, which the provider keeps. Do not ` +
+        `resend this message under it: check daski order status ${handle}, and send a different message as a new ` +
+        "request, without --request-id."
+      : error.remediation;
+  return new CliError({
+    code: error.code, message: error.message, remediation,
+    details: { ...error.details, requestId }, exitCode: error.exitCode,
+  });
 }
 
 export async function orderInput(
@@ -183,6 +223,7 @@ async function mutate(
   toolName: string,
   action: OrderAction,
   request: Record<string, unknown>,
+  contextFactory: OrderContextFactory = createContext,
 ): Promise<Record<string, unknown>> {
   return withOrder(options, async (context, record) => {
     const body = await callAuthorizedLifecycleTool({
@@ -209,7 +250,7 @@ async function mutate(
       inputRequest: inputRequest(body),
       gateway: body,
     };
-  });
+  }, contextFactory);
 }
 
 /**
@@ -260,9 +301,9 @@ export async function readWithCapability(
     const result = await read(stored.token);
     const body = GatewayClient.json(result);
     if (!result.isError && body) return body;
-    // The order has no artifact yet: the capability is fine, so keep it and
-    // do not ask for another signature.
-    if (body?.code === "ARTIFACT_NOT_AVAILABLE") throw lifecycleFailure(call.toolName, result);
+    // The gateway accepted the capability and the answer is about the order:
+    // keep it and do not ask for another signature.
+    if (CAPABILITY_ACCEPTED.has(String(body?.code))) throw lifecycleFailure(call.toolName, result);
     // Any other rejected capability is a stale capability; drop it and re-authorize.
     updateOrder(record.intentId, { readCapability: undefined });
   }

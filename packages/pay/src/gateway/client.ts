@@ -365,10 +365,14 @@ export async function readiness(gatewayUrl: string, timeoutMs = 10_000): Promise
   }
 }
 
-/** Gateway refusals after which the same request may simply be retried. */
+/**
+ * Gateway refusals after which the same request may simply be retried. A
+ * provider that could not complete an order action allows at most three such
+ * retries, which its remediation states.
+ */
 export function isRetryableGatewayCode(code: string | undefined): boolean {
   return code === "SIGNATURE_VERIFICATION_UNAVAILABLE" || code === "SIGNATURE_VERIFICATION_BUSY" ||
-    code === "CONFIRMATION_SUBMISSION_PENDING";
+    code === "CONFIRMATION_SUBMISSION_PENDING" || code === "PROVIDER_LIFECYCLE_UNAVAILABLE";
 }
 
 /**
@@ -442,6 +446,21 @@ export function gatewayRefusalRemediation(
     case "ARTIFACT_NOT_AVAILABLE":
       return "This order has no artifact yet: it is neither completed nor completed after recovery. " +
         "Check it with daski order status <handle> and read the artifact once it completes.";
+    // The provider's named refusals of an order action. None returns a spent
+    // authorization, so another attempt signs a fresh one; a read reuses its
+    // stored read access.
+    case "ORDER_ACTION_UNSUPPORTED":
+      return "The provider does not offer this action for this order, and nothing changed. Do not " +
+        "retry it; check the order with daski order status <handle>.";
+    case "ORDER_ACTION_CONFLICT":
+      return "The provider already accepted different content under this action's identity, such as a " +
+        "support request ID, and keeps what it accepted first. Do not resend it under that identity: check " +
+        "daski order status <handle>, and send a different support message as a new request, without --request-id.";
+    case "PROVIDER_LIFECYCLE_UNAVAILABLE":
+      return "The provider could not complete this action right now, and it may already have taken effect. " +
+        "Wait 10 seconds, then run the same command again, at most three times; for order support keep the " +
+        "same --message and --request-id, so the provider records the request once. Then check the order with " +
+        "daski order status <handle>.";
     case "CONFIRMATION_SUBMISSION_LIMIT":
       return "This order has used its three confirmation submissions. The current confirmation " +
         "can still be revoked with --revoke; no further confirmation can be submitted.";

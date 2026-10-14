@@ -2,7 +2,8 @@
  * An order-bound context builds its signer lazily: a read served by a stored
  * capability never opens the key store, the signer is built on the first
  * signature, and it must be the payer on record. `order import` rebuilds the
- * store from the gateway's own history.
+ * store from the gateway's own history. A read the provider refuses by name
+ * keeps its capability, and a refused support request keeps its request ID.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -11,8 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { canonicalHash } from "@daski/x402-scheme";
 import { CliError } from "../src/cli/errors.js";
-import { gatewayOrderState, orderImport, readWithCapability, withOrder } from "../src/commands/order.js";
+import { gatewayOrderState, orderImport, orderSupport, readWithCapability, withOrder } from "../src/commands/order.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
 import { createContext, type CommandContext, type ContextOptions, type OrderBinding } from "../src/context.js";
 import type { HostEnvironment } from "../src/host.js";
 import { findByIntent, findOrder, listOrders, upsertOrder } from "../src/store/orders.js";
@@ -85,6 +88,105 @@ test("an artifact the order does not have yet is reported without dropping the c
     assert.deepEqual(calls, ["daski_get_order_artifact"], "no grant-read, so no new signature");
     assert.deepEqual(findByIntent("intent")?.readCapability, capability);
     await context.close();
+  });
+});
+
+// The provider's named refusals of an order action, as the gateway's MCP server relays them.
+const providerRefusal = (wanted: string, retryable: boolean) => {
+  const refusal = { code: wanted, message: `the provider refused: ${wanted}`, phase: "dispatch", retryable,
+    requiresNewSignature: false, paymentMayHaveSettled: false, next_action: "gateway tool-term guidance" };
+  return { isError: true, content: [{ type: "text", text: JSON.stringify(refusal) }], structuredContent: refusal };
+};
+
+test("a read the provider refuses by name keeps the capability, signs nothing, and an unavailable one is read again with it", async () => {
+  await withHome(async () => {
+    const context = await createContext({ host }, { expectedPayer: PAYER });
+    const capability = { token: "cap", expiresAt: Math.floor(Date.now() / 1000) + 600 };
+    for (const [wanted, retryable] of [["ORDER_ACTION_UNSUPPORTED", false], ["ORDER_ACTION_CONFLICT", false],
+      ["PROVIDER_LIFECYCLE_UNAVAILABLE", true]] as const) {
+      const calls: string[] = [];
+      const refusing = { ...context, client: { hasTool: async () => true, callTool: async (name: string, args: Record<string, unknown>) => {
+        calls.push(`${name}:${String(args.readCapability)}`);
+        return providerRefusal(wanted, retryable);
+      } } } as unknown as CommandContext;
+      const stored = upsertOrder(record(`intent-${wanted}`, `handle-${wanted}`, { readCapability: capability }));
+      await assert.rejects(readWithCapability(refusing, stored, { toolName: "daski_get_order_status", action: "status", request: {} }),
+        (error: unknown) => code(wanted)(error) && /daski order status/.test((error as CliError).remediation) &&
+          (error as CliError).details.retryable === (retryable ? true : undefined));
+      assert.deepEqual(calls, ["daski_get_order_status:cap"], `${wanted}: no grant-read, so no new signature`);
+      assert.deepEqual(findByIntent(`intent-${wanted}`)?.readCapability, capability, `${wanted}: the capability is kept`);
+    }
+    // The next read after an unavailable provider reuses the kept capability.
+    const reads: string[] = [];
+    const served = { ...context, client: { hasTool: async () => true, callTool: async (name: string, args: Record<string, unknown>) => {
+      reads.push(`${name}:${String(args.readCapability)}`);
+      return { content: [], structuredContent: { state: "working", orderState: "DISPATCHED" } };
+    } } } as unknown as CommandContext;
+    const body = await readWithCapability(served, findByIntent("intent-PROVIDER_LIFECYCLE_UNAVAILABLE")!,
+      { toolName: "daski_get_order_status", action: "status", request: {} });
+    assert.equal(body.orderState, "DISPATCHED");
+    assert.deepEqual(reads, ["daski_get_order_status:cap"]);
+    await context.close();
+  });
+});
+
+test("a support request the provider could not take names its request ID, and the retry sends the same body", async () => {
+  await withHome(async () => {
+    const profile = DEFAULT_CONFIG.profiles.sandbox!;
+    const capability = { token: "cap", expiresAt: Math.floor(Date.now() / 1000) + 600 };
+    upsertOrder(record("intent", "handle", { readCapability: capability }));
+    const signatures: unknown[] = [];
+    const signer = { getAddress: async () => account.address,
+      describe: () => ({ provider: "local", accountType: "eoa", conformance: "verified" }),
+      signTypedData: async (data: unknown) => { signatures.push(data); return account.signTypedData(data as never); } };
+    const sent: Record<string, unknown>[] = [];
+    let answer: () => Record<string, unknown> = () => providerRefusal("PROVIDER_LIFECYCLE_UNAVAILABLE", true);
+    const context = { profile, profileName: "sandbox", payerAddress: account.address, signer, resolveSigner: async () => signer,
+      close: async () => {},
+      client: { hasTool: async () => true, callTool: async (name: string, args: Record<string, unknown>) => {
+        assert.equal(name, "daski_contact_order_support");
+        const request = args.request as Record<string, unknown>;
+        if (!args.authorization) {
+          const issuedAt = Math.floor(Date.now() / 1000);
+          return { content: [], structuredContent: { authorizationRequired: true, challenge: { orderId: "id", action: "support",
+            method: "POST", absoluteResourceUri: `${profile.gatewayUrl}/orders/handle/actions/support`,
+            requestHash: canonicalHash(request), nonce: canonicalHash(`support-${sent.length}`), issuedAt, validBefore: issuedAt + 120 } } };
+        }
+        sent.push(request);
+        return answer();
+      } } } as unknown as CommandContext;
+    const factory = async () => context;
+    const message = "Is the mailbox ready?";
+
+    let requestId = "";
+    await assert.rejects(orderSupport({ handle: "handle", json: true, host, message }, factory), (error: unknown) => {
+      assert.ok(code("PROVIDER_LIFECYCLE_UNAVAILABLE")(error));
+      const failure = error as CliError;
+      requestId = String(failure.details.requestId);
+      assert.match(requestId, /^support_[0-9a-f]{32}$/);
+      assert.equal(failure.details.retryable, true);
+      assert.ok(failure.remediation.includes(`same --message and --request-id ${requestId}, at most three times`));
+      assert.match(failure.remediation, /daski order status handle\./);
+      return true;
+    });
+    assert.deepEqual(findByIntent("intent")?.readCapability, capability, "nothing invalidated the read capability");
+
+    // Retried with the printed ID, the provider gets the identical body under a fresh authorization.
+    const receipt = { acceptedAt: now, messageId: "message-1", requestId, reviewId: "review-1" };
+    answer = () => ({ content: [], structuredContent: { orderId: "id", state: "working", orderState: "DISPATCHED", supportReceipt: receipt } });
+    const accepted = await orderSupport({ handle: "handle", json: true, host, message, requestId }, factory);
+    assert.equal(accepted.requestId, requestId);
+    assert.deepEqual(accepted.supportReceipt, receipt);
+    assert.deepEqual(sent, [{ requestId, message }, { requestId, message }]);
+    assert.equal(signatures.length, 2, "each attempt signs its own authorization");
+
+    // A different message under the same ID conflicts, and is never offered as a retry.
+    answer = () => providerRefusal("ORDER_ACTION_CONFLICT", false);
+    await assert.rejects(orderSupport({ handle: "handle", json: true, host, message: "A different question", requestId }, factory),
+      (error: unknown) => code("ORDER_ACTION_CONFLICT")(error) && (error as CliError).details.requestId === requestId &&
+        (error as CliError).details.retryable === undefined &&
+        (error as CliError).remediation.includes(`Support request ${requestId} is already bound`) &&
+        /without --request-id/.test((error as CliError).remediation));
   });
 });
 
