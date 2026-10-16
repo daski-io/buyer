@@ -1,17 +1,29 @@
+---
+title: Release readiness
+status: canonical
+authority: current release-engine implementation and approved owner decisions
+owner: repository maintainers
+effective-date: 2026-10-16
+last-verified: 2026-10-16
+supersedes: split-coordinator and pre-handover descriptions where inconsistent
+superseded-by: none
+sensitivity: public-safe
+related-repositories: daski-io/buyer; daski-io/deploy-mainnet
+review-trigger: release process, interface or CI change
+---
+
 # Release readiness
 
-Releases of `@daski/pay` and `@daski/x402-scheme` are driven by a two-command
-coordinator in the private release repository. `prep` makes the next release
-green: it takes this repository's develop branch as the candidate, runs the
-release checks, and fixes whatever blocks the release in the repository that
-owns the problem, so a drifted wire shape is repaired here and in the gateway
-rather than worked around at release time. `go` ships it. The coordinator only
-checks that CI passed on the exact develop commit it is about to release,
-publishes the packages through this repository's `Release` workflow (npm
-trusted publishing with provenance), and moves nothing by hand: no local
-build, no manual `npm publish`, no hand-made tag or merge. Everything a release
-depends on is therefore proved by this repository's own CI on develop, which
-is why develop must always be releasable.
+Releases of `@daski/pay` and `@daski/x402-scheme` are driven by the engine in
+[daski-io/deploy-mainnet](https://github.com/daski-io/deploy-mainnet), for both
+sandbox and production. Read its current instructions for owner authorization,
+release selection and additional stops. The gateway pins the exact CLI version;
+a testnet `release` can publish a missing candidate through this repository's
+trusted Release workflow under `next`. Plain `prep` never publishes. A verified
+mainnet release advances `latest` through the Promote workflow. Local builds,
+manual `npm publish`, hand-made tags or release-branch merges are not substitutes.
+Everything needed by a release must be proved on the exact owning commit; fix
+blockers here and in paired consumers before releasing.
 
 ## Definition of done for develop
 
@@ -30,12 +42,11 @@ A change is done when all of the following hold for the commit on develop:
   the `gateway-contract` job proves the two agree. The offline wire tests then
   parse those exact shapes.
 - `CHANGELOG.md` describes the change under the version that will ship it.
-- Nothing was merged to `sandbox` or `main`, tagged or published by hand. The
-  coordinator merges the release pull request into `sandbox`, the testnet
-  release branch, tags that merge and publishes through the `Release`
-  workflow, and only for a commit CI proved. `main` is the production branch
-  and moves only by fast-forward to a release commit of `sandbox`, performed
-  by the production coordinator.
+- Nothing was merged to `sandbox` or `main`, tagged or published by hand.
+  For a missing gateway-pinned version, the engine tags the CI-proved buyer
+  develop head at that version and invokes the trusted Release workflow.
+  Repository branch history and npm dist-tags are managed by the engine's
+  current package flow, not by a contributor's local release script.
 
 ## What CI proves
 
@@ -45,9 +56,9 @@ A change is done when all of the following hold for the commit on develop:
 | `build` (Node 20, 22, 24): after the tests | The examples typecheck against the built packages, and `.scratch/package-proof/proof.json` still binds every tracked source file, the toolchain, every compiled file and both tarballs after all checks; the proof is uploaded per Node version. |
 | `gateway-contract` | Every wire fixture the gateway's `test/wire-fixtures/index.json` lists for `daski-buyer` is vendored under `test/fixtures/gateway-wire/` byte for byte against the gateway's develop branch, and no copy the gateway no longer lists remains. |
 
-CI runs the same jobs on a push to `sandbox`, so the release merge commit has
-its own run: production promotion reads that run as the proof for the exact
-commit `main` moves to.
+CI also runs on pushes to the configured history branches. The engine proves
+the exact source/package commit it selects; do not manufacture a sandbox merge
+as a prerequisite for package publication.
 
 The `Release` workflow repeats the package proof on Node 24 and, before
 publishing `@daski/pay`, waits until the exact `@daski/x402-scheme` version it
@@ -79,11 +90,15 @@ Do not write runbooks or instructions for the release agent anywhere else. CI ru
 
 ## Publishing
 
-Publication goes through `.github/workflows/release.yml` only. The workflow
-takes the package to publish and the npm dist-tag to publish it under. `prep`
-may publish a candidate version under the `next` dist-tag, so the coordinator
-can prove the exact published bytes before the release; `go` publishes or
-promotes `latest`. A version is immutable once it is on npm under either tag:
-a defect found in a candidate is fixed on develop with a new version, never by
-republishing the same one, and `latest` only ever moves to a version that CI
-proved on develop.
+Publication goes through `.github/workflows/release.yml` only. When a candidate
+gateway pins a version missing from npm, the owner's testnet `release` can tag
+the green buyer develop head and publish both packages under `next` before its
+prep finishes. Plain `prep` reports a missing version and never publishes it.
+After verified mainnet serving, the engine uses `.github/workflows/promote.yml`
+to move `latest` forward to the version the production gateway pins. Promote
+moves dist-tags; it does not publish new package bytes. Failed post-release
+promotion is retried through the engine's bookkeeping operation.
+
+A version is immutable once published under any tag. Fix a candidate defect on
+develop with a new version; never republish the same one. Read the engine's
+current instructions before any tag, publish or promotion operation.
