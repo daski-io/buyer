@@ -1,3 +1,17 @@
+---
+title: "daski-buyer"
+status: canonical
+authority: current repository implementation and approved maintainer workflow
+owner: repository maintainers
+effective-date: 2026-10-16
+last-verified: 2026-10-16 (documentation placement; no live release verification)
+supersedes: repository-wide agent files as the home of general repository guidance
+superseded-by: none
+sensitivity: public-safe
+related-repositories: daski-io/buyer
+review-trigger: setup, architecture, interface or workflow change
+---
+
 # daski-buyer
 
 The buyer side of Daski: a CLI for purchasing service outcomes and the x402 client plugin underneath it.
@@ -120,6 +134,31 @@ No registry access, wallet or live gateway is needed. See
 [release package checks](./docs/release-package-checks.md).
 
 Existing unit tests use isolated temporary state and fixture signers. Live conformance uses sandbox USDC and requires explicit spending authorization; see the conformance guide.
+
+## Implementation and paired changes
+
+- Preserve existing wallets, signer identities, budgets and pending payment intents.
+  Reconcile signed or ambiguous payments before any retry. Never create/fund wallets
+  or change budgets as an incidental setup/test step.
+- Gateway wire fixtures under `test/fixtures/gateway-wire/` are exact copies from the
+  gateway's indexed fixtures. A protocol change is paired with its owner and consumers.
+- The two packages share a version and the CLI pins the exact scheme version. A change
+  requiring publication also updates version/changelog and coordinates the gateway's
+  exact CLI pin, website instructions and harness CLI lane.
+- npm versions are immutable. Publication and `latest` promotion are engine operations
+  through the trusted Release/Promote workflows, never a local `npm publish` shortcut.
+
+## Development verification
+
+Package engines allow Node >=20; CI proves Node 20/22/24 and publishing uses Node 24.
+Use the current workflows and lockfile. `npm test` includes offline suites and package
+proof; run `npm run typecheck`, the example typecheck and package-proof verification
+as required by `docs/release-readiness.md`. Build/proof commands live in `package.json`.
+Live conformance and acceptance can spend and are separate authorized operations;
+ordinary development checks use isolated fixtures and no customer state.
+
+See [release readiness](docs/release-readiness.md) for the managed sandbox
+and production package flow. Integration into `develop` does not publish a package.
 
 ## License
 
