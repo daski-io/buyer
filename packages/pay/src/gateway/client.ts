@@ -368,11 +368,13 @@ export async function readiness(gatewayUrl: string, timeoutMs = 10_000): Promise
 /**
  * Gateway refusals after which the same request may simply be retried. A
  * provider that could not complete an order action allows at most three such
- * retries, which its remediation states.
+ * retries, which its remediation states. A payment the gateway could not
+ * admit was neither claimed nor settled (`paymentMayHaveSettled: false`).
  */
 export function isRetryableGatewayCode(code: string | undefined): boolean {
   return code === "SIGNATURE_VERIFICATION_UNAVAILABLE" || code === "SIGNATURE_VERIFICATION_BUSY" ||
-    code === "CONFIRMATION_SUBMISSION_PENDING" || code === "PROVIDER_LIFECYCLE_UNAVAILABLE";
+    code === "CONFIRMATION_SUBMISSION_PENDING" || code === "PROVIDER_LIFECYCLE_UNAVAILABLE" ||
+    code === "PAYMENT_ADMISSION_UNAVAILABLE";
 }
 
 /**
@@ -443,6 +445,14 @@ export function gatewayRefusalRemediation(
     case "SIGNATURE_VERIFICATION_BUSY":
       return "The gateway is verifying too many contract-account signatures right now. Nothing " +
         "was consumed; retry the same command in a moment.";
+    // Refusals of a paid submission that the gateway answers before any
+    // settlement: both carry paymentMayHaveSettled false.
+    case "PAYMENT_ADMISSION_UNAVAILABLE":
+      return "The gateway could not record this payment right now, and nothing was claimed or " +
+        "settled. Retry the same command in a moment.";
+    case "OUTCOME_CAPACITY_EXHAUSTED":
+      return "This outcome has as many open orders as its provider accepts, and nothing was claimed " +
+        "or settled. Run the same command again later.";
     case "ARTIFACT_NOT_AVAILABLE":
       return "This order has no artifact yet: it is neither completed nor completed after recovery. " +
         "Check it with daski order status <handle> and read the artifact once it completes.";

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { privateKeyToAccount } from "viem/accounts";
 import { canonicalHash, type OrderBindingV2, type TypedDataRequest } from "@daski/x402-scheme";
 import { runSignPayment } from "../src/commands/signPayment.js";
@@ -15,6 +16,17 @@ import type { PaymentRequirement, PaymentSubmission } from "../src/gateway/clien
 import { findByIntent, isUnspent, listOrders } from "../src/store/orders.js";
 
 const payer = privateKeyToAccount(`0x${"11".repeat(32)}`);
+
+/** The repository's vendored copy of the gateway's wire fixtures. */
+function gatewayWireFixtures(): string {
+  let directory = dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 8; depth += 1) {
+    const candidate = join(directory, "test", "fixtures", "gateway-wire");
+    if (existsSync(join(candidate, "standard-rail-error.json"))) return candidate;
+    directory = dirname(directory);
+  }
+  throw new Error("gateway wire fixtures are missing: re-vendor test/fixtures/gateway-wire/ from the gateway");
+}
 const profile = DEFAULT_CONFIG.profiles.sandbox!;
 const splitter = "0x2222222222222222222222222222222222222222";
 const intentId = "int_00000000-0000-4000-8000-000000000001";
@@ -202,6 +214,44 @@ test("automatic recovery keeps an in-flight payment pending and does not replay 
     assert.equal(findByIntent(intentId)?.state, "PENDING_RECONCILIATION");
     assert.equal(submissions.length, 1);
     assert.equal(signatures.length, 1);
+  });
+});
+
+test("a payment the gateway could not admit settles nothing, is not reconciled, and the same command then buys", async () => {
+  // The gateway's own envelope, as vendored from its wire fixtures and relayed by the MCP server.
+  const unadmitted = (JSON.parse(readFileSync(join(gatewayWireFixtures(), "standard-rail-error.json"), "utf8")) as {
+    paymentAdmissionUnavailable: { error: Record<string, unknown> };
+  }).paymentAdmissionUnavailable.error;
+  await withFixture(async ({ options, context, signatures, submissions }) => {
+    const original = context.client.callTool;
+    let refuse = true;
+    const calls: string[] = [];
+    context.client.callTool = async (name: string, args: Record<string, unknown>, meta?: Record<string, unknown>) => {
+      calls.push(name);
+      if (name !== "daski_buy_outcome" || !refuse) return original(name, args, meta);
+      submissions.push(meta!["x402/payment"] as PaymentSubmission);
+      const payload = { ...unadmitted, next_action: "gateway tool-term guidance" };
+      return { content: [{ type: "text", text: JSON.stringify(payload) }], isError: true, structuredContent: payload };
+    };
+    const approved = { ...options, approved: purchaseApproval(approvedTerms).id };
+    await assert.rejects(runBuy(approved, async () => context), (error: unknown) => {
+      assert.ok(error instanceof CliError);
+      assert.equal(error.code, "PAYMENT_ADMISSION_UNAVAILABLE");
+      assert.match(error.remediation, /nothing was claimed or settled\. Retry the same command in a moment\./);
+      assert.equal(error.details.retryable, true);
+      return true;
+    });
+    assert.equal(findByIntent(intentId)?.state, "NOT_SETTLED");
+    assert.equal(calls.includes("daski_list_my_orders"), false, "nothing settled, so nothing is reconciled");
+    assert.equal(signatures.length, 1);
+    refuse = false;
+    const result = await runBuy(approved, async () => context);
+    assert.equal(result.purchased, true);
+    assert.equal(result.intentId, intentId);
+    assert.equal(submissions.length, 2);
+    // The same order's recipe nonce: both signatures authorize one transfer at most.
+    assert.equal(signatures.length, 2);
+    assert.equal(signatures[0]!.message.nonce, signatures[1]!.message.nonce);
   });
 });
 

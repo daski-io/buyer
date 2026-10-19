@@ -50,7 +50,7 @@ daski order reconcile <intentId> --json
 daski order import --json
 ```
 
-Quotation sends the request for provider pricing and creates or reuses a draft. The paid retry advances the purchase. Funding requirements come from that quote and preflight. `order import` rehydrates the local order store from the gateway's own history for the active payer.
+Quotation sends the request for provider pricing and creates or reuses a draft. The paid retry advances the purchase. Funding requirements come from that quote and preflight. `order import` rehydrates the local order store from the gateway's own history for the active payer. A paid submission the gateway could not admit right now fails with `PAYMENT_ADMISSION_UNAVAILABLE` (`retryable: true`): nothing was claimed or settled, so run the same command again in a moment. `OUTCOME_CAPACITY_EXHAUSTED` means the outcome is at its open-order capacity and nothing was claimed or settled; run the command again later.
 
 Mailbox quotations require DNS readiness for the configured payer, including the ownership TXT for an external domain. Set every returned required record before quoting again. Managed domains use the existing wallet-authorized DNS actions before payment. A registrar write alone does not establish propagation.
 
