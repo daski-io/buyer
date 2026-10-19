@@ -24,6 +24,7 @@ import {
   GatewayClient, gatewayRefusalRemediation, isRetryableGatewayCode, type McpToolResult,
 } from "../src/gateway/client.js";
 import { lifecycleFailure } from "../src/gateway/lifecycle.js";
+import { isAmbiguousPurchaseAnswer, purchaseFailure } from "../src/gateway/purchase.js";
 
 type Json = Record<string, unknown>;
 
@@ -67,6 +68,8 @@ const railErrors = fixture<{
   orderActionUnsupported: { error: Json };
   orderActionConflict: { error: Json };
   providerLifecycleUnavailable: { error: Json };
+  paymentAdmissionUnavailable: { error: Json };
+  outcomeCapacityExhausted: { error: Json };
   requestSchemaInvalid: { error: Json };
   mcpWalletAccessDenied: McpToolResult;
 }>("standard-rail-error.json");
@@ -205,4 +208,33 @@ test("standard-rail-error: the provider's named order-action refusals are read w
   assert.equal(isRetryableGatewayCode("PROVIDER_LIFECYCLE_UNAVAILABLE"), true);
   assert.equal(isRetryableGatewayCode("ORDER_ACTION_UNSUPPORTED"), false);
   assert.equal(isRetryableGatewayCode("ORDER_ACTION_CONFLICT"), false);
+});
+
+test("standard-rail-error: a paid submission refused before any settlement is definitive, and only the unadmitted one is retried", () => {
+  // The MCP server relays a gateway refusal as the tool error { ...error, next_action }.
+  const relayed = (error: Json): McpToolResult => {
+    const payload = { ...error, next_action: "gateway tool-term guidance" };
+    return { isError: true, content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+  };
+  const unadmitted = railErrors.paymentAdmissionUnavailable.error;
+  const capacity = railErrors.outcomeCapacityExhausted.error;
+  assert.deepEqual([unadmitted.code, unadmitted.retryable, unadmitted.requiresNewSignature, unadmitted.paymentMayHaveSettled],
+    ["PAYMENT_ADMISSION_UNAVAILABLE", true, false, false]);
+  assert.deepEqual([capacity.code, capacity.retryable, capacity.requiresNewSignature, capacity.paymentMayHaveSettled],
+    ["OUTCOME_CAPACITY_EXHAUSTED", true, false, false]);
+  // Nothing settled under either: no reconciliation, no pending record.
+  assert.equal(isAmbiguousPurchaseAnswer(unadmitted), false);
+  assert.equal(isAmbiguousPurchaseAnswer(capacity), false);
+
+  const unadmittedFailure = purchaseFailure(relayed(unadmitted), { afterSubmit: true, refused: true });
+  assert.equal(unadmittedFailure.code, "PAYMENT_ADMISSION_UNAVAILABLE");
+  assert.match(unadmittedFailure.remediation, /nothing was claimed or settled\. Retry the same command in a moment\./);
+  assert.equal(unadmittedFailure.details.retryable, true);
+  assert.equal(isRetryableGatewayCode("PAYMENT_ADMISSION_UNAVAILABLE"), true);
+
+  const capacityFailure = purchaseFailure(relayed(capacity), { afterSubmit: true, refused: true });
+  assert.equal(capacityFailure.code, "OUTCOME_CAPACITY_EXHAUSTED");
+  assert.match(capacityFailure.remediation, /nothing was claimed or settled\. Run the same command again later\./);
+  assert.equal(capacityFailure.details.retryable, undefined, "capacity frees only as open orders complete");
+  assert.equal(isRetryableGatewayCode("OUTCOME_CAPACITY_EXHAUSTED"), false);
 });
