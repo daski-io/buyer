@@ -1,7 +1,9 @@
 /**
- * The Circle agent wallet — a deployed contract account operated through the
- * pinned `@circle-fin/cli`, and the default signer on every host.
- * Verified by the conformance suite.
+ * The Circle agent wallet — a deployed contract account operated through
+ * `@circle-fin/cli`, and the default signer on every host.
+ * Verified by the conformance suite. Signing checks no vendor version: the
+ * gateway publishes the one this adapter was tested with, and the separate
+ * direct-review adapter, which can execute, admits only its floor and later.
  *
  * The adapter shells out to the `circle` command with an argument array,
  * never a shell string: the wallet address comes from `circle wallet list`,

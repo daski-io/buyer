@@ -3,6 +3,19 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.8 — unreleased
+
+### @daski/pay
+
+- **A Circle review runs with any `@circle-fin/cli` from 1.2.0 on.** The direct-review adapter admitted only the two builds it was hashed against, 1.1.4 and 1.2.0, so a review refused Circle's current 1.2.2 with `DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED`, although 1.2.1 and 1.2.2 send exactly 1.2.0's review requests. It now checks the package instead of the build: the `circle` on PATH must be the entry point the `@circle-fin/cli` package.json declares as its `circle` binary, at a release (not a prerelease) of 1.2.0 or later, and the review child checks it again before it loads anything. 1.1.4 and older are refused. Every request-level check is kept: destination, wallet, chain, ABI parameters, zero value, idempotency, exact calldata and the allowlisted endpoints, and any request outside them still fails before it leaves.
+- **The review child confines the Circle CLI's network to the policy.** Before the vendor loads, Node's HTTP, HTTPS, HTTP/2, TLS and socket clients, the dispatcher undici clients share and WebSocket refuse every use but the policy's own fetch to Circle's endpoint. A Circle release that sent a request any other way, such as through its own HTTP client, would have bypassed the policy and its journal; it now fails closed with nothing sent.
+- The signing adapter checks no Circle CLI version, as before; its comments and `docs/signers.md` no longer call the CLI pinned.
+- **The offline tests can run a real Circle CLI**, found on PATH and verified as for a user, through the review child against a fake of Circle's API: an estimate, a submission through the bound challenge and a history lookup (`DASKI_TEST_CIRCLE_CLI`, `npm run test:circle --workspace @daski/pay`). The new Circle CLI workflow runs them every week, on demand for any version, and on pull requests that change the adapter, with 1.2.0 and Circle's latest release on Node 20, 22 and 24. 1.2.0 and 1.2.2 pass.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.5.7 — unreleased
 
 ### @daski/pay

@@ -25,30 +25,43 @@ Sepolia conformance run can use `--qualify-circle-execution` with
 candidate lane never bypasses mainnet qualification. A signing or estimation
 conformance result does not enable execution.
 
-The adapter verifies the installed @circle-fin/cli package identity and exact
-dist/index.js SHA-256 for version 1.1.4 or 1.2.0, whose review requests are
-identical. Circle's own version policy refuses every command below 1.1.4, so
-1.0.0 is not run. Unknown or changed entrypoints are refused before anything is
-sent. It starts a dedicated Node child without a shell, preload hooks, proxy
-overrides or Daski environment secrets. It never edits the installed CLI. The
-child permits, at the official Circle agent endpoint of the profile's
-environment, only the requests those CLIs send for one `wallet execute`: the
-wallet listing, the contract execution request, Circle's configuration and the
-bound challenge, that challenge's approval, and reads of the one transaction
-the completed challenge names. Both the estimate and the execution carry the
-approved EAS attest/revoke call's exact calldata in place of the signature and
-parameters the CLI builds: Circle cannot execute the review's tuple argument
-from parameters (observed live on Base Sepolia). All destination, wallet,
-chain, ABI parameters, zero value and idempotency fields must match; the
-re-encoded calldata must be exact. Transfer, deploy, cancel, accelerate,
-arbitrary requests and cross-environment requests fail.
+The adapter runs any @circle-fin/cli release from 1.2.0 on, so a new Circle
+release needs no new buyer. The `circle` found on PATH must be the entry point
+that its own package.json, in the package named @circle-fin/cli, declares as
+its `circle` binary, at a release (not a prerelease) of 1.2.0 or later; the
+child checks it again before it loads anything. Anything else, 1.1.4 included,
+is refused with `DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED` before anything is
+sent. Circle's own version policy refuses every command below 1.1.4. The
+adapter starts a dedicated Node child without a shell, preload hooks, proxy
+overrides or Daski environment secrets. It never edits the installed CLI.
 
-This child runs within Circle's credential boundary: the pinned CLI can read
-its existing userToken, encryptionKey, encryptedUserSecret and storageKey.
-Daski creates no additional credential store and never logs vendor output or
-errors. The installed vendor dependencies remain part of the existing vendor
-trust boundary; entrypoint integrity is not a claim that the whole local host
-or every transitive dependency is attested.
+Before the CLI loads, the child leaves the review policy's fetch as its only
+way to the network: Node's HTTP, HTTPS, HTTP/2, TLS and socket clients, the
+dispatcher undici clients share and WebSocket all refuse every other use, so a
+request sent any other way fails before it leaves. The policy permits, at the
+official Circle agent endpoint of the profile's environment, only the requests
+a `wallet execute` sends: the wallet listing, the contract execution request,
+Circle's configuration and the bound challenge, that challenge's approval, and
+reads of the one transaction the completed challenge names. Both the estimate
+and the execution carry the approved EAS attest/revoke call's exact calldata in
+place of the signature and parameters the CLI builds: Circle cannot execute the
+review's tuple argument from parameters (observed live on Base Sepolia). All
+destination, wallet, chain, ABI parameters, zero value and idempotency fields
+must match; the re-encoded calldata must be exact. Transfer, deploy, cancel,
+accelerate, arbitrary requests and cross-environment requests fail. A Circle
+release that sends a request outside this sequence therefore fails closed: the
+review stops, nothing outside it reaches Circle, and the journal says what did.
+Every week CI installs 1.2.0 and Circle's latest release and runs a whole
+review through each against a fake of Circle's API, so such a release shows
+up there first.
+
+This child runs within Circle's credential boundary: the CLI can read its
+existing userToken, encryptionKey, encryptedUserSecret and storageKey. Daski
+creates no additional credential store and never logs vendor output or errors.
+The installed vendor and its dependencies remain part of the existing vendor
+trust boundary: the adapter checks the package's identity and version, not its
+code, and what it enforces is every request the vendor sends. Threads or
+processes the vendor starts are outside the child's network confinement.
 
 ## What is recorded
 
@@ -73,7 +86,7 @@ again: `--submit` is refused while its record is open.
 Resume performs only vendor reads and chain checks; it never calls wallet
 execute, cancel or accelerate. It asks Circle's history for the transaction by
 the challenge's transaction ID, otherwise by the exact call created after the
-submission started: the pinned CLIs print neither the idempotency key nor the
+submission started: Circle CLI 1.2 prints neither the idempotency key nor the
 calldata, so the call is re-encoded from the echoed signature and parameters.
 A nearby transaction is never enough, and more than one candidate is never
 proof that nothing happened. When Circle's history does not close the record,
@@ -99,8 +112,13 @@ call has the saved callHash, the record is restored with its call
 (`restored: true`) and keeps its original preparation time. A different choice
 is refused; if the earlier call was never sent, `--abandon` clears it first.
 
-Offline tests cover transport scope, the pinned CLIs' request sequence and
-printed history, tuple shape, preserved auth headers, journal crash windows,
-progress recording, hash lineage, chain discovery and read-only resume. Live
+Offline tests cover transport scope, network confinement, the package identity
+and version floor, the Circle CLI's request sequence and printed history, tuple
+shape, preserved auth headers, journal crash windows, progress recording, hash
+lineage, chain discovery and read-only resume. With `DASKI_TEST_CIRCLE_CLI`
+naming the directory of an installed `circle`, they also run an estimate, a
+submission and a history lookup through that real CLI against a fake of
+Circle's API; the Circle CLI workflow does so weekly and on demand for 1.2.0
+and the latest release (`npm run test:circle --workspace @daski/pay`). Live
 execution and finality remain separately qualified as described in
 [conformance](conformance.md).

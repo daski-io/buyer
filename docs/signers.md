@@ -77,8 +77,8 @@ daski doctor --signer local --json
 <a id="circle-agent"></a>
 ## `circle-agent` — implemented, verified
 
-The Circle agent wallet: a deployed contract account operated through the
-pinned [`@circle-fin/cli`](https://www.npmjs.com/package/@circle-fin/cli),
+The Circle agent wallet: a deployed contract account operated through
+[`@circle-fin/cli`](https://www.npmjs.com/package/@circle-fin/cli),
 and the default signer on every host. The adapter shells out to
 the `circle` command with an argument array, never a shell string:
 
@@ -104,9 +104,13 @@ own steps: the gateway's setup skill hands the agent Circle's skill
 (`curl -sL https://agents.circle.com/skills/setup.md`), and this CLI never
 performs them. The gateway publishes the vendor CLI version this adapter was
 tested with under `signerClis.circle-agent` in `/.well-known/mcp.json`;
-`doctor` reports it. Circle keeps its Base Sepolia session and wallet apart
-from the main ones (`--testnet`); the adapter's remediations say so when that
-is the profile's chain, so the setup skill does not.
+`doctor` reports it. Signing checks no vendor version and pins no build: it
+runs the `circle` on PATH. The direct-review adapter, the one vendor
+integration that can send a transaction, runs @circle-fin/cli 1.2.0 or later
+and refuses anything else ([direct reviews](direct-reviews.md)). Circle keeps
+its Base Sepolia session and wallet apart from the main ones (`--testnet`);
+the adapter's remediations say so when that is the profile's chain, so the
+setup skill does not.
 
 **The wallet must be deployed.** `doctor` and `buy` read `getCode` and refuse
 an undeployed wallet with `DASKI_SIGNER_NOT_DEPLOYED`; the remediation is a

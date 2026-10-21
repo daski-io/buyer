@@ -1,0 +1,61 @@
+name: Circle CLI
+
+# The direct-review adapter runs every @circle-fin/cli release from its floor
+# (docs/direct-reviews.md), so a new Circle release reaches agents without a
+# buyer release. Every week, and on demand, this installs the floor and
+# Circle's latest release (or the version asked for) outside the repository
+# and runs the offline adapter tests against each: the installed CLI runs a
+# whole review in the review child, against a fake of Circle's API
+# (packages/pay/test/circleReviewVendor.test.ts). A Circle release that would
+# break reviews fails here before agents install it. A pull request that
+# changes the adapter runs it too. Nothing here is part of the package proof
+# or release evidence (the CI workflow).
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "@circle-fin/cli version or dist-tag to test beside the floor"
+        required: false
+        default: latest
+        type: string
+  pull_request:
+    paths:
+      - "packages/pay/src/signers/circleReview*.ts"
+      - "packages/pay/test/circleReview*.ts"
+      - "packages/pay/test/circleVendorApi.ts"
+      - ".github/workflows/circle-cli.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  adapter:
+    name: adapter (Node ${{ matrix.node }}, @circle-fin/cli ${{ matrix.circle }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22", "24"]
+        circle: ["1.2.0", "${{ inputs.version || 'latest' }}"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Install @circle-fin/cli ${{ matrix.circle }} outside the repository
+        env:
+          CIRCLE: ${{ matrix.circle }}
+        run: |
+          cd "$RUNNER_TEMP"
+          npm install --prefix circle-cli --no-save --no-audit --no-fund --ignore-scripts "@circle-fin/cli@$CIRCLE"
+          node -e 'const p = require(process.argv[1]); console.log(p.name + "@" + p.version)' "$RUNNER_TEMP/circle-cli/node_modules/@circle-fin/cli/package.json"
+      - name: Offline adapter tests against it
+        env:
+          DASKI_TEST_CIRCLE_CLI: ${{ runner.temp }}/circle-cli/node_modules/.bin
+        run: npm run test:circle --workspace @daski/pay

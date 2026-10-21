@@ -45,9 +45,14 @@ the harness pin. Base mainnet additionally requires
 
 Circle signing conformance does not qualify the new execution adapter. Keep
 confirmation.directReview.circleExecute disabled until an explicitly authorized
-live run records the shipped buyer and Circle entrypoint versions, estimation,
+live run records the shipped buyer and Circle CLI versions, estimation,
 callHash-approved submit, timeout/read-only resume, replacement or revocation,
 and intent-bound finalized EAS evidence. Use the [direct review workflow](direct-reviews.md).
+The adapter runs every Circle CLI release from 1.2.0, so a qualification is of
+the buyer: it covers the Circle CLI it ran with live, and later releases only
+as far as the offline adapter tests do. The Circle CLI workflow runs those
+weekly against the latest release; run it on demand with the version an agent
+reports before relying on a newer one.
 If vendor history cannot expose an exact-call transaction ID or idempotency-key
 mapping after a timeout, record that limitation and retain the unresolved journal;
 do not manufacture a fresh key or claim execution conformance from estimation.
