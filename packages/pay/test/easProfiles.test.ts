@@ -5,17 +5,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChainReader, ContractRead } from "../src/chain/reader.js";
 import { discoverEasReviewProfile, EAS_REVIEW_PROFILES } from "../src/chain/easProfiles.js";
-function fixture(chainId: number) {
+function fixture(name: string) {
   let directory = dirname(fileURLToPath(import.meta.url));
   for (let n = 0; n < 8; n++, directory = dirname(directory)) {
-    const path = join(directory, "test/fixtures/eas/base-" + chainId + ".json");
+    const path = join(directory, "test/fixtures/eas/" + name);
     if (existsSync(path)) return JSON.parse(readFileSync(path, "utf8"));
   }
   throw new Error("Missing pinned EAS runtime fixture");
 }
-for (const chainId of [8453, 84532]) {
-  test("buyer independently verifies pinned EAS runtime/getters for " + chainId, async () => {
-    const f = fixture(chainId);
+for (const [name, chainId, id] of [["base-8453.json", 8453, "eas-native-1.0.1"], ["base-84532.json", 84532, "eas-native-1.2.0"],
+  ["base-84532-eas-1.4.1-beta.3.json", 84532, "eas-native-1.4.1-beta.3"]] as const) {
+  test("buyer independently verifies pinned EAS runtime/getters for " + id + " on " + chainId, async () => {
+    const f = fixture(name);
     function reader(overrides: Record<string, unknown> = {}): ChainReader {
       const values: Record<string, unknown> = { version: f.version, getDomainSeparator: f.getDomainSeparator,
         getAttestTypeHash: f.getAttestTypeHash, getRevokeTypeHash: f.getRevokeTypeHash, ...overrides };
@@ -25,8 +26,12 @@ for (const chainId of [8453, 84532]) {
         readContract: async ({ functionName }: { functionName: string }) => values[functionName],
       } as unknown as ChainReader;
     }
-    assert.equal((await discoverEasReviewProfile(reader(), chainId, f.eas.address)).id, EAS_REVIEW_PROFILES[chainId]!.id);
-    for (const change of [{ version: "1.4.1-beta.3" }, { code: "0x6000" }, { slot: "0x" + "0".repeat(64) },
+    assert.equal((await discoverEasReviewProfile(reader(), chainId, f.eas.address)).id, EAS_REVIEW_PROFILES[id].id);
+    // Another profile's implementation for this chain still needs every one of its own facts.
+    const otherImplementations = Object.values(EAS_REVIEW_PROFILES).filter(p => p.chainId === chainId && p.id !== id)
+      .map(p => ({ slot: "0x" + "0".repeat(24) + p.implementation.slice(2) }));
+    for (const change of [{ version: id === "eas-native-1.4.1-beta.3" ? "1.2.0" : "1.4.1-beta.3" }, { code: "0x6000" }, { slot: "0x" + "0".repeat(64) },
+      ...otherImplementations,
       { getDomainSeparator: "0x00" }, { getAttestTypeHash: "0x00" }, { getRevokeTypeHash: "0x00" }]) {
       await assert.rejects(discoverEasReviewProfile(reader(change), chainId, f.eas.address), { code: "DASKI_CONFIRMATION_EAS_INCOMPATIBLE" });
     }
@@ -36,7 +41,7 @@ for (const chainId of [8453, 84532]) {
 }
 
 test("a batching reader answers the EAS identity getters in one call pinned at the final block", async () => {
-  const f = fixture(8453);
+  const f = fixture("base-8453.json");
   const values: Record<string, unknown> = { version: f.version, getDomainSeparator: f.getDomainSeparator,
     getAttestTypeHash: f.getAttestTypeHash, getRevokeTypeHash: f.getRevokeTypeHash };
   const batches: { functionNames: string[]; blockNumber: bigint | undefined }[] = [];

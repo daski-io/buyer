@@ -16,7 +16,7 @@ import { CliError } from "../src/cli/errors.js";
 
 const account = privateKeyToAccount(`0x${"11".repeat(32)}`);
 const ZERO_UID = `0x${"00".repeat(32)}` as Hex;
-const facts: ConfirmationFacts = { profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: "0x2222222222222222222222222222222222222222",
+const facts: ConfirmationFacts = { profile: EAS_REVIEW_PROFILES["eas-native-1.2.0"], chainId: 84532, payer: "0x5555555555555555555555555555555555555555", eas: "0x2222222222222222222222222222222222222222",
   schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
   orderKey: canonicalHash("order"), recipient: account.address,
   currentUid: canonicalHash("previous review"), nonce: "4", submissionsUsed: 1 };
@@ -143,7 +143,7 @@ test("review retries preserve the EAS signature and read access uses grant-read 
 });
 
 test("legacy native signing excludes value and deadline, and never trusts gateway domain/types", () => {
-  const f = { ...facts, chainId: 8453, profile: EAS_REVIEW_PROFILES[8453]! };
+  const f = { ...facts, chainId: 8453, profile: EAS_REVIEW_PROFILES["eas-native-1.0.1"] };
   const modern = preparation();
   const { deadline: _deadline, value: _value, ...message } = modern.signableTypedData.message;
   const p = { ...modern, profileId: f.profile.id, domainVersion: "1.0.1", signedDeadline: null,

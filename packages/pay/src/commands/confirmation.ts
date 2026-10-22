@@ -110,6 +110,9 @@ const revokeTypes = { Revoke: [
   { name: "schema", type: "bytes32" }, { name: "uid", type: "bytes32" },
   { name: "value", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint64" },
 ] };
+// Profiles that sign the signer (EAS 1.4.1-beta.3, signing domain 1.3.0) start each struct with it.
+const attesterField = { name: "attester", type: "address" };
+const revokerField = { name: "revoker", type: "address" };
 
 /** EAS 1.2.0: the two calls direct mode validates, the read that binds a receipt, and the events. */
 export const EAS_ABI = parseAbi([
@@ -129,6 +132,8 @@ export interface ConfirmationFacts {
   chainId: number;
   /** Independently qualified deployment identity. */
   profile?: EasReviewProfile;
+  /** The signing payer, which profiles with `signedSigner` name in the signed struct. */
+  payer: Address;
   eas: Address;
   schemaUid: Hex;
   reputationStorage: Address;
@@ -212,10 +217,12 @@ export function validateConfirmationPreparation(prepared: Record<string, unknown
     throw invalidPreparation();
   }
   const common = { schema: facts.schemaUid, nonce: facts.nonce, ...(profile.signedDeadline ? { value: "0", deadline: String(deadline) } : {}) };
+  const signed = (field: { name: string; type: string }) => profile.signedSigner ? [field] : [];
+  const signer = (name: "attester" | "revoker") => profile.signedSigner ? { [name]: getAddress(facts.payer) } : {};
   const expected: TypedDataRequest = { domain: { name: "EAS", version: profile.domainVersion, chainId: facts.chainId, verifyingContract: facts.eas },
-    types: choice === "revoke" ? { Revoke: revokeTypes.Revoke.filter(field => profile.signedDeadline || (field.name !== "deadline" && field.name !== "value")) }
-      : { Attest: attestTypes.Attest.filter(field => profile.signedDeadline || (field.name !== "deadline" && field.name !== "value")) }, primaryType: choice === "revoke" ? "Revoke" : "Attest",
-    message: choice === "revoke" ? { ...common, uid: facts.currentUid } : { ...common, recipient: facts.recipient,
+    types: choice === "revoke" ? { Revoke: [...signed(revokerField), ...revokeTypes.Revoke.filter(field => profile.signedDeadline || (field.name !== "deadline" && field.name !== "value"))] }
+      : { Attest: [...signed(attesterField), ...attestTypes.Attest.filter(field => profile.signedDeadline || (field.name !== "deadline" && field.name !== "value"))] }, primaryType: choice === "revoke" ? "Revoke" : "Attest",
+    message: choice === "revoke" ? { ...signer("revoker"), ...common, uid: facts.currentUid } : { ...signer("attester"), ...common, recipient: facts.recipient,
       expirationTime: "0", revocable: true, refUID: facts.currentUid, data: confirmationData(facts.orderKey, choice) } };
   if (canonicalHash(proposed) !== canonicalHash(expected)) throw invalidPreparation();
   return expected;
@@ -1267,7 +1274,7 @@ export async function readConfirmationFacts(context: CommandContext, record: Ord
   // contract refuses to register a zero wallet, so a zero here is a record
   // this CLI does not understand.
   if (current.providerAgentWallet === ZERO_ADDRESS) throw invalidPreparation();
-  return { chainId: pins.chainId, profile, eas: pins.eas, schemaUid: pins.schemaUid, reputationStorage: pins.reputationStorage, orderKey,
+  return { chainId: pins.chainId, profile, payer: context.payerAddress, eas: pins.eas, schemaUid: pins.schemaUid, reputationStorage: pins.reputationStorage, orderKey,
     recipient: getAddress(current.providerAgentWallet),
     currentUid: current.currentConfirmationUid, nonce: nonce.toString(), submissionsUsed: Number(current.confirmationSubmissions) };
 }

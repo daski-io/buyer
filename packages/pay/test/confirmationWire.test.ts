@@ -1,4 +1,4 @@
-import { EAS_REVIEW_PROFILES } from "../src/chain/easProfiles.js";
+import { EAS_REVIEW_PROFILES, type EasReviewProfileId } from "../src/chain/easProfiles.js";
 /**
  * The confirmation requests this CLI sends, proved against the gateway's
  * closed request shapes vendored under test/fixtures/gateway-wire/: every
@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { privateKeyToAccount } from "viem/accounts";
-import { encodeEventTopics, encodeFunctionData, type Address, type Hex } from "viem";
+import { encodeEventTopics, encodeFunctionData, getAddress, type Address, type Hex } from "viem";
 import { canonicalHash, type TypedDataRequest } from "@daski/x402-scheme";
 import type { ChainReader } from "../src/chain/reader.js";
 import { confirmOrder, confirmationData, EAS_ABI, validateConfirmationPreparation, validateDirectCall, type ConfirmationFacts } from "../src/commands/confirmation.js";
@@ -52,7 +52,7 @@ const TX = `0x${"aa".repeat(32)}` as Hex;
 const BLOCK_42 = canonicalHash("block-42");
 const BLOCK_50 = canonicalHash("block-50");
 const facts: ConfirmationFacts = {
-  profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
+  profile: EAS_REVIEW_PROFILES["eas-native-1.2.0"], chainId: 84532, payer: "0x5555555555555555555555555555555555555555", eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: "0x3333333333333333333333333333333333333333",
   orderKey: canonicalHash("order"), recipient: RECIPIENT, currentUid: ZERO_UID, nonce: "0", submissionsUsed: 0,
 };
 const active = { ...facts, currentUid: UID, submissionsUsed: 1 };
@@ -188,7 +188,7 @@ const directCalls = JSON.parse(readFileSync(join(fixtureDirectory(), "confirmati
 };
 
 test("the gateway's actual direct attest and revoke calls pass the validator, and the same call with any other outer field does not", () => {
-  const f: ConfirmationFacts = { ...directCalls.facts, reputationStorage: "0x3333333333333333333333333333333333333333", nonce: "0", submissionsUsed: 1 };
+  const f: ConfirmationFacts = { ...directCalls.facts, payer: "0x5555555555555555555555555555555555555555", reputationStorage: "0x3333333333333333333333333333333333333333", nonce: "0", submissionsUsed: 1 };
   const attest = validateDirectCall(directCalls.attest.call, f, directCalls.attest.confirmation, directCalls.facts.eas);
   assert.equal(attest.action, "attest");
   assert.deepEqual(attest.call, { ...(directCalls.attest.call as object), calldata: (directCalls.attest.call as { calldata: string }).calldata.toLowerCase() });
@@ -210,12 +210,14 @@ const sponsoredPreparations = JSON.parse(readFileSync(join(fixtureDirectory(), "
   }>;
 };
 
-test("gateway sponsored preparations reconstruct both native EAS profiles with ISO admission expiry", () => {
+test("gateway sponsored preparations reconstruct every native EAS profile with ISO admission expiry", () => {
   assert.equal(sponsoredPreparations.schemaVersion, 1);
-  assert.deepEqual(sponsoredPreparations.profiles.map(entry => entry.facts.chainId), [8453, 84532]);
+  assert.deepEqual(sponsoredPreparations.profiles.map(entry => [entry.facts.chainId, entry.attest.result.profileId]),
+    [[8453, "eas-native-1.0.1"], [84532, "eas-native-1.2.0"], [84532, "eas-native-1.4.1-beta.3"]]);
   for (const entry of sponsoredPreparations.profiles) {
-    // The trusted profile comes from our independent registry, never the gateway response.
-    const facts: ConfirmationFacts = { ...entry.facts, profile: EAS_REVIEW_PROFILES[entry.facts.chainId]! };
+    // The trusted profile comes from our independent registry, as discovery on the chain would select it; the
+    // response names it only so this table entry can be found.
+    const facts: ConfirmationFacts = { ...entry.facts, profile: EAS_REVIEW_PROFILES[entry.attest.result.profileId as EasReviewProfileId] };
     for (const action of ["attest", "revoke"] as const) {
       const prepared = entry[action].result;
       assert.equal(prepared.admissionExpiresAt, new Date(Number(entry.facts.admissionDeadline) * 1000).toISOString());
@@ -226,9 +228,16 @@ test("gateway sponsored preparations reconstruct both native EAS profiles with I
       assert.equal(rebuilt.message.value, facts.profile!.signedDeadline ? "0" : undefined);
       assert.throws(() => validateConfirmationPreparation(prepared, facts, choice, false, Number(entry.facts.admissionDeadline)),
         (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "expired local admission must not be accepted");
-      const other = sponsoredPreparations.profiles.find(candidate => candidate.facts.chainId !== facts.chainId)!;
-      assert.throws(() => validateConfirmationPreparation(other[action].result, facts, choice, false, entry.facts.timestamp),
-        (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "another deployment's profile cannot select the signing message");
+      for (const other of sponsoredPreparations.profiles.filter(candidate => candidate !== entry)) {
+        assert.throws(() => validateConfirmationPreparation(other[action].result, facts, choice, false, entry.facts.timestamp),
+          (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "another deployment's profile cannot select the signing message");
+      }
+      if (facts.profile!.signedSigner) {
+        const signer = action === "attest" ? "attester" : "revoker";
+        assert.equal(rebuilt.message[signer], getAddress(entry.facts.payer));
+        assert.throws(() => validateConfirmationPreparation(prepared, { ...facts, payer: "0x5555555555555555555555555555555555555555" }, choice, false, entry.facts.timestamp),
+          (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "another payer cannot sign this review");
+      }
       assert.throws(() => validateConfirmationPreparation({ ...prepared, admissionExpiresAt: "malformed" }, facts, choice, false, entry.facts.timestamp),
         (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH");
     }

@@ -33,7 +33,7 @@ const ZERO_UID = `0x${"00".repeat(32)}` as Hex;
 const RECIPIENT = "0x4444444444444444444444444444444444444444" as Address;
 const REPUTATION = "0x3333333333333333333333333333333333333333" as Address;
 const facts: ConfirmationFacts = {
-  profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: REPUTATION,
+  profile: EAS_REVIEW_PROFILES["eas-native-1.2.0"], chainId: 84532, payer: payer.address, eas: EAS_PREDEPLOY, schemaUid: canonicalHash("schema"), reputationStorage: REPUTATION,
   orderKey: canonicalHash("order"), recipient: RECIPIENT, currentUid: ZERO_UID, nonce: "0", submissionsUsed: 0,
 };
 const TX = `0x${"aa".repeat(32)}` as Hex;
@@ -121,7 +121,7 @@ function fixture(accountType: SignerDescription["accountType"]): Fixture {
     },
   };
   const context = { profile, profileName: "sandbox", payerAddress: payer.address, signer, resolveSigner: async () => signer, chain: reader,
-    metadata: async () => parseGatewayMetadata({ confirmationSigning: { profile: EAS_REVIEW_PROFILES[84532]!, chainId: 84532, eas: gateway.eas, schemaUid: facts.schemaUid, reputationStorage: REPUTATION } }),
+    metadata: async () => parseGatewayMetadata({ confirmationSigning: { profile: EAS_REVIEW_PROFILES["eas-native-1.2.0"], chainId: 84532, eas: gateway.eas, schemaUid: facts.schemaUid, reputationStorage: REPUTATION } }),
     client: { hasTool: async () => true, callTool: async (name: string, args: Record<string, unknown>) => {
       if (name === "daski_get_order_status" && args.readCapability) return json({ orderKey: facts.orderKey, state: "FULFILLED" });
       const action = name === "daski_get_order_access" ? "grant-read" : name === "daski_revoke_delivery_confirmation" ? "revoke-confirmation" : "confirmation";
@@ -382,10 +382,10 @@ test("chain facts refuse a gateway whose EAS pin differs from the profile's befo
     chain.record = { orderKey: facts.orderKey, providerAgentId: 1n, payer: payer.address, providerOwner: REPUTATION,
       providerAgentWallet: RECIPIENT, confirmationSubmissions: 1, outcomeRecorded: true,
       reputationEligible: true, currentConfirmationUid: UID };
-    const read = await readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES[84532]!);
+    const read = await readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES["eas-native-1.2.0"]);
     assert.deepEqual(read, { ...facts, currentUid: UID, submissionsUsed: 1 });
     chain.record = { ...chain.record, providerAgentWallet: "0x0000000000000000000000000000000000000000" };
-    await assert.rejects(readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES[84532]!), code("DASKI_CONFIRMATION_MISMATCH"), "a zero provider wallet is not a record this CLI attests to");
+    await assert.rejects(readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES["eas-native-1.2.0"]), code("DASKI_CONFIRMATION_MISMATCH"), "a zero provider wallet is not a record this CLI attests to");
     chain.record = { ...chain.record, providerAgentWallet: RECIPIENT };
     gateway.eas = REPUTATION;
     await assert.rejects(readConfirmationFacts(context, record), code("DASKI_EAS_ADDRESS_MISMATCH"));
@@ -408,7 +408,7 @@ test("chain facts read the order record and EAS nonce in one batched read when t
         batches.push(reads.map((read) => `${read.functionName}${blockNumber === undefined ? "" : `@${blockNumber}`}`));
         return Promise.all(reads.map((read) => single(read)));
       } };
-    const read = await readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES[84532]!);
+    const read = await readConfirmationFacts(context, record, async () => EAS_REVIEW_PROFILES["eas-native-1.2.0"]);
     assert.deepEqual(read, { ...facts, currentUid: UID, submissionsUsed: 1 });
     assert.deepEqual(batches, [["getRecord", "getNonce"]], "both at the latest state, in one call");
   });
