@@ -7,7 +7,7 @@ import { EAS_REVIEW_PROFILES } from "../src/chain/easProfiles.js";
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
@@ -23,7 +23,8 @@ import type { CommandContext } from "../src/context.js";
 import { DEFAULT_CONFIG, EAS_PREDEPLOY } from "../src/config.js";
 import { parseGatewayMetadata } from "../src/gateway/metadata.js";
 import { findByIntent, updateOrder, upsertOrder, type OrderRecord } from "../src/store/orders.js";
-import { createCircleReviewAdapter, spawnCircleReview } from "../src/signers/circleReview.js";
+import { CIRCLE_REVIEW_QUALIFIED_BUILDS, createCircleReviewAdapter, spawnCircleReview } from "../src/signers/circleReview.js";
+import { buildOf, escapeSink, vendorPackage } from "./circleVendorFixtures.js";
 
 const code = (wanted: string) => (error: unknown): boolean => error instanceof CliError && error.code === wanted;
 const payer = privateKeyToAccount(`0x${"11".repeat(32)}`);
@@ -1162,15 +1163,15 @@ const vendorFailure = (circleProgress: Record<string, unknown>) => new CliError(
   message: "Circle did not return a definitive review result.", remediation: "Keep the saved review journal.",
   details: { circleProgress: { executionRequested: true, approvalSent: false, uncertain: false, ...circleProgress } } });
 
-test("a Circle run that never sent an approval restores the prepared review, which can then be submitted", async () => {
+test("a qualified Circle build's run that never sent an approval restores the prepared review, which can then be submitted", async () => {
   await withStore(async record => {
     const { context } = fixture("contract");
     context.metadata = async () => circleExecution();
     let attempts = 0;
-    const adapter = () => ({ packageVersion: "1.1.4", estimate: async () => ({}),
+    const adapter = () => ({ packageVersion: "1.2.0", estimate: async () => ({}),
       submit: async () => {
         attempts++;
-        if (attempts === 1) throw vendorFailure({ challengeId: "refused-challenge" });
+        if (attempts === 1) throw vendorFailure({ challengeId: "refused-challenge", build: CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"] });
         return { transactionId: "tx-1", txHash: TX, state: "COMPLETE",
           progress: { executionRequested: true, challengeId: "c-1", approvalSent: true, transactionId: "tx-1", uncertain: false } };
       },
@@ -1186,6 +1187,89 @@ test("a Circle run that never sent an approval restores the prepared review, whi
     assert.equal(current().confirmationTx?.vendor?.fromBlock, "100");
     assert.deepEqual(current().confirmationTx?.vendor?.hashes, [TX]);
   });
+});
+
+test("any other build's run that sent no approval is kept as possibly sent, resumed read-only and never submitted again", async () => {
+  await withStore(async record => {
+    const { context } = fixture("contract");
+    context.metadata = async () => circleExecution();
+    let submissions = 0;
+    const adapter = () => ({ packageVersion: "1.2.2", estimate: async () => ({}),
+      submit: async () => { submissions++; throw vendorFailure({ challengeId: "refused-challenge", build: "ab".repeat(32) }); },
+      lookup: async () => ({ hashes: [] }) });
+    await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+    const prepared = current().confirmationTx!;
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_CIRCLE_REVIEW_UNKNOWN" &&
+        /@circle-fin\/cli 1\.2\.2 is not a qualified build/.test(error.message) && /stays open and is not submitted again/.test(error.remediation) &&
+        /--resume only reads/.test(error.remediation) && /installing one now does not restore this run/.test(error.remediation));
+    assert.equal(current().confirmationTx?.state, "submitted");
+    assert.equal(current().confirmationTx?.vendor?.build, "ab".repeat(32));
+    assert.equal(current().confirmationTx?.vendor?.challengeId, "refused-challenge");
+    await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter),
+      code("DASKI_CONFIRMATION_TX_PENDING"));
+    await assert.rejects(confirmOrder(context, current(), { ...options, abandon: true }), code("DASKI_CONFIRMATION_TX_MAY_EXECUTE"));
+    assert.equal((await confirmOrder(context, current(), { ...options, resume: true }, factsReader(), adapter)).state, "submitted");
+    assert.equal(submissions, 1, "it is never sent again while its record is open");
+  });
+});
+
+/**
+ * Fake Circle CLIs, not qualified, that send their approval past the review
+ * policy: from a worker thread, a child process, a DNS query, or a TLS
+ * connection after forging the call stack the confinement reads. Each lands in
+ * a loopback sink; nothing leaves the machine.
+ */
+function escapingVendors(sink: { http: string; dns: string }, marker: string): Record<string, { script: string; reached: () => boolean }> {
+  return {
+    "a worker thread": { reached: () => false, script: `import { Worker } from "node:worker_threads";
+      await new Promise(done => new Worker(${JSON.stringify(`fetch(${JSON.stringify(sink.http + "/approve/worker")}).catch(() => {})`)}, { eval: true }).on("exit", done));
+      process.exit(1);` },
+    "a child process": { reached: () => false, script: `import { execFileSync } from "node:child_process";
+      execFileSync(process.execPath, ["-e", ${JSON.stringify(`fetch(${JSON.stringify(sink.http + "/approve/process")}).catch(() => {})`)}]);
+      process.exit(1);` },
+    "a DNS query": { reached: () => false, script: `import { Resolver } from "node:dns/promises";
+      const resolver = new Resolver({ timeout: 300, tries: 1 });
+      resolver.setServers([${JSON.stringify(sink.dns)}]);
+      await resolver.resolve4("approve.example").catch(() => {});
+      process.exit(1);` },
+    "a forged call stack": { reached: () => readFileSync(marker, "utf8") !== "Circle request is outside review scope", script: `
+      import { writeFileSync } from "node:fs"; import tls from "node:tls";
+      Error.captureStackTrace = holder => { holder.stack = [{ getFileName: () => "node:internal/deps/undici/undici" }]; };
+      const loopback = (host, options, done) => options && options.all ? done(null, [{ address: "127.0.0.1", family: 4 }]) : done(null, "127.0.0.1", 4);
+      const reached = await new Promise(done => {
+        try {
+          const socket = tls.connect({ host: "agentic-wallet.circle.com", port: 443, servername: "agentic-wallet.circle.com", lookup: loopback });
+          socket.on("error", error => done(error.code ?? error.message)); socket.on("secureConnect", () => { socket.destroy(); done("connected"); });
+        } catch (error) { done(error.message); }
+      });
+      writeFileSync(${JSON.stringify(marker)}, String(reached));
+      process.exit(1);` },
+  };
+}
+
+test("a build that is not qualified ends UNKNOWN when its approval escapes the record, never NOT_STARTED", async t => {
+  const sink = await escapeSink(t);
+  const marker = join(mkdtempSync(join(tmpdir(), "daski-circle-escape-")), "reached");
+  t.after(() => rmSync(join(marker, ".."), { recursive: true, force: true }));
+  for (const [channel, vendor] of Object.entries(escapingVendors(sink, marker))) {
+    const installed = vendorPackage(t, { version: "1.3.0" }, vendor.script);
+    await withStore(async record => {
+      const { context } = fixture("contract");
+      context.metadata = async () => circleExecution();
+      const adapter = () => createCircleReviewAdapter({ entry: installed.entry });
+      await confirmOrder(context, record, { ...options, confirmation: "Confirmed" }, factsReader(), adapter);
+      const prepared = current().confirmationTx!;
+      const before = sink.received.length;
+      await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter),
+        (error: unknown) => error instanceof CliError && error.code === "DASKI_CIRCLE_REVIEW_UNKNOWN" && /not a qualified build/.test(error.message), channel);
+      assert.ok(sink.received.length > before || vendor.reached(), `${channel}: the approval got past the policy`);
+      assert.equal(current().confirmationTx?.state, "submitted", `${channel}: the journal is kept`);
+      assert.equal(current().confirmationTx?.vendor?.build, buildOf(installed.entry));
+      await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter),
+        code("DASKI_CONFIRMATION_TX_PENDING"), `${channel}: never submitted again while open`);
+    });
+  }
 });
 
 test("a Circle run that cannot create its progress file starts nothing and restores the prepared review", async () => {

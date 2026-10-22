@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { canonicalHash } from "@daski/x402-scheme";
 import { encodeFunctionData, type Hex } from "viem";
+import type { CliError } from "../src/cli/errors.js";
 import { confirmationData, EAS_ABI, type DirectCall } from "../src/commands/confirmation.js";
-import { circleReviewEnvironment, createCircleReviewAdapter, matchedCircleTransactions, verifyCircleReviewEntry } from "../src/signers/circleReview.js";
-import { CIRCLE_REVIEW_ENTRY_HASHES, circleReviewArguments, circleReviewFetchPolicy, circleReviewProgress, circleReviewTuple,
-  normalizeCircleReviewBody, type CircleReviewRequest } from "../src/signers/circleReviewTransport.js";
+import {
+  CIRCLE_REVIEW_QUALIFIED_BUILDS, circleProgressOf, circleReviewEnvironment, circleReviewRunner, circleRunSentNothing, createCircleReviewAdapter,
+  matchedCircleTransactions, resolveCircleReviewEntry, spawnCircleReview, verifyCircleReviewEntry,
+} from "../src/signers/circleReview.js";
+import { CIRCLE_REVIEW_MINIMUM_VERSION, circleReviewArguments, circleReviewFetchPolicy, circleReviewPackageVersion, circleReviewProgress,
+  circleReviewTuple, circleReviewVersionSupported, normalizeCircleReviewBody, type CircleReviewRequest } from "../src/signers/circleReviewTransport.js";
+import { buildOf, closedPort, vendorPackage } from "./circleVendorFixtures.js";
 const wallet = "0x1111111111111111111111111111111111111111";
 const eas = "0x4200000000000000000000000000000000000021";
 const zero = ("0x" + "00".repeat(32)) as Hex;
@@ -26,7 +36,6 @@ function body(r: CircleReviewRequest) {
 }
 const root = "https://agentic-wallet.circle.com/proxy/test";
 test("both endpoints get the approved call's exact calldata in place of the CLI's signature and parameters, for attest and revoke", () => {
-  assert.deepEqual(Object.keys(CIRCLE_REVIEW_ENTRY_HASHES), ["1.1.4", "1.2.0"]);
   for (const action of ["attest", "revoke"] as const) {
     for (const mode of ["estimate", "execute"] as const) {
       const r = request(mode, action), b = body(r);
@@ -94,10 +103,162 @@ test("review subprocess strips credentials from Daski, preload hooks and proxy o
   assert.throws(() => verifyCircleReviewEntry("/definitely-missing/entry"), { code: "DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED" });
 });
 
+const unsupported = { code: "DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED", message: /@circle-fin\/cli 1\.2\.0 or later/ };
+
+test("every @circle-fin/cli release from 1.2.0 runs reviews whatever its build, and nothing older, prereleased or other", t => {
+  assert.equal(CIRCLE_REVIEW_MINIMUM_VERSION, "1.2.0");
+  for (const version of ["1.2.0", "1.2.2", "1.3.0", "1.10.0", "2.0.0"]) assert.equal(circleReviewVersionSupported(version), true, version);
+  for (const version of ["1.1.4", "1.1.99", "1.0.0", "0.9.0", "1.2.0-beta.1", "1.3.0-rc.0", "1.2", "1.2.0.1", "v1.2.0", "01.2.0", "", undefined, null, 120]) {
+    assert.equal(circleReviewVersionSupported(version), false, String(version));
+  }
+  // A release the hash pin never saw, found on PATH as npm installs it.
+  const installed = vendorPackage(t, { version: "1.2.2" });
+  assert.equal(resolveCircleReviewEntry({ PATH: installed.bin }), installed.entry);
+  assert.equal(verifyCircleReviewEntry(installed.entry), "1.2.2");
+  assert.equal(createCircleReviewAdapter({ entry: installed.entry }).packageVersion, "1.2.2");
+  assert.equal(verifyCircleReviewEntry(vendorPackage(t, { version: "1.10.0", bin: "./dist/index.js" }).entry), "1.10.0");
+  assert.equal(circleReviewPackageVersion(vendorPackage(t, { version: "2.0.0", bin: "dist/index.js" }).entry), "2.0.0");
+  // Below the floor, a prerelease, another package, or a file that is not the package's circle.
+  for (const pkg of [{ version: "1.1.4" }, { version: "1.3.0-beta.1" }, { version: "1.2.2", name: "@circle-fin/cli-fork" },
+    { version: "1.2.2", bin: { circle: "dist/other.js" } }, { version: "1.2.2", bin: { other: "dist/index.js" } }, { version: 2 }]) {
+    const candidate = vendorPackage(t, pkg);
+    writeFileSync(join(candidate.root, "dist", "other.js"), "export {};\n");
+    assert.throws(() => verifyCircleReviewEntry(candidate.entry), unsupported, JSON.stringify(pkg));
+    assert.throws(() => createCircleReviewAdapter({ entry: candidate.entry }), unsupported);
+  }
+  const unnamed = vendorPackage(t, { version: "1.2.2" });
+  rmSync(join(unnamed.root, "package.json"));
+  assert.throws(() => verifyCircleReviewEntry(unnamed.entry), unsupported);
+});
+
+/** Vendor-side attempts, each reported as the refusal's message or the system's connection error. */
+const ATTEMPTS = `
+const outcome = async (attempt) => {
+  try { await attempt(); return "connected"; } catch (error) { return String(error?.cause?.code ?? error?.code ?? error?.cause?.message ?? error?.message); }
+};
+const request = (module, url) => new Promise((resolve, reject) => { const r = module.request(url, resolve); r.on("error", reject); r.end(); });
+const socket = (open) => new Promise((resolve, reject) => { const s = open(); s.on("connect", resolve); s.on("error", reject); });
+`;
+const OUTSIDE = "Circle request is outside review scope";
+
+test("confinement leaves Node's fetch, to its one endpoint, as the only connection Node's usual clients can open", async () => {
+  const allowed = await closedPort();
+  let other = await closedPort();
+  while (other === allowed) other = await closedPort();
+  const transport = new URL("../src/signers/circleReviewTransport.js", import.meta.url).href;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", `
+    import http from "node:http"; import https from "node:https"; import net from "node:net"; import tls, { connect as named } from "node:tls";
+    const { confineCircleReviewNetwork } = await import(${JSON.stringify(transport)});
+    const confined = await confineCircleReviewNetwork({ host: "127.0.0.1", port: ${allowed} });
+    ${ATTEMPTS}
+    const shared = globalThis[Symbol.for("undici.globalDispatcher.1")];
+    process.stdout.write(JSON.stringify({
+      allowed: await outcome(() => confined("https://127.0.0.1:${allowed}/")),
+      otherPort: await outcome(() => confined("https://127.0.0.1:${other}/")),
+      plainFetch: await outcome(() => fetch("https://127.0.0.1:${allowed}/")),
+      sharedDispatcher: await outcome(() => shared.request({ origin: "https://127.0.0.1:${allowed}", path: "/", method: "GET" })),
+      tls: await outcome(() => socket(() => tls.connect({ host: "127.0.0.1", port: ${allowed} }))),
+      tlsNamed: await outcome(() => socket(() => named({ host: "127.0.0.1", port: ${allowed} }))),
+      https: await outcome(() => request(https, "https://127.0.0.1:${allowed}/")),
+      http: await outcome(() => request(http, "http://127.0.0.1:${allowed}/")),
+      net: await outcome(() => socket(() => net.connect(${allowed}, "127.0.0.1"))),
+      socket: await outcome(() => socket(() => new net.Socket().connect(${allowed}, "127.0.0.1"))),
+    }));`]);
+  assert.deepEqual(JSON.parse(stdout), { allowed: "ECONNREFUSED", otherPort: OUTSIDE, plainFetch: OUTSIDE, sharedDispatcher: OUTSIDE,
+    tls: OUTSIDE, tlsNamed: OUTSIDE, https: OUTSIDE, http: OUTSIDE, net: OUTSIDE, socket: OUTSIDE });
+});
+
+test("the review child runs an admitted release with the policy's fetch as its usual way to Circle, and never runs another", async t => {
+  const port = await closedPort();
+  const vendor = vendorPackage(t, { version: "1.3.0" }, `
+    import http from "node:http"; import https from "node:https"; import net from "node:net";
+    ${ATTEMPTS}
+    const shared = globalThis[Symbol.for("undici.globalDispatcher.1")];
+    process.stdout.write(JSON.stringify({ argv: process.argv.slice(2, 4),
+      fetch: await outcome(() => fetch("https://127.0.0.1:${port}/")),
+      sharedDispatcher: await outcome(() => shared.request({ origin: "https://127.0.0.1:${port}", path: "/", method: "GET" })),
+      https: await outcome(() => request(https, "https://127.0.0.1:${port}/")),
+      http: await outcome(() => request(http, "http://127.0.0.1:${port}/")),
+      net: await outcome(() => socket(() => net.connect(${port}, "127.0.0.1"))),
+    }));`);
+  const run = await spawnCircleReview(vendor.entry, request("estimate"));
+  assert.deepEqual(run.output, { argv: ["wallet", "execute"], fetch: "Circle endpoint is not allowed", sharedDispatcher: OUTSIDE,
+    https: OUTSIDE, http: OUTSIDE, net: OUTSIDE });
+  assert.deepEqual(run.progress, { build: buildOf(vendor.entry), executionRequested: false, approvalSent: false, uncertain: false },
+    "the build is recorded before it loads");
+  // The child checks the package itself too: an older release never starts, whatever the parent asked.
+  const marker = join(vendor.root, "ran");
+  const old = vendorPackage(t, { version: "1.1.4" }, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "");`);
+  await assert.rejects(spawnCircleReview(old.entry, request("estimate")), (error: CliError) =>
+    error.code === "DASKI_CIRCLE_REVIEW_UNKNOWN" && !circleProgressOf(error)!.approvalSent && !existsSync(marker));
+});
+
+test("Node's real fetch to Circle's host passes the confinement, while the CLI's other clients do not", async t => {
+  // Circle's host resolves to loopback in the child, where nothing listens: a connection
+  // the system refuses got past the confinement, and nothing leaves the machine.
+  const vendor = vendorPackage(t, { version: "1.3.0" }, `
+    import https from "node:https";
+    ${ATTEMPTS}
+    const url = "https://agentic-wallet.circle.com/proxy/test/v1/w3s/wallets?blockchain=BASE-SEPOLIA&address=${wallet}";
+    process.stdout.write(JSON.stringify({ fetch: await outcome(() => fetch(url)), https: await outcome(() => request(https, url)) }));`);
+  const loopback = join(vendor.prefix, "loopback.mjs");
+  writeFileSync(loopback, `import dns from "node:dns"; import { syncBuiltinESMExports } from "node:module";
+    const lookup = dns.lookup;
+    dns.lookup = function (host, options, done) {
+      if (typeof options === "function") { done = options; options = {}; }
+      if (host !== "agentic-wallet.circle.com") return lookup.call(this, host, options, done);
+      return options && options.all ? done(null, [{ address: "127.0.0.1", family: 4 }]) : done(null, "127.0.0.1", 4);
+    };
+    syncBuiltinESMExports();`);
+  const run = await circleReviewRunner({ execArgv: ["--import", pathToFileURL(loopback).href] })(vendor.entry, request("estimate"));
+  assert.deepEqual(run.output, { fetch: "ECONNREFUSED", https: OUTSIDE });
+});
+
+test("a run that recorded no approval sent nothing only on a qualified build, or when the vendor never loaded", t => {
+  const quiet = { executionRequested: true, challengeId: "refused-challenge", approvalSent: false, uncertain: false };
+  assert.deepEqual(Object.keys(CIRCLE_REVIEW_QUALIFIED_BUILDS), ["1.2.0"]);
+  assert.equal(CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"], "feb24e3d404b41bfda54ff69b397c892a3c007487f7831904c2617d036afd9b9");
+  assert.equal(circleRunSentNothing({ ...quiet, build: CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"]! }), true);
+  assert.equal(circleRunSentNothing({ ...quiet, build: "ab".repeat(32) }), false, "any other build may have sent its approval another way");
+  assert.equal(circleRunSentNothing({ ...quiet, build: CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"]!, approvalSent: true }), false);
+  assert.equal(circleRunSentNothing({ ...quiet, build: CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"]!, uncertain: true }), false);
+  assert.equal(circleRunSentNothing(circleReviewProgress("")), true, "the vendor never loaded");
+  assert.equal(circleRunSentNothing(quiet), false, "a run that reached Circle without a recorded build proves nothing");
+  // The build is what the child recorded, once; a second, different one makes the record uncertain.
+  const build = (value: string) => JSON.stringify({ event: "vendor", build: value });
+  assert.equal(circleReviewProgress(build("ab".repeat(32))).build, "ab".repeat(32));
+  assert.equal(circleReviewProgress([build("ab".repeat(32)), build("ab".repeat(32))].join("\n")).uncertain, false);
+  assert.equal(circleReviewProgress([build("ab".repeat(32)), build("cd".repeat(32))].join("\n")).uncertain, true);
+  assert.equal(circleReviewProgress(build("not-a-hash")).uncertain, true);
+  // A real child records the build it loads; that build alone decides.
+  const vendor = vendorPackage(t, { version: "1.3.0" }, "process.exit(1);\n");
+  return assert.rejects(spawnCircleReview(vendor.entry, request("execute")), (error: CliError) => {
+    const progress = circleProgressOf(error)!;
+    return progress.build === buildOf(vendor.entry) && !circleRunSentNothing(progress) &&
+      circleRunSentNothing(progress, { "1.3.0": buildOf(vendor.entry) });
+  });
+});
+
+test("a run whose entry is replaced while it loads names no build and cannot show that nothing was sent", async t => {
+  // An install that replaces the CLI between the child's hash and its load: the
+  // fake rewrites its own entry, as such an install would, and fails.
+  const vendor = vendorPackage(t, { version: "1.3.0" }, `import { writeFileSync } from "node:fs"; import { fileURLToPath } from "node:url";
+    writeFileSync(fileURLToPath(import.meta.url), "process.exit(1);\\n");
+    process.exit(1);`);
+  const recorded = buildOf(vendor.entry);
+  await assert.rejects(spawnCircleReview(vendor.entry, request("execute")), (error: CliError) => {
+    const progress = circleProgressOf(error)!;
+    return progress.build === undefined && progress.uncertain && !progress.approvalSent &&
+      !circleRunSentNothing(progress, { "1.3.0": recorded });
+  });
+  assert.notEqual(buildOf(vendor.entry), recorded);
+});
+
 /**
- * The request sequence @circle-fin/cli 1.1.4 and 1.2.0 send for an agent
- * wallet's `wallet execute` (dist/index.js: resolveWallet, handleAgentExecute,
- * executeChallenge, pollChallenge, pollTransaction), in order.
+ * The request sequence @circle-fin/cli 1.2 sends for an agent wallet's
+ * `wallet execute` (dist/index.js: resolveWallet, handleAgentExecute,
+ * executeChallenge, pollChallenge, pollTransaction), in order; the vendor
+ * tests (circleReviewVendor.test.ts) check it against an installed release.
  */
 function vendorExecuteSequence(r: CircleReviewRequest, transactionId = "tx-from-challenge") {
   return [
@@ -114,7 +275,7 @@ function vendorExecuteSequence(r: CircleReviewRequest, transactionId = "tx-from-
   ];
 }
 
-test("the pinned CLIs' whole execute sequence passes, each decisive step is recorded before it leaves, and only the challenge's transaction can be polled", async () => {
+test("the Circle CLI's whole execute sequence passes, each decisive step is recorded before it leaves, and only the challenge's transaction can be polled", async () => {
   const r = request("execute");
   const events: { event: string; [key: string]: unknown }[] = [];
   const forwarded: string[] = [];
@@ -179,7 +340,7 @@ test("recorded progress folds to what Circle can have done; an unreadable line m
   assert.equal(circleReviewProgress("").approvalSent, false);
 });
 
-/** A `transaction list --output json` row exactly as the pinned CLIs print it: no idempotencyKey and no callData. */
+/** A `transaction list --output json` row exactly as Circle CLI 1.2 prints it: no idempotencyKey and no callData. */
 function printedRow(r: CircleReviewRequest, overrides: Record<string, unknown> = {}) {
   return { id: "vendor-id", state: "COMPLETE", blockchain: "BASE-SEPOLIA", txHash: canonicalHash("printed"),
     sourceAddress: wallet, destinationAddress: eas, operation: "CONTRACT_EXECUTION", transactionType: "OUTBOUND",
@@ -223,9 +384,9 @@ test("the adapter reports the transaction from the vendor output or, failing tha
   const r = request("execute");
   const progress = { executionRequested: true, challengeId: "bound-challenge", approvalSent: true, transactionId: "tx-1",
     state: "COMPLETE", txHash: canonicalHash("mined"), uncertain: false };
-  const adapter = createCircleReviewAdapter({ entry: "/synthetic", packageVersion: "1.1.4",
+  const adapter = createCircleReviewAdapter({ entry: "/synthetic", packageVersion: "1.2.0",
     run: async () => ({ output: { id: "tx-1", state: "COMPLETE", txHash: canonicalHash("mined") }, progress }) });
   assert.deepEqual(await adapter.submit(r), { transactionId: "tx-1", txHash: canonicalHash("mined"), state: "COMPLETE", progress });
-  const quiet = createCircleReviewAdapter({ entry: "/synthetic", packageVersion: "1.1.4", run: async () => ({ output: {}, progress }) });
+  const quiet = createCircleReviewAdapter({ entry: "/synthetic", packageVersion: "1.2.0", run: async () => ({ output: {}, progress }) });
   assert.deepEqual(await quiet.submit(r), { transactionId: "tx-1", txHash: canonicalHash("mined"), state: "COMPLETE", progress });
 });

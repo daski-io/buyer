@@ -2,25 +2,130 @@
  * Child-scoped Circle transport policy. Inputs are a buyer-validated EAS call,
  * never arbitrary CLI commands. No credentials are persisted or returned here.
  *
- * The pinned CLIs (1.1.4, 1.2.0) run `wallet execute` as: list the wallets,
+ * @circle-fin/cli 1.2.0 and later run `wallet execute` as: list the wallets,
  * POST the contract execution, read the encrypted challenge, POST its
  * approval, poll the user challenge until COMPLETE, then poll the transaction
  * the challenge names (GET /v1/w3s/transactions/<id>) until it is terminal.
  * The policy permits exactly that sequence for the approved call, and records
  * each step that decides whether Circle can execute before forwarding it, so
  * the buyer knows what happened even when the vendor process fails later.
+ * The buyer trusts the installed CLI; the policy and the network confinement
+ * below are correctness aids that stop a release sending anything else
+ * through Node's usual clients, not a boundary against the vendor. That a run
+ * sent nothing is believed only of a qualified build (circleReview.ts).
  */
+import { readFileSync, realpathSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import net from "node:net";
+import { dirname, join } from "node:path";
+import tls from "node:tls";
 import { encodeFunctionData, parseAbi, type Address, type Hex } from "viem";
 import type { DirectCall } from "../commands/confirmation.js";
 /**
- * dist/index.js SHA-256 of each @circle-fin/cli release whose review requests
- * this policy was checked against. 1.2.0 sends exactly 1.1.4's. Circle's own
- * version policy refuses every command below 1.1.4, so 1.0.0 is not run.
+ * The oldest @circle-fin/cli whose review requests this policy was checked
+ * against; every later release runs, and the policy's fetch refuses any
+ * request beyond that sequence. Circle's own version policy refuses every
+ * command below 1.1.4, and 1.1.4 is below this floor. Like the package check
+ * below, a sanity check of the installed CLI, which the buyer trusts.
  */
-export const CIRCLE_REVIEW_ENTRY_HASHES: Readonly<Record<string, string>> = {
-  "1.1.4": "89f8610b586ca929c3419779405b59618c60be10836bc4428d21c75a7c18f6a4",
-  "1.2.0": "feb24e3d404b41bfda54ff69b397c892a3c007487f7831904c2617d036afd9b9",
-};
+export const CIRCLE_REVIEW_MINIMUM_VERSION = "1.2.0";
+const RELEASE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+/** A release (never a prerelease, as npm's `>=1.2.0` reads it) at or above the floor. */
+export function circleReviewVersionSupported(version: unknown): boolean {
+  const found = typeof version === "string" ? RELEASE.exec(version) : null;
+  const floor = RELEASE.exec(CIRCLE_REVIEW_MINIMUM_VERSION)!;
+  if (!found) return false;
+  for (const part of [1, 2, 3]) {
+    if (Number(found[part]) !== Number(floor[part])) return Number(found[part]) > Number(floor[part]);
+  }
+  return true;
+}
+/**
+ * The version of the installed @circle-fin/cli whose `circle` command this
+ * entry point is: the package.json above its directory names that package and
+ * declares this very file its `circle` binary, at a release the floor admits.
+ * Undefined for anything else; nothing about the package is reported.
+ */
+export function circleReviewPackageVersion(entry: string): string | undefined {
+  try {
+    const file = realpathSync(entry);
+    const root = dirname(dirname(file));
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { name?: unknown; version?: unknown; bin?: unknown };
+    const bin = typeof pkg.bin === "string" ? pkg.bin
+      : pkg.bin && typeof pkg.bin === "object" ? (pkg.bin as Record<string, unknown>).circle : undefined;
+    if (pkg.name !== "@circle-fin/cli" || typeof bin !== "string" || realpathSync(join(root, bin)) !== file ||
+        !circleReviewVersionSupported(pkg.version)) return undefined;
+    return pkg.version as string;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where Circle's agent wallet API is: the only place the child may connect. */
+export interface CircleReviewEndpoint { host: string; port: number }
+const CIRCLE_ENDPOINT: CircleReviewEndpoint = { host: "agentic-wallet.circle.com", port: 443 };
+/** Where Node's fetch, and any undici, finds the dispatcher a request without its own uses. */
+const SHARED_DISPATCHER = Symbol.for("undici.globalDispatcher.1");
+/** Node's own fetch opens its sockets from this module, on every supported Node version. */
+const NODE_FETCH = "node:internal/deps/undici/undici";
+const outsideScope = (): never => { throw new Error("Circle request is outside review scope"); };
+/** The file of the code that called `fn`; undefined when the stack cannot say. */
+function callerOf(fn: (...args: never[]) => unknown): string | undefined {
+  const prepare = Error.prepareStackTrace;
+  const limit = Error.stackTraceLimit;
+  try {
+    Error.prepareStackTrace = (_error, sites) => sites;
+    Error.stackTraceLimit = 1;
+    const holder: { stack?: NodeJS.CallSite[] } = {};
+    Error.captureStackTrace(holder, fn);
+    return holder.stack?.[0]?.getFileName() ?? undefined;
+  } finally {
+    Error.prepareStackTrace = prepare;
+    Error.stackTraceLimit = limit;
+  }
+}
+/**
+ * Leaves Node's own fetch, for the review policy, as the child's usual way to
+ * the network, before any vendor code loads. The dispatcher that fetch
+ * connects with is kept for the policy alone; every other client that would
+ * share it (a vendor's own undici, WebSocket) finds a refusal instead. A TLS
+ * connection opens only from Node's fetch, by its call stack, and only to
+ * Circle's endpoint, and a socket connects only inside such a connection.
+ * Node's http, https and http2 clients, undici and the usual HTTP libraries
+ * connect through these, so a release that moved its requests to one of them
+ * fails at that request. It is a correctness aid, not a boundary: threads,
+ * processes, DNS, UDP, native addons, process.binding and the inspector are
+ * not confined, and code that rewrites the call stack passes the TLS check.
+ */
+export async function confineCircleReviewNetwork(endpoint: CircleReviewEndpoint = CIRCLE_ENDPOINT): Promise<typeof fetch> {
+  const original = globalThis.fetch;
+  // Node creates its fetch dispatcher on first use; a data: URL connects nowhere.
+  await original("data:,");
+  const shared = globalThis as unknown as Record<symbol, unknown>;
+  const dispatcher = shared[SHARED_DISPATCHER];
+  if (!dispatcher || typeof dispatcher !== "object") throw new Error("Node's fetch dispatcher is unavailable");
+  shared[SHARED_DISPATCHER] = new Proxy({}, { get: (_target, key) => key === "then" ? undefined : outsideScope });
+  const connectTls = tls.connect;
+  const connectSocket = net.Socket.prototype.connect;
+  let opening = false;
+  tls.connect = function confinedTls(this: unknown, ...args: unknown[]) {
+    const options = args[0] as { host?: unknown; port?: unknown; servername?: unknown } | null;
+    if (callerOf(confinedTls) !== NODE_FETCH || !options || typeof options !== "object" || options.host !== endpoint.host ||
+        Number(options.port) !== endpoint.port || (options.servername != null && options.servername !== endpoint.host)) outsideScope();
+    opening = true;
+    try {
+      return Reflect.apply(connectTls, this, args) as tls.TLSSocket;
+    } finally {
+      opening = false;
+    }
+  } as typeof tls.connect;
+  net.Socket.prototype.connect = function confinedSocket(this: net.Socket, ...args: unknown[]) {
+    if (!opening) outsideScope();
+    return Reflect.apply(connectSocket, this, args) as net.Socket;
+  } as typeof net.Socket.prototype.connect;
+  syncBuiltinESMExports();
+  return (input, init) => original(input, { ...init, dispatcher } as RequestInit);
+}
 export type CircleReviewMode = "estimate" | "execute" | "lookup";
 export interface CircleReviewRequest {
   mode: CircleReviewMode; wallet: Address; call: DirectCall; idempotencyKey: string;
@@ -33,10 +138,13 @@ const SIGNATURES = CIRCLE_REVIEW_SIGNATURES;
 const IDENTIFIER = /^[a-zA-Z0-9-]{1,128}$/;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 const VENDOR_STATE = /^[A-Z_]{1,32}$/;
+const BUILD = /^[0-9a-f]{64}$/;
 const TRANSACTION_PATH = "/v1/w3s/transactions/";
 
 /** One step of a vendor run that decides what Circle can do, recorded before it is forwarded. */
 export type CircleReviewEvent =
+  /** The SHA-256 of the CLI entry point about to load, recorded before any of its code runs. */
+  | { event: "vendor"; build: string }
   | { event: "execution-requested" }
   | { event: "challenge"; challengeId: string }
   | { event: "approval-sent" }
@@ -46,6 +154,8 @@ export type CircleReviewReporter = (event: CircleReviewEvent) => void;
 
 /** What a vendor run did, folded from its recorded events, whatever the vendor's exit status. */
 export interface CircleReviewProgress {
+  /** The build that loaded; absent when the vendor never did. */
+  build?: string;
   /** The contract execution request left the child. */
   executionRequested: boolean;
   challengeId?: string;
@@ -55,7 +165,7 @@ export interface CircleReviewProgress {
   /** Circle's last reported state for that transaction. */
   state?: string;
   txHash?: Hex;
-  /** A line could not be read: treat the run as possibly executed. */
+  /** A line could not be read, or the entry changed during the run: treat the run as possibly executed. */
   uncertain: boolean;
 }
 
@@ -73,7 +183,9 @@ export function circleReviewProgress(lines: string): CircleReviewProgress {
       progress.uncertain = true;
       continue;
     }
-    if (event.event === "execution-requested") progress.executionRequested = true;
+    if (event.event === "vendor" && typeof event.build === "string" && BUILD.test(event.build) &&
+        (progress.build === undefined || progress.build === event.build)) progress.build = event.build;
+    else if (event.event === "execution-requested") progress.executionRequested = true;
     else if (event.event === "approval-sent") progress.approvalSent = true;
     else if (event.event === "challenge" && typeof event.challengeId === "string" && IDENTIFIER.test(event.challengeId)) {
       progress.challengeId = event.challengeId;

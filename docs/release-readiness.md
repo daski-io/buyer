@@ -60,6 +60,18 @@ CI also runs on pushes to the configured history branches. The engine proves
 the exact source/package commit it selects; do not manufacture a sandbox merge
 as a prerequisite for package publication.
 
+The separate Circle CLI workflow (`circle-cli.yml`) watches the vendor rather
+than this repository's commits. Every week, and on demand for any version, it
+installs `@circle-fin/cli` 1.2.0 and Circle's latest release and runs the
+offline adapter tests against each, the real CLI running a whole review against
+a fake of Circle's API. It is an early warning only: Circle's setup installs
+its latest release at once, so agents may run a build before the workflow has
+seen it. A failure means that release breaks reviews; fix the adapter here and
+release it. Because it runs vendor code nobody here reviewed, it has a
+read-only token, no secrets, no persisted checkout credentials, actions pinned
+by commit and no npm cache. It is not part of the package proof or the
+engine's release evidence.
+
 The `Release` workflow repeats the package proof on Node 24 and, before
 publishing `@daski/pay`, waits until the exact `@daski/x402-scheme` version it
 pins is installable from the registry.

@@ -3,13 +3,13 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Hex } from "viem";
 import { CliError } from "../cli/errors.js";
 import { resolveCircleCommand, vendorEnvironment } from "./circleAgent.js";
 import {
-  CIRCLE_REVIEW_ENTRY_HASHES, assertCircleReviewRequest, circleReviewProgress, circleRowCarriesCall,
+  CIRCLE_REVIEW_MINIMUM_VERSION, assertCircleReviewRequest, circleReviewPackageVersion, circleReviewProgress, circleRowCarriesCall,
   type CircleReviewProgress, type CircleReviewRequest,
 } from "./circleReviewTransport.js";
 
@@ -38,11 +38,37 @@ export interface DirectReviewSubmissionAdapter {
   submit(request: CircleReviewRequest): Promise<CircleSubmission>;
   lookup(request: CircleReviewRequest, options?: CircleLookupOptions): Promise<CircleLookup>;
 }
+/**
+ * The builds whose review requests were reviewed request by request: the
+ * SHA-256 of each @circle-fin/cli release's dist/index.js. The buyer runs any
+ * release from the floor, but believes that a run sent nothing only of these,
+ * because only their requests are known to all pass through the recorded
+ * policy. A build is added only by a reviewed buyer release.
+ */
+export const CIRCLE_REVIEW_QUALIFIED_BUILDS: Readonly<Record<string, string>> = {
+  "1.2.0": "feb24e3d404b41bfda54ff69b397c892a3c007487f7831904c2617d036afd9b9",
+};
+/**
+ * Whether a failed run's record shows that nothing reached Circle, so the
+ * prepared review may be restored and submitted again: the record is readable,
+ * no approval left the child, and either the vendor never loaded or the build
+ * that ran is qualified. Any other build may have sent its approval another
+ * way, so its run stays possibly executed and is reconciled, never resent.
+ */
+export function circleRunSentNothing(progress: CircleReviewProgress,
+  qualified: Readonly<Record<string, string>> = CIRCLE_REVIEW_QUALIFIED_BUILDS): boolean {
+  if (progress.uncertain || progress.approvalSent) return false;
+  if (progress.build === undefined) return !progress.executionRequested && progress.challengeId === undefined && progress.transactionId === undefined;
+  return Object.values(qualified).includes(progress.build);
+}
 /** The vendor's parsed JSON output and what the child recorded of the run. */
 export interface CircleReviewRun { output: unknown; progress: CircleReviewProgress }
 export type CircleReviewRunner = (entry: string, request: CircleReviewRequest) => Promise<CircleReviewRun>;
 
-/** The pinned CLIs poll a challenge for up to 60 s and its transaction for up to 120 s. */
+/**
+ * Circle CLI 1.2 polls a challenge for up to 60 s and its transaction for up
+ * to 120 s; a release that waits longer is stopped here with its progress kept.
+ */
 export const CIRCLE_REVIEW_TIMEOUT_MS = 210_000;
 const MAX_PROGRESS_BYTES = 64 * 1024;
 
@@ -77,16 +103,18 @@ export function resolveCircleReviewEntry(env: NodeJS.ProcessEnv = process.env): 
   }
   throw failure("DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED", "The Circle npm entrypoint could not be verified.");
 }
+/**
+ * A sanity check of the installed CLI, which the buyer trusts: the package's
+ * own package.json, which anything installed beside it could also write.
+ */
 export function verifyCircleReviewEntry(entry: string): string {
-  try {
-    const pkg = JSON.parse(readFileSync(join(dirname(entry), "..", "package.json"), "utf8")) as { name: string; version: string };
-    const expected = CIRCLE_REVIEW_ENTRY_HASHES[pkg.version];
-    if (pkg.name === "@circle-fin/cli" && expected && createHash("sha256").update(readFileSync(entry)).digest("hex") === expected) return pkg.version;
-  } catch { /* Bounded error, no package content or vendor output. */ }
+  // Bounded error, no package content or vendor output.
+  const version = circleReviewPackageVersion(entry);
+  if (version !== undefined) return version;
   throw new CliError({ code: "DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED",
-    message: `The installed Circle entrypoint differs from the qualified ${Object.keys(CIRCLE_REVIEW_ENTRY_HASHES).join("/")} artifacts.`,
-    remediation: "Nothing was sent. Install a qualified version, such as the one the gateway publishes under signerClis.circle-agent " +
-      "(npm install -g @circle-fin/cli@<version>), then repeat the same command. The saved review is kept." });
+    message: `The installed circle command is not the entry point of @circle-fin/cli ${CIRCLE_REVIEW_MINIMUM_VERSION} or later.`,
+    remediation: `Nothing was sent. Install @circle-fin/cli ${CIRCLE_REVIEW_MINIMUM_VERSION} or later, such as the version the gateway ` +
+      "publishes under signerClis.circle-agent (npm install -g @circle-fin/cli@<version>), then repeat the same command. The saved review is kept." });
 }
 /** Reads at most the progress bound; a larger file is unreadable, so the run is uncertain. */
 function readProgress(path: string): CircleReviewProgress {
@@ -104,6 +132,20 @@ function readProgress(path: string): CircleReviewProgress {
     return { ...circleReviewProgress(""), uncertain: true };
   }
 }
+/**
+ * The child hashes the entry and then loads it, two reads of the file; an
+ * install between them would leave one build recorded while another ran. So
+ * the entry is hashed again once the run ends, and a record whose entry
+ * changed names no build and cannot show that nothing was sent.
+ */
+function sameBuild(entry: string, progress: CircleReviewProgress): CircleReviewProgress {
+  if (progress.build === undefined) return progress;
+  try {
+    if (createHash("sha256").update(readFileSync(entry)).digest("hex") === progress.build) return progress;
+  } catch { /* An entry that cannot be read now is not the one recorded. */ }
+  const { build: _recorded, ...rest } = progress;
+  return { ...rest, uncertain: true };
+}
 /** Removes a run's progress directory; one left behind holds no secret and decides nothing. */
 function removeProgress(directory: string): void {
   try { rmSync(directory, { recursive: true, force: true }); } catch { /* Kept for the system's temporary cleanup. */ }
@@ -120,7 +162,13 @@ function progressDirectory(): string | undefined {
     return undefined;
   }
 }
-export const spawnCircleReview: CircleReviewRunner = (entry, request) => {
+/** How the review child starts: this process's Node and environment, unless a test supplies its own. */
+export interface CircleReviewRunnerOptions {
+  /** Node options placed before the child's entry point (the offline vendor tests' fake Circle API). */
+  execArgv?: readonly string[];
+  env?: NodeJS.ProcessEnv;
+}
+export const circleReviewRunner = (options: CircleReviewRunnerOptions = {}): CircleReviewRunner => (entry, request) => {
   assertCircleReviewRequest(request);
   // The child forwards nothing it cannot record, so a run without a progress
   // file never starts. It fails as a run that sent nothing, which restores the
@@ -133,11 +181,11 @@ export const spawnCircleReview: CircleReviewRunner = (entry, request) => {
   const settle = (): CircleReviewProgress => {
     const progress = readProgress(progressFile);
     removeProgress(directory);
-    return progress;
+    return sameBuild(entry, progress);
   };
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [fileURLToPath(new URL("./circleReviewChild.js", import.meta.url)), entry, progressFile], {
-      stdio: ["pipe", "pipe", "ignore"], env: circleReviewEnvironment(),
+    const child = spawn(process.execPath, [...options.execArgv ?? [], fileURLToPath(new URL("./circleReviewChild.js", import.meta.url)), entry, progressFile], {
+      stdio: ["pipe", "pipe", "ignore"], env: circleReviewEnvironment(options.env),
       timeout: CIRCLE_REVIEW_TIMEOUT_MS, killSignal: "SIGKILL", windowsHide: true,
     });
     const chunks: Buffer[] = [];
@@ -164,6 +212,7 @@ export const spawnCircleReview: CircleReviewRunner = (entry, request) => {
     child.stdin.end(JSON.stringify(request));
   });
 };
+export const spawnCircleReview: CircleReviewRunner = circleReviewRunner();
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function unwrap(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) return {};

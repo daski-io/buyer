@@ -3,6 +3,28 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.8 — unreleased
+
+### @daski/pay
+
+- **A Circle review runs with any `@circle-fin/cli` from 1.2.0 on, and the buyer trusts the installed CLI, as signing does.** The direct-review adapter admitted only the two builds it was hashed against, 1.1.4 and 1.2.0, so a review refused Circle's current 1.2.2 with `DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED`. 1.2.1 and 1.2.2 send exactly 1.2.0's review requests. It now runs any release from 1.2.0. As a sanity check, not a proof of the package, the `circle` on PATH must be the entry point the `@circle-fin/cli` package.json declares as its `circle` binary, at a release (not a prerelease) of 1.2.0 or later, and the review child checks this again. 1.1.4 and older are refused. Every request-level check stays as a correctness guard: destination, wallet, chain, ABI parameters, zero value, idempotency, exact calldata and the allowlisted endpoints.
+- **Only a qualified build may report that nothing was sent.** `CIRCLE_REVIEW_QUALIFIED_BUILDS` lists each build whose review requests were reviewed, by the SHA-256 of its `dist/index.js`. Today that is 1.2.0 alone, and builds are added only by reviewed buyer releases. The review child records the build it loads, and the journal keeps it (`vendor.build`).
+  - On a qualified build, a run that recorded no approval answers `DASKI_CIRCLE_REVIEW_NOT_STARTED` and restores the prepared review, as before.
+  - On any other build, such a run may have sent its approval another way, so it answers `DASKI_CIRCLE_REVIEW_UNKNOWN`, keeps its journal for `--resume`, and is not submitted again while the record is open.
+  - A run whose CLI never loaded sent nothing on any build.
+- **The review child confines the CLI's network, as a correctness aid.** Before the vendor loads, Node's HTTP, HTTPS, HTTP/2, TLS and socket clients, the dispatcher undici clients share and WebSocket refuse every use but the policy's fetch to Circle's endpoint, so a release that moved its requests to one of them fails at that request. This is not a credential boundary: worker threads, child processes, DNS, UDP, native addons, `process.binding` and the inspector are not confined, and code that rewrites the call stack passes the TLS check.
+- The signing adapter checks no Circle CLI version, as before; its comments and `docs/signers.md` no longer call the CLI pinned.
+- **The offline tests can run a real Circle CLI.** It is found on PATH and verified as for a user, then runs through the review child against a fake of Circle's API (`DASKI_TEST_CIRCLE_CLI`, `npm run test:circle --workspace @daski/pay`). The tests run an estimate, a submission through the bound challenge, a history lookup, and a run Circle refuses before any approval.
+  - The new Circle CLI workflow runs them weekly and on demand for any version, with 1.2.0 and Circle's latest release on Node 20, 22 and 24. 1.2.0 and 1.2.2 pass.
+  - The workflow is an early warning only: Circle's setup installs its latest release at once, so agents may run a build before CI has seen it.
+  - It runs with a read-only token, no persisted checkout credentials, actions pinned by commit and no npm cache.
+  - Other offline tests cover fake CLIs that are not qualified and send their approval through a worker thread, a child process, a DNS query, or a TLS connection after forging the call stack. Each run ends `DASKI_CIRCLE_REVIEW_UNKNOWN` with its journal kept.
+  - One test sends Node's real fetch to Circle's host through the confinement, with that host resolved to loopback.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.5.7 — unreleased
 
 ### @daski/pay

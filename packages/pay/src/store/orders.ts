@@ -81,6 +81,8 @@ export interface ConfirmationTxRecord {
     fromBlock?: string;
     /** The challenge Circle issued for this execution. */
     challengeId?: string;
+    /** The SHA-256 of the Circle CLI entry point the run loaded. */
+    build?: string;
     /** Circle's last reported state for the transaction, such as COMPLETE or FAILED. */
     state?: string;
   };

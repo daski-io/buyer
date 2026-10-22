@@ -1,6 +1,6 @@
 {
   "name": "@daski/pay",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "The Daski buyer bridge CLI. Server proposes, the bridge validates and recomputes, the wallet signs, the gateway never sees the key.",
   "license": "MIT",
   "type": "module",
@@ -40,11 +40,12 @@
   "scripts": {
     "build": "tsc --build tsconfig.build.json",
     "test": "tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "test:circle": "tsc -p tsconfig.test.json && node --test .test-dist/test/circle*.test.js",
     "conformance": "tsc -p conformance/tsconfig.json && node .conformance-dist/conformance/run.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@daski/x402-scheme": "0.5.7",
+    "@daski/x402-scheme": "0.5.8",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@x402/core": "2.24.0",
     "viem": "2.57.4"

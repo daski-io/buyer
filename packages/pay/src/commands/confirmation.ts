@@ -44,7 +44,7 @@
  */
 import { randomUUID } from "node:crypto";
 import {
-  circleProgressOf, createCircleReviewAdapter, type CircleLookup, type DirectReviewSubmissionAdapter,
+  circleProgressOf, circleRunSentNothing, createCircleReviewAdapter, type CircleLookup, type DirectReviewSubmissionAdapter,
 } from "../signers/circleReview.js";
 import type { CircleReviewProgress } from "../signers/circleReviewTransport.js";
 import { circleChainName, loginHint } from "../signers/circleAgent.js";
@@ -594,9 +594,9 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
     result = await adapter.submit(request);
   } catch (error) {
     const progress = circleProgressOf(error);
-    if (progress && !progress.approvalSent && !progress.uncertain) {
-      // Circle executes only an approved challenge, and no approval left the
-      // child: nothing can run, so the prepared review is restored as it was.
+    if (progress && circleRunSentNothing(progress)) {
+      // Circle executes only an approved challenge, and a qualified build sent
+      // no approval: nothing can run, so the prepared review is restored as it was.
       updateOrder(record.intentId, { confirmationTx: tracked });
       throw new CliError({ code: "DASKI_CIRCLE_REVIEW_NOT_STARTED",
         message: progress.executionRequested
@@ -608,6 +608,13 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
     }
     // Possibly executing: keep the journal with every identity Circle gave.
     if (progress) updateOrder(record.intentId, { confirmationTx: withCircleProgress(started, progress) });
+    if (progress && !progress.approvalSent && !progress.uncertain) throw new CliError({ code: "DASKI_CIRCLE_REVIEW_UNKNOWN",
+      message: `The Circle review recorded no approval, but @circle-fin/cli ${adapter.packageVersion} is not a qualified build, ` +
+        "so the buyer cannot tell that nothing was sent.",
+      remediation: `This run stays open and is not submitted again. daski order confirm ${handle} --resume only reads Circle's history and the chain; ` +
+        "it never executes. Only a run made with a qualified build (docs/direct-reviews.md) can be restored when it sent no approval; " +
+        "installing one now does not restore this run.",
+      details: { circleProgress: progress, reason: (error as CliError).message } });
     throw error;
   }
   const updated = withCircleProgress(started, result.progress, result);
@@ -626,7 +633,7 @@ function withCircleProgress(tracked: ConfirmationTxRecord, progress: CircleRevie
   const state = result?.state ?? progress.state;
   const hashes = txHash ? [...new Set([...vendor.hashes, txHash])] : vendor.hashes;
   return { ...tracked, ...(hashes.length ? { txHash: hashes[hashes.length - 1]! } : {}),
-    vendor: { ...vendor, ...(progress.challengeId ? { challengeId: progress.challengeId } : {}),
+    vendor: { ...vendor, ...(progress.build ? { build: progress.build } : {}), ...(progress.challengeId ? { challengeId: progress.challengeId } : {}),
       ...(transactionId ? { transactionId } : {}), ...(state ? { state } : {}), hashes } };
 }
 
