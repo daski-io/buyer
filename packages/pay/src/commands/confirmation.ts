@@ -611,8 +611,9 @@ async function manageCircleReview(context: CommandContext, record: OrderRecord, 
     if (progress && !progress.approvalSent && !progress.uncertain) throw new CliError({ code: "DASKI_CIRCLE_REVIEW_UNKNOWN",
       message: `The Circle review recorded no approval, but @circle-fin/cli ${adapter.packageVersion} is not a qualified build, ` +
         "so the buyer cannot tell that nothing was sent.",
-      remediation: `The journal is kept and this review is not submitted again while it is open. Run daski order confirm ${handle} --resume: ` +
-        "it reads Circle's history and the chain and never executes. Only a qualified build (docs/direct-reviews.md) restores a run that sent no approval.",
+      remediation: `This run stays open and is not submitted again. daski order confirm ${handle} --resume only reads Circle's history and the chain; ` +
+        "it never executes. Only a run made with a qualified build (docs/direct-reviews.md) can be restored when it sent no approval; " +
+        "installing one now does not restore this run.",
       details: { circleProgress: progress, reason: (error as CliError).message } });
     throw error;
   }

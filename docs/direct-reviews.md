@@ -49,7 +49,7 @@ from parameters (observed live on Base Sepolia). All destination, wallet,
 chain, ABI parameters, zero value and idempotency fields must match; the
 re-encoded calldata must be exact. Transfer, deploy, cancel, accelerate,
 arbitrary requests and cross-environment requests fail. These are correctness
-guards: they keep a CLI that builds another request from sending it.
+guards: they stop the policy's fetch from forwarding any other request.
 
 Before the CLI loads, the child also confines its network: Node's HTTP, HTTPS,
 HTTP/2, TLS and socket clients, the dispatcher undici clients share and
@@ -66,8 +66,15 @@ believes that a run sent nothing only of a qualified build: one whose review
 requests were reviewed request by request. `CIRCLE_REVIEW_QUALIFIED_BUILDS`
 lists each by the exact SHA-256 of its `dist/index.js`. Today that is 1.2.0
 alone (`feb24e3d404b41bfda54ff69b397c892a3c007487f7831904c2617d036afd9b9`). A
-build is added only by a reviewed buyer release. The child records the SHA-256
-of the build it loads before any of its code runs, and the journal keeps it.
+build is added only by a reviewed buyer release. A build is identified by the
+hash of the CLI's entry bundle, `dist/index.js`, alone: its installed
+dependencies are not hashed, and npm resolves them at install time
+(`node-forge ^1.3.1` and the transitive ranges), so two installs of one
+qualified build can run different dependency code. The child records the
+SHA-256 of the build it loads before any of its code runs, the buyer hashes the
+same file again once the run ends, and the journal keeps the build. A run
+whose entry changed in between, as when an install replaces it mid-run, is
+not taken for the build it recorded.
 
 That changes one thing, the "nothing was sent" fast path. A run on a qualified
 build that recorded no approval answers `DASKI_CIRCLE_REVIEW_NOT_STARTED` and

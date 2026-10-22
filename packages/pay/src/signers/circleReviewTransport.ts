@@ -23,8 +23,8 @@ import { encodeFunctionData, parseAbi, type Address, type Hex } from "viem";
 import type { DirectCall } from "../commands/confirmation.js";
 /**
  * The oldest @circle-fin/cli whose review requests this policy was checked
- * against; every later release runs, and the policy refuses whatever it
- * sends beyond that sequence. Circle's own version policy refuses every
+ * against; every later release runs, and the policy's fetch refuses any
+ * request beyond that sequence. Circle's own version policy refuses every
  * command below 1.1.4, and 1.1.4 is below this floor. Like the package check
  * below, a sanity check of the installed CLI, which the buyer trusts.
  */
@@ -165,7 +165,7 @@ export interface CircleReviewProgress {
   /** Circle's last reported state for that transaction. */
   state?: string;
   txHash?: Hex;
-  /** A line could not be read: treat the run as possibly executed. */
+  /** A line could not be read, or the entry changed during the run: treat the run as possibly executed. */
   uncertain: boolean;
 }
 

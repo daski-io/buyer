@@ -239,6 +239,21 @@ test("a run that recorded no approval sent nothing only on a qualified build, or
   });
 });
 
+test("a run whose entry is replaced while it loads names no build and cannot show that nothing was sent", async t => {
+  // An install that replaces the CLI between the child's hash and its load: the
+  // fake rewrites its own entry, as such an install would, and fails.
+  const vendor = vendorPackage(t, { version: "1.3.0" }, `import { writeFileSync } from "node:fs"; import { fileURLToPath } from "node:url";
+    writeFileSync(fileURLToPath(import.meta.url), "process.exit(1);\\n");
+    process.exit(1);`);
+  const recorded = buildOf(vendor.entry);
+  await assert.rejects(spawnCircleReview(vendor.entry, request("execute")), (error: CliError) => {
+    const progress = circleProgressOf(error)!;
+    return progress.build === undefined && progress.uncertain && !progress.approvalSent &&
+      !circleRunSentNothing(progress, { "1.3.0": recorded });
+  });
+  assert.notEqual(buildOf(vendor.entry), recorded);
+});
+
 /**
  * The request sequence @circle-fin/cli 1.2 sends for an agent wallet's
  * `wallet execute` (dist/index.js: resolveWallet, handleAgentExecute,

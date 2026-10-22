@@ -1,6 +1,7 @@
 /** Direct reviews are the only transaction-capable vendor integration. */
 import { spawn } from "node:child_process";
-import { closeSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -131,6 +132,20 @@ function readProgress(path: string): CircleReviewProgress {
     return { ...circleReviewProgress(""), uncertain: true };
   }
 }
+/**
+ * The child hashes the entry and then loads it, two reads of the file; an
+ * install between them would leave one build recorded while another ran. So
+ * the entry is hashed again once the run ends, and a record whose entry
+ * changed names no build and cannot show that nothing was sent.
+ */
+function sameBuild(entry: string, progress: CircleReviewProgress): CircleReviewProgress {
+  if (progress.build === undefined) return progress;
+  try {
+    if (createHash("sha256").update(readFileSync(entry)).digest("hex") === progress.build) return progress;
+  } catch { /* An entry that cannot be read now is not the one recorded. */ }
+  const { build: _recorded, ...rest } = progress;
+  return { ...rest, uncertain: true };
+}
 /** Removes a run's progress directory; one left behind holds no secret and decides nothing. */
 function removeProgress(directory: string): void {
   try { rmSync(directory, { recursive: true, force: true }); } catch { /* Kept for the system's temporary cleanup. */ }
@@ -166,7 +181,7 @@ export const circleReviewRunner = (options: CircleReviewRunnerOptions = {}): Cir
   const settle = (): CircleReviewProgress => {
     const progress = readProgress(progressFile);
     removeProgress(directory);
-    return progress;
+    return sameBuild(entry, progress);
   };
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [...options.execArgv ?? [], fileURLToPath(new URL("./circleReviewChild.js", import.meta.url)), entry, progressFile], {

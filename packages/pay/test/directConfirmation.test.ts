@@ -1201,7 +1201,8 @@ test("any other build's run that sent no approval is kept as possibly sent, resu
     const prepared = current().confirmationTx!;
     await assert.rejects(confirmOrder(context, current(), { ...options, submit: true, approveCallHash: prepared.callHash }, factsReader(), adapter),
       (error: unknown) => error instanceof CliError && error.code === "DASKI_CIRCLE_REVIEW_UNKNOWN" &&
-        /@circle-fin\/cli 1\.2\.2 is not a qualified build/.test(error.message) && /--resume/.test(error.remediation));
+        /@circle-fin\/cli 1\.2\.2 is not a qualified build/.test(error.message) && /stays open and is not submitted again/.test(error.remediation) &&
+        /--resume only reads/.test(error.remediation) && /installing one now does not restore this run/.test(error.remediation));
     assert.equal(current().confirmationTx?.state, "submitted");
     assert.equal(current().confirmationTx?.vendor?.build, "ab".repeat(32));
     assert.equal(current().confirmationTx?.vendor?.challengeId, "refused-challenge");
