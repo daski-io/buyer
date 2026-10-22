@@ -3,7 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
-## 0.5.9 — unreleased
+## 0.5.10 — unreleased
+
+### @daski/pay
+
+- **No runtime change from 0.5.9; the wire tests stay compatible with gateways on either side of Base Sepolia's EAS upgrade.** The release engine runs each buyer's wire tests against the candidate and serving gateways' fixtures. 0.5.9's test expected the new `eas-native-1.4.1-beta.3` profile in the gateway's `confirmation-sponsored-preparation.json`, which a gateway from before the upgrade lacks, so its compatibility boundary failed and 0.5.9 never shipped. The gateway now keeps that file to its two original profiles and emits the new one as `confirmation-sponsored-preparation-eas-1.4.1-beta.3.json`; this buyer checks both, and skips the new one against a gateway that predates it.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
+## 0.5.9 — published under `next`, never pinned
 
 ### @daski/pay
 

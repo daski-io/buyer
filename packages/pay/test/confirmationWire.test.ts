@@ -201,7 +201,7 @@ test("the gateway's actual direct attest and revoke calls pass the validator, an
 });
 
 /** Actual sponsored responses emitted by the gateway's production builders. */
-const sponsoredPreparations = JSON.parse(readFileSync(join(fixtureDirectory(), "confirmation-sponsored-preparation.json"), "utf8")) as {
+type SponsoredPreparations = {
   schemaVersion: number;
   profiles: Array<{
     facts: Omit<ConfirmationFacts, "profile"> & { payer: Address; timestamp: number; admissionDeadline: string };
@@ -209,12 +209,19 @@ const sponsoredPreparations = JSON.parse(readFileSync(join(fixtureDirectory(), "
     revoke: { result: Record<string, unknown> };
   }>;
 };
+function sponsoredFixture(name: string): SponsoredPreparations | undefined {
+  const file = join(fixtureDirectory(), name);
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) as SponsoredPreparations : undefined;
+}
+// The gateway keeps this file to the two profiles it held before Base Sepolia's 2026-10-22 EAS upgrade,
+// so a buyer released before it still passes against a newer gateway; each later profile has its own file,
+// absent from gateways that predate it.
+const sponsoredPreparations = sponsoredFixture("confirmation-sponsored-preparation.json")!;
+const signerPreparations = sponsoredFixture("confirmation-sponsored-preparation-eas-1.4.1-beta.3.json");
+const everySponsored = () => [...sponsoredPreparations.profiles, ...(signerPreparations?.profiles ?? [])];
 
-test("gateway sponsored preparations reconstruct every native EAS profile with ISO admission expiry", () => {
-  assert.equal(sponsoredPreparations.schemaVersion, 1);
-  assert.deepEqual(sponsoredPreparations.profiles.map(entry => [entry.facts.chainId, entry.attest.result.profileId]),
-    [[8453, "eas-native-1.0.1"], [84532, "eas-native-1.2.0"], [84532, "eas-native-1.4.1-beta.3"]]);
-  for (const entry of sponsoredPreparations.profiles) {
+function assertSponsoredReconstruction(entries: SponsoredPreparations["profiles"]): void {
+  for (const entry of entries) {
     // The trusted profile comes from our independent registry, as discovery on the chain would select it; the
     // response names it only so this table entry can be found.
     const facts: ConfirmationFacts = { ...entry.facts, profile: EAS_REVIEW_PROFILES[entry.attest.result.profileId as EasReviewProfileId] };
@@ -228,7 +235,7 @@ test("gateway sponsored preparations reconstruct every native EAS profile with I
       assert.equal(rebuilt.message.value, facts.profile!.signedDeadline ? "0" : undefined);
       assert.throws(() => validateConfirmationPreparation(prepared, facts, choice, false, Number(entry.facts.admissionDeadline)),
         (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "expired local admission must not be accepted");
-      for (const other of sponsoredPreparations.profiles.filter(candidate => candidate !== entry)) {
+      for (const other of everySponsored().filter(candidate => candidate.attest.result.profileId !== entry.attest.result.profileId)) {
         assert.throws(() => validateConfirmationPreparation(other[action].result, facts, choice, false, entry.facts.timestamp),
           (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH", "another deployment's profile cannot select the signing message");
       }
@@ -242,4 +249,19 @@ test("gateway sponsored preparations reconstruct every native EAS profile with I
         (error: unknown) => (error as { code?: string }).code === "DASKI_CONFIRMATION_MISMATCH");
     }
   }
+}
+
+test("gateway sponsored preparations reconstruct both native EAS profiles with ISO admission expiry", () => {
+  assert.equal(sponsoredPreparations.schemaVersion, 1);
+  assert.deepEqual(sponsoredPreparations.profiles.map(entry => [entry.facts.chainId, entry.attest.result.profileId]),
+    [[8453, "eas-native-1.0.1"], [84532, "eas-native-1.2.0"]]);
+  assertSponsoredReconstruction(sponsoredPreparations.profiles);
+});
+
+test("gateway sponsored preparations sign the payer under Base Sepolia's EAS 1.4.1-beta.3",
+  { skip: signerPreparations ? false : "this gateway predates the eas-native-1.4.1-beta.3 profile" }, () => {
+  assert.equal(signerPreparations!.schemaVersion, 1);
+  assert.deepEqual(signerPreparations!.profiles.map(entry => [entry.facts.chainId, entry.attest.result.profileId]),
+    [[84532, "eas-native-1.4.1-beta.3"]]);
+  assertSponsoredReconstruction(signerPreparations!.profiles);
 });
