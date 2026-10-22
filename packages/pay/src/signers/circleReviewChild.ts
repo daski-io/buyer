@@ -4,12 +4,15 @@
  * Each step that decides what Circle can execute is appended to the parent's
  * progress file before it is forwarded; a step that cannot be recorded is not
  * forwarded. Before the vendor loads, the review policy's fetch becomes the
- * child's only way to the network.
+ * child's usual way to the network, and the build about to load is recorded:
+ * only a qualified build's record can show that nothing was sent.
  */
-import { appendFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
-  circleReviewArguments, circleReviewFetchPolicy, circleReviewPackageVersion, confineCircleReviewNetwork, type CircleReviewRequest,
+  circleReviewArguments, circleReviewFetchPolicy, circleReviewPackageVersion, confineCircleReviewNetwork,
+  type CircleReviewEvent, type CircleReviewRequest,
 } from "./circleReviewTransport.js";
 
 async function main(): Promise<void> {
@@ -26,8 +29,10 @@ async function main(): Promise<void> {
   }
   const request = JSON.parse(Buffer.concat(chunks).toString("utf8")) as CircleReviewRequest;
   const args = circleReviewArguments(request);
-  globalThis.fetch = circleReviewFetchPolicy(request, await confineCircleReviewNetwork(),
-    (event) => appendFileSync(progress, JSON.stringify(event) + "\n"));
+  const report = (event: CircleReviewEvent): void => appendFileSync(progress, JSON.stringify(event) + "\n");
+  const policy = circleReviewFetchPolicy(request, await confineCircleReviewNetwork(), report);
+  report({ event: "vendor", build: createHash("sha256").update(readFileSync(entry)).digest("hex") });
+  globalThis.fetch = policy;
   process.argv = [process.execPath, entry, ...args];
   await import(pathToFileURL(entry).href);
 }

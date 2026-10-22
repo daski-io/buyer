@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { createServer, type AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test, type TestContext } from "node:test";
+import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { canonicalHash } from "@daski/x402-scheme";
 import { encodeFunctionData, type Hex } from "viem";
 import type { CliError } from "../src/cli/errors.js";
 import { confirmationData, EAS_ABI, type DirectCall } from "../src/commands/confirmation.js";
 import {
-  circleProgressOf, circleReviewEnvironment, createCircleReviewAdapter, matchedCircleTransactions, resolveCircleReviewEntry, spawnCircleReview,
-  verifyCircleReviewEntry,
+  CIRCLE_REVIEW_QUALIFIED_BUILDS, circleProgressOf, circleReviewEnvironment, circleReviewRunner, circleRunSentNothing, createCircleReviewAdapter,
+  matchedCircleTransactions, resolveCircleReviewEntry, spawnCircleReview, verifyCircleReviewEntry,
 } from "../src/signers/circleReview.js";
 import { CIRCLE_REVIEW_MINIMUM_VERSION, circleReviewArguments, circleReviewFetchPolicy, circleReviewPackageVersion, circleReviewProgress,
   circleReviewTuple, circleReviewVersionSupported, normalizeCircleReviewBody, type CircleReviewRequest } from "../src/signers/circleReviewTransport.js";
+import { buildOf, closedPort, vendorPackage } from "./circleVendorFixtures.js";
 const wallet = "0x1111111111111111111111111111111111111111";
 const eas = "0x4200000000000000000000000000000000000021";
 const zero = ("0x" + "00".repeat(32)) as Hex;
@@ -103,18 +103,6 @@ test("review subprocess strips credentials from Daski, preload hooks and proxy o
   assert.throws(() => verifyCircleReviewEntry("/definitely-missing/entry"), { code: "DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED" });
 });
 
-/** An npm install of a synthetic @circle-fin/cli: its package.json, the entry point, and a PATH directory with `circle`. */
-function vendorPackage(t: TestContext, pkg: Record<string, unknown>, entry = "export {};\n") {
-  const prefix = mkdtempSync(join(tmpdir(), "daski-circle-vendor-"));
-  t.after(() => rmSync(prefix, { recursive: true, force: true }));
-  const root = join(prefix, "node_modules", "@circle-fin", "cli");
-  mkdirSync(join(root, "dist"), { recursive: true });
-  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@circle-fin/cli", type: "module", bin: { circle: "dist/index.js" }, ...pkg }));
-  writeFileSync(join(root, "dist", "index.js"), entry);
-  mkdirSync(join(prefix, "bin"));
-  symlinkSync(join(root, "dist", "index.js"), join(prefix, "bin", "circle"));
-  return { root, entry: realpathSync(join(root, "dist", "index.js")), bin: join(prefix, "bin") };
-}
 const unsupported = { code: "DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED", message: /@circle-fin\/cli 1\.2\.0 or later/ };
 
 test("every @circle-fin/cli release from 1.2.0 runs reviews whatever its build, and nothing older, prereleased or other", t => {
@@ -143,14 +131,6 @@ test("every @circle-fin/cli release from 1.2.0 runs reviews whatever its build, 
   assert.throws(() => verifyCircleReviewEntry(unnamed.entry), unsupported);
 });
 
-/** A loopback port nothing listens on: a connection attempt to it is refused by the system, not by the buyer. */
-async function closedPort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
 /** Vendor-side attempts, each reported as the refusal's message or the system's connection error. */
 const ATTEMPTS = `
 const outcome = async (attempt) => {
@@ -161,7 +141,7 @@ const socket = (open) => new Promise((resolve, reject) => { const s = open(); s.
 `;
 const OUTSIDE = "Circle request is outside review scope";
 
-test("confinement leaves Node's fetch, to its one endpoint, as the only connection the review child can open", async () => {
+test("confinement leaves Node's fetch, to its one endpoint, as the only connection Node's usual clients can open", async () => {
   const allowed = await closedPort();
   let other = await closedPort();
   while (other === allowed) other = await closedPort();
@@ -188,7 +168,7 @@ test("confinement leaves Node's fetch, to its one endpoint, as the only connecti
     tls: OUTSIDE, tlsNamed: OUTSIDE, https: OUTSIDE, http: OUTSIDE, net: OUTSIDE, socket: OUTSIDE });
 });
 
-test("the review child runs an admitted release with only the policy's fetch to reach Circle, and never runs another", async t => {
+test("the review child runs an admitted release with the policy's fetch as its usual way to Circle, and never runs another", async t => {
   const port = await closedPort();
   const vendor = vendorPackage(t, { version: "1.3.0" }, `
     import http from "node:http"; import https from "node:https"; import net from "node:net";
@@ -204,12 +184,59 @@ test("the review child runs an admitted release with only the policy's fetch to 
   const run = await spawnCircleReview(vendor.entry, request("estimate"));
   assert.deepEqual(run.output, { argv: ["wallet", "execute"], fetch: "Circle endpoint is not allowed", sharedDispatcher: OUTSIDE,
     https: OUTSIDE, http: OUTSIDE, net: OUTSIDE });
-  assert.deepEqual(run.progress, { executionRequested: false, approvalSent: false, uncertain: false });
+  assert.deepEqual(run.progress, { build: buildOf(vendor.entry), executionRequested: false, approvalSent: false, uncertain: false },
+    "the build is recorded before it loads");
   // The child checks the package itself too: an older release never starts, whatever the parent asked.
   const marker = join(vendor.root, "ran");
   const old = vendorPackage(t, { version: "1.1.4" }, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "");`);
   await assert.rejects(spawnCircleReview(old.entry, request("estimate")), (error: CliError) =>
     error.code === "DASKI_CIRCLE_REVIEW_UNKNOWN" && !circleProgressOf(error)!.approvalSent && !existsSync(marker));
+});
+
+test("Node's real fetch to Circle's host passes the confinement, while the CLI's other clients do not", async t => {
+  // Circle's host resolves to loopback in the child, where nothing listens: a connection
+  // the system refuses got past the confinement, and nothing leaves the machine.
+  const vendor = vendorPackage(t, { version: "1.3.0" }, `
+    import https from "node:https";
+    ${ATTEMPTS}
+    const url = "https://agentic-wallet.circle.com/proxy/test/v1/w3s/wallets?blockchain=BASE-SEPOLIA&address=${wallet}";
+    process.stdout.write(JSON.stringify({ fetch: await outcome(() => fetch(url)), https: await outcome(() => request(https, url)) }));`);
+  const loopback = join(vendor.prefix, "loopback.mjs");
+  writeFileSync(loopback, `import dns from "node:dns"; import { syncBuiltinESMExports } from "node:module";
+    const lookup = dns.lookup;
+    dns.lookup = function (host, options, done) {
+      if (typeof options === "function") { done = options; options = {}; }
+      if (host !== "agentic-wallet.circle.com") return lookup.call(this, host, options, done);
+      return options && options.all ? done(null, [{ address: "127.0.0.1", family: 4 }]) : done(null, "127.0.0.1", 4);
+    };
+    syncBuiltinESMExports();`);
+  const run = await circleReviewRunner({ execArgv: ["--import", pathToFileURL(loopback).href] })(vendor.entry, request("estimate"));
+  assert.deepEqual(run.output, { fetch: "ECONNREFUSED", https: OUTSIDE });
+});
+
+test("a run that recorded no approval sent nothing only on a qualified build, or when the vendor never loaded", t => {
+  const quiet = { executionRequested: true, challengeId: "refused-challenge", approvalSent: false, uncertain: false };
+  assert.deepEqual(Object.keys(CIRCLE_REVIEW_QUALIFIED_BUILDS), ["1.2.0"]);
+  assert.equal(CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"], "feb24e3d404b41bfda54ff69b397c892a3c007487f7831904c2617d036afd9b9");
+  assert.equal(circleRunSentNothing({ ...quiet, build: CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"]! }), true);
+  assert.equal(circleRunSentNothing({ ...quiet, build: "ab".repeat(32) }), false, "any other build may have sent its approval another way");
+  assert.equal(circleRunSentNothing({ ...quiet, build: CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"]!, approvalSent: true }), false);
+  assert.equal(circleRunSentNothing({ ...quiet, build: CIRCLE_REVIEW_QUALIFIED_BUILDS["1.2.0"]!, uncertain: true }), false);
+  assert.equal(circleRunSentNothing(circleReviewProgress("")), true, "the vendor never loaded");
+  assert.equal(circleRunSentNothing(quiet), false, "a run that reached Circle without a recorded build proves nothing");
+  // The build is what the child recorded, once; a second, different one makes the record uncertain.
+  const build = (value: string) => JSON.stringify({ event: "vendor", build: value });
+  assert.equal(circleReviewProgress(build("ab".repeat(32))).build, "ab".repeat(32));
+  assert.equal(circleReviewProgress([build("ab".repeat(32)), build("ab".repeat(32))].join("\n")).uncertain, false);
+  assert.equal(circleReviewProgress([build("ab".repeat(32)), build("cd".repeat(32))].join("\n")).uncertain, true);
+  assert.equal(circleReviewProgress(build("not-a-hash")).uncertain, true);
+  // A real child records the build it loads; that build alone decides.
+  const vendor = vendorPackage(t, { version: "1.3.0" }, "process.exit(1);\n");
+  return assert.rejects(spawnCircleReview(vendor.entry, request("execute")), (error: CliError) => {
+    const progress = circleProgressOf(error)!;
+    return progress.build === buildOf(vendor.entry) && !circleRunSentNothing(progress) &&
+      circleRunSentNothing(progress, { "1.3.0": buildOf(vendor.entry) });
+  });
 });
 
 /**

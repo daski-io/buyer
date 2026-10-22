@@ -104,10 +104,12 @@ own steps: the gateway's setup skill hands the agent Circle's skill
 (`curl -sL https://agents.circle.com/skills/setup.md`), and this CLI never
 performs them. The gateway publishes the vendor CLI version this adapter was
 tested with under `signerClis.circle-agent` in `/.well-known/mcp.json`;
-`doctor` reports it. Signing checks no vendor version and pins no build: it
-runs the `circle` on PATH. The direct-review adapter, the one vendor
-integration that can send a transaction, runs @circle-fin/cli 1.2.0 or later
-and refuses anything else ([direct reviews](direct-reviews.md)). Circle keeps
+`doctor` reports it. The buyer trusts the installed Circle CLI: signing checks
+no vendor version and pins no build, and runs the `circle` on PATH. The
+direct-review adapter, the one vendor integration that can send a transaction,
+runs @circle-fin/cli 1.2.0 or later, refuses anything else, and believes that
+a failed run sent nothing only on a qualified build
+([direct reviews](direct-reviews.md#qualified-builds)). Circle keeps
 its Base Sepolia session and wallet apart from the main ones (`--testnet`);
 the adapter's remediations say so when that is the profile's chain, so the
 setup skill does not.

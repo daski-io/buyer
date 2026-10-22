@@ -37,6 +37,29 @@ export interface DirectReviewSubmissionAdapter {
   submit(request: CircleReviewRequest): Promise<CircleSubmission>;
   lookup(request: CircleReviewRequest, options?: CircleLookupOptions): Promise<CircleLookup>;
 }
+/**
+ * The builds whose review requests were reviewed request by request: the
+ * SHA-256 of each @circle-fin/cli release's dist/index.js. The buyer runs any
+ * release from the floor, but believes that a run sent nothing only of these,
+ * because only their requests are known to all pass through the recorded
+ * policy. A build is added only by a reviewed buyer release.
+ */
+export const CIRCLE_REVIEW_QUALIFIED_BUILDS: Readonly<Record<string, string>> = {
+  "1.2.0": "feb24e3d404b41bfda54ff69b397c892a3c007487f7831904c2617d036afd9b9",
+};
+/**
+ * Whether a failed run's record shows that nothing reached Circle, so the
+ * prepared review may be restored and submitted again: the record is readable,
+ * no approval left the child, and either the vendor never loaded or the build
+ * that ran is qualified. Any other build may have sent its approval another
+ * way, so its run stays possibly executed and is reconciled, never resent.
+ */
+export function circleRunSentNothing(progress: CircleReviewProgress,
+  qualified: Readonly<Record<string, string>> = CIRCLE_REVIEW_QUALIFIED_BUILDS): boolean {
+  if (progress.uncertain || progress.approvalSent) return false;
+  if (progress.build === undefined) return !progress.executionRequested && progress.challengeId === undefined && progress.transactionId === undefined;
+  return Object.values(qualified).includes(progress.build);
+}
 /** The vendor's parsed JSON output and what the child recorded of the run. */
 export interface CircleReviewRun { output: unknown; progress: CircleReviewProgress }
 export type CircleReviewRunner = (entry: string, request: CircleReviewRequest) => Promise<CircleReviewRun>;
@@ -79,6 +102,10 @@ export function resolveCircleReviewEntry(env: NodeJS.ProcessEnv = process.env): 
   }
   throw failure("DASKI_CIRCLE_REVIEW_PACKAGE_UNSUPPORTED", "The Circle npm entrypoint could not be verified.");
 }
+/**
+ * A sanity check of the installed CLI, which the buyer trusts: the package's
+ * own package.json, which anything installed beside it could also write.
+ */
 export function verifyCircleReviewEntry(entry: string): string {
   // Bounded error, no package content or vendor output.
   const version = circleReviewPackageVersion(entry);

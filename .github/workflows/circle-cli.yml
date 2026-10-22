@@ -1,15 +1,18 @@
 name: Circle CLI
 
 # The direct-review adapter runs every @circle-fin/cli release from its floor
-# (docs/direct-reviews.md), so a new Circle release reaches agents without a
-# buyer release. Every week, and on demand, this installs the floor and
-# Circle's latest release (or the version asked for) outside the repository
-# and runs the offline adapter tests against each: the installed CLI runs a
-# whole review in the review child, against a fake of Circle's API
-# (packages/pay/test/circleReviewVendor.test.ts). A Circle release that would
-# break reviews fails here before agents install it. A pull request that
-# changes the adapter runs it too. Nothing here is part of the package proof
-# or release evidence (the CI workflow).
+# (docs/direct-reviews.md). Every week, and on demand for any version, this
+# installs the floor and Circle's latest release outside the repository and
+# runs the offline adapter tests against each: the installed CLI runs a whole
+# review in the review child, against a fake of Circle's API
+# (packages/pay/test/circleReviewVendor.test.ts). It is an early warning only:
+# Circle's setup installs its latest release at once, so agents may run a
+# build before this has seen it. It is not part of the package proof or the
+# release evidence (the CI workflow).
+#
+# It runs code from npm that nobody here reviewed, so it gets no secrets, no
+# credentials in the checkout, a read-only token, actions pinned by commit,
+# and no cache that another workflow could restore.
 on:
   schedule:
     - cron: "17 6 * * 1"
@@ -20,12 +23,6 @@ on:
         required: false
         default: latest
         type: string
-  pull_request:
-    paths:
-      - "packages/pay/src/signers/circleReview*.ts"
-      - "packages/pay/test/circleReview*.ts"
-      - "packages/pay/test/circleVendorApi.ts"
-      - ".github/workflows/circle-cli.yml"
 
 permissions:
   contents: read
@@ -41,11 +38,12 @@ jobs:
         node: ["20", "22", "24"]
         circle: ["1.2.0", "${{ inputs.version || 'latest' }}"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
       - run: npm ci
       - run: npm run build
       - name: Install @circle-fin/cli ${{ matrix.circle }} outside the repository

@@ -16,8 +16,12 @@ import { test, type TestContext } from "node:test";
 import { canonicalHash } from "@daski/x402-scheme";
 import { encodeFunctionData, type Address } from "viem";
 import { confirmationData, EAS_ABI, type DirectCall } from "../src/commands/confirmation.js";
-import { circleReviewRunner, createCircleReviewAdapter, resolveCircleReviewEntry } from "../src/signers/circleReview.js";
+import type { CliError } from "../src/cli/errors.js";
+import {
+  CIRCLE_REVIEW_QUALIFIED_BUILDS, circleProgressOf, circleReviewRunner, circleRunSentNothing, createCircleReviewAdapter, resolveCircleReviewEntry,
+} from "../src/signers/circleReview.js";
 import type { CircleReviewRequest } from "../src/signers/circleReviewTransport.js";
+import { buildOf } from "./circleVendorFixtures.js";
 
 const bin = process.env.DASKI_TEST_CIRCLE_CLI;
 const skip = bin ? false : "set DASKI_TEST_CIRCLE_CLI to the directory of an installed @circle-fin/cli's circle";
@@ -48,7 +52,7 @@ function sealed(text: string, keyBase64: string): string {
  * login --testnet` leaves it where no keychain holds its secrets, and the
  * adapter for the installed vendor with the fake API in its child.
  */
-function vendor(t: TestContext) {
+function vendor(t: TestContext, { refuseExecution = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), "daski-circle-vendor-home-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const encryptionKey = randomBytes(32).toString("base64");
@@ -62,12 +66,13 @@ function vendor(t: TestContext) {
     publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
   const log = join(home, "requests.jsonl");
   writeFileSync(log, "");
-  writeFileSync(join(home, "api.json"), JSON.stringify({ wallet, encryptionKey, publicKey, txHash, log }));
+  writeFileSync(join(home, "api.json"), JSON.stringify({ wallet, encryptionKey, publicKey, txHash, log, refuseExecution }));
   const entry = resolveCircleReviewEntry({ PATH: bin });
   const run = circleReviewRunner({ execArgv: ["--import", new URL("./circleVendorApi.js", import.meta.url).href],
     env: { PATH: [bin, process.env.PATH].join(delimiter), HOME: home, CIRCLE_CLI_HOME: circleHome, CIRCLE_ACCEPT_TERMS: "1",
       CIRCLE_REVIEW_TEST_API: join(home, "api.json") } });
   return {
+    entry,
     adapter: createCircleReviewAdapter({ entry, run }),
     /** What reached Circle, without the reads any command may make (the wallet listing, the app configuration). */
     requests: () => readFileSync(log, "utf8").split("\n").filter(Boolean)
@@ -100,9 +105,9 @@ test("the installed Circle CLI estimates the approved review's exact calldata an
 });
 
 test("the installed Circle CLI submits the approved review once, through the bound challenge, and every decisive step is recorded", { skip }, async t => {
-  const { adapter, requests } = vendor(t);
+  const { adapter, entry, requests } = vendor(t);
   const r = request("execute");
-  assert.deepEqual(await adapter.submit(r), { transactionId: "tx-1", txHash, state: "COMPLETE", progress: {
+  assert.deepEqual(await adapter.submit(r), { transactionId: "tx-1", txHash, state: "COMPLETE", progress: { build: buildOf(entry),
     executionRequested: true, challengeId: "challenge-1", approvalSent: true, transactionId: "tx-1", state: "COMPLETE", txHash, uncertain: false } });
   const sent = requests();
   assert.deepEqual(sent.map(s => s.route), [
@@ -122,4 +127,15 @@ test("the installed Circle CLI's history finds the submitted review by its trans
   const r = request("lookup");
   assert.deepEqual(await adapter.lookup(r, { transactionId: "tx-1" }), { transactionId: "tx-1", hashes: [txHash], state: "COMPLETE" });
   assert.deepEqual(requests().map(s => s.route), ["GET /v1/w3s/transactions"]);
+});
+
+test("a run Circle refused before any approval sent nothing only if the installed build is qualified", { skip }, async t => {
+  const { adapter, entry, requests } = vendor(t, { refuseExecution: true });
+  const qualified = Object.values(CIRCLE_REVIEW_QUALIFIED_BUILDS).includes(buildOf(entry));
+  await assert.rejects(adapter.submit(request("execute")), (error: CliError) => {
+    const progress = circleProgressOf(error)!;
+    return error.code === "DASKI_CIRCLE_REVIEW_UNKNOWN" && progress.build === buildOf(entry) && progress.executionRequested &&
+      !progress.approvalSent && circleRunSentNothing(progress) === qualified;
+  });
+  assert.deepEqual(requests().map(s => s.route), ["POST /v1/w3s/user/transactions/contractExecution"], "refused, nothing was approved");
 });

@@ -48,11 +48,16 @@ confirmation.directReview.circleExecute disabled until an explicitly authorized
 live run records the shipped buyer and Circle CLI versions, estimation,
 callHash-approved submit, timeout/read-only resume, replacement or revocation,
 and intent-bound finalized EAS evidence. Use the [direct review workflow](direct-reviews.md).
-The adapter runs every Circle CLI release from 1.2.0, so a qualification is of
-the buyer: it covers the Circle CLI it ran with live, and later releases only
-as far as the offline adapter tests do. The Circle CLI workflow runs those
-weekly against the latest release; run it on demand with the version an agent
-reports before relying on a newer one.
+The adapter runs every Circle CLI release from 1.2.0, so a live qualification
+is of the buyer. It exercises the one build the run loaded, which the journal
+records (`packageVersion`, `build`). A later build is covered only as far as
+the offline adapter tests go. Only a qualified build's run that sent no
+approval restores the prepared review
+([qualified builds](direct-reviews.md#qualified-builds)), and adding a build
+takes a reviewed buyer release. The weekly Circle CLI workflow is an early
+warning: Circle's setup installs its latest release at once, so an agent may
+run a build before CI has seen it. Dispatch the workflow with the version an
+agent reports to check that one.
 If vendor history cannot expose an exact-call transaction ID or idempotency-key
 mapping after a timeout, record that limitation and retain the unresolved journal;
 do not manufacture a fresh key or claim execution conformance from estimation.

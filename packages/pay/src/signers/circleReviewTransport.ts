@@ -9,8 +9,10 @@
  * The policy permits exactly that sequence for the approved call, and records
  * each step that decides whether Circle can execute before forwarding it, so
  * the buyer knows what happened even when the vendor process fails later.
- * A release that sends anything else, or sends it any other way than through
- * fetch, fails closed: the request never leaves the child.
+ * The buyer trusts the installed CLI; the policy and the network confinement
+ * below are correctness aids that stop a release sending anything else
+ * through Node's usual clients, not a boundary against the vendor. That a run
+ * sent nothing is believed only of a qualified build (circleReview.ts).
  */
 import { readFileSync, realpathSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -23,7 +25,8 @@ import type { DirectCall } from "../commands/confirmation.js";
  * The oldest @circle-fin/cli whose review requests this policy was checked
  * against; every later release runs, and the policy refuses whatever it
  * sends beyond that sequence. Circle's own version policy refuses every
- * command below 1.1.4, and 1.1.4 is below this floor.
+ * command below 1.1.4, and 1.1.4 is below this floor. Like the package check
+ * below, a sanity check of the installed CLI, which the buyer trusts.
  */
 export const CIRCLE_REVIEW_MINIMUM_VERSION = "1.2.0";
 const RELEASE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
@@ -82,16 +85,17 @@ function callerOf(fn: (...args: never[]) => unknown): string | undefined {
   }
 }
 /**
- * Leaves Node's own fetch, for the review policy, as the child's only way to
+ * Leaves Node's own fetch, for the review policy, as the child's usual way to
  * the network, before any vendor code loads. The dispatcher that fetch
  * connects with is kept for the policy alone; every other client that would
  * share it (a vendor's own undici, WebSocket) finds a refusal instead. A TLS
- * connection opens only from Node's fetch and only to Circle's endpoint, and
- * a socket connects only inside such a connection. Node's http, https and
- * http2 clients, undici and the usual HTTP libraries all connect through
- * these, so a Circle CLI that sent a request any other way than through the
- * policy fails before anything leaves. Threads and processes the vendor
- * starts are not confined, as they never were.
+ * connection opens only from Node's fetch, by its call stack, and only to
+ * Circle's endpoint, and a socket connects only inside such a connection.
+ * Node's http, https and http2 clients, undici and the usual HTTP libraries
+ * connect through these, so a release that moved its requests to one of them
+ * fails at that request. It is a correctness aid, not a boundary: threads,
+ * processes, DNS, UDP, native addons, process.binding and the inspector are
+ * not confined, and code that rewrites the call stack passes the TLS check.
  */
 export async function confineCircleReviewNetwork(endpoint: CircleReviewEndpoint = CIRCLE_ENDPOINT): Promise<typeof fetch> {
   const original = globalThis.fetch;
@@ -134,10 +138,13 @@ const SIGNATURES = CIRCLE_REVIEW_SIGNATURES;
 const IDENTIFIER = /^[a-zA-Z0-9-]{1,128}$/;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 const VENDOR_STATE = /^[A-Z_]{1,32}$/;
+const BUILD = /^[0-9a-f]{64}$/;
 const TRANSACTION_PATH = "/v1/w3s/transactions/";
 
 /** One step of a vendor run that decides what Circle can do, recorded before it is forwarded. */
 export type CircleReviewEvent =
+  /** The SHA-256 of the CLI entry point about to load, recorded before any of its code runs. */
+  | { event: "vendor"; build: string }
   | { event: "execution-requested" }
   | { event: "challenge"; challengeId: string }
   | { event: "approval-sent" }
@@ -147,6 +154,8 @@ export type CircleReviewReporter = (event: CircleReviewEvent) => void;
 
 /** What a vendor run did, folded from its recorded events, whatever the vendor's exit status. */
 export interface CircleReviewProgress {
+  /** The build that loaded; absent when the vendor never did. */
+  build?: string;
   /** The contract execution request left the child. */
   executionRequested: boolean;
   challengeId?: string;
@@ -174,7 +183,9 @@ export function circleReviewProgress(lines: string): CircleReviewProgress {
       progress.uncertain = true;
       continue;
     }
-    if (event.event === "execution-requested") progress.executionRequested = true;
+    if (event.event === "vendor" && typeof event.build === "string" && BUILD.test(event.build) &&
+        (progress.build === undefined || progress.build === event.build)) progress.build = event.build;
+    else if (event.event === "execution-requested") progress.executionRequested = true;
     else if (event.event === "approval-sent") progress.approvalSent = true;
     else if (event.event === "challenge" && typeof event.challengeId === "string" && IDENTIFIER.test(event.challengeId)) {
       progress.challengeId = event.challengeId;

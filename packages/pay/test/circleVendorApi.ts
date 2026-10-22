@@ -8,7 +8,7 @@
  */
 import { appendFileSync, readFileSync } from "node:fs";
 
-interface Api { wallet: string; encryptionKey: string; publicKey: string; txHash: string; log: string }
+interface Api { wallet: string; encryptionKey: string; publicKey: string; txHash: string; log: string; refuseExecution?: boolean }
 const api = JSON.parse(readFileSync(process.env.CIRCLE_REVIEW_TEST_API!, "utf8")) as Api;
 const ROOT = "https://agentic-wallet.circle.com/proxy/test";
 const EAS = "0x4200000000000000000000000000000000000021";
@@ -43,7 +43,9 @@ globalThis.fetch = async (input, init) => {
     return json({ data: { low: fee("0.0015"), medium: fee("0.003"), high: fee("0.0045"),
       callGasLimit: "48711", verificationGasLimit: "102811", preVerificationGas: "49872" } });
   }
-  if (route === "POST /v1/w3s/user/transactions/contractExecution") return json({ data: { challengeId: "challenge-1" } });
+  if (route === "POST /v1/w3s/user/transactions/contractExecution") {
+    return api.refuseExecution ? json({ code: 155101, message: "Request refused" }, 400) : json({ data: { challengeId: "challenge-1" } });
+  }
   if (route === "GET /config") return json({ appId: "app-1" });
   if (route === "GET /v1/w3s/sdk/user/challenges/challenge-1") {
     return json({ data: { encrypt: await sealed({ id: "challenge-1", publicKey: api.publicKey, pinCodeUserShare: "share-1" }) } });
