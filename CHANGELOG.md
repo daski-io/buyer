@@ -3,6 +3,20 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.9 — unreleased
+
+### @daski/pay
+
+- **Reviews work again on Base Sepolia after its EAS upgrade.** At block 48858051 (2026-10-22) Base Sepolia moved its EAS predeploy from 1.2.0 to 1.4.1-beta.3, whose EIP-712 signing domain is 1.3.0 and whose signed `Attest` and `Revoke` structs now start with the signer (`attester`, `revoker`). Since then every earlier buyer refuses a review there with `DASKI_CONFIRMATION_EAS_INCOMPATIBLE`, before anything is signed.
+  - The buyer pins the new deployment as the profile `eas-native-1.4.1-beta.3` (implementation, code hash, contract and domain versions, type hashes) beside `eas-native-1.2.0`.
+  - A chain may now present more than one reviewed profile: the implementation its EAS proxy names selects the candidate, and every other fact must still match it exactly.
+  - A sponsored review under the new profile signs the payer's own address as `attester` or `revoker`. The gateway's preparation must name the same address, or the CLI refuses it with `DASKI_CONFIRMATION_MISMATCH`.
+  - Direct reviews (contract wallets such as Circle agent wallets) send the same `attest` and `revoke` calls as before: the contract's interface did not change.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change.
+
 ## 0.5.8 — unreleased
 
 ### @daski/pay
