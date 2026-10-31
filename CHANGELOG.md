@@ -7,8 +7,8 @@ share a version.
 
 ### @daski/pay
 
-- **`@x402/core` moves from 2.24.0 to 2.29.0, past GHSA-mrhx-c7xc-m3w5.** 2.24.0 asks for zod 3, every release of which carries the advisory (a large array can exhaust memory during validation), and an install of the CLI then gives that zod to the MCP SDK, which validates gateway responses with it. 2.29.0 asks for zod `^4.6.6`, so an install resolves a patched zod and the SDK runs on it. No payment-policy or wire change.
-- The repository lockfile also takes the patched body-parser, fast-uri, ip-address, qs and `@hono/node-server`, which the MCP SDK's server side brings in and the CLI does not load, and `npm audit` reports no vulnerabilities. An install of the CLI resolves these itself.
+- **`@x402/core` moves from 2.24.0 to 2.29.0, past GHSA-mrhx-c7xc-m3w5.** 2.24.0 asks for zod 3, every release of which carries the advisory, so an install of 0.5.10 carried a zod 3 under `@x402/core` and failed `npm audit`. The CLI never loads `@x402/core` or that zod: the MCP SDK already resolved zod 4.6.7 on a clean install. A project with zod 3 at its top level still gives it to the SDK, before and after this change. No payment-policy or wire change.
+- The repository lockfile also takes the patched body-parser, fast-uri, ip-address, qs and `@hono/node-server`, and `npm audit` reports no vulnerabilities. An install of the CLI resolves these itself.
 
 ### @daski/x402-scheme
 
