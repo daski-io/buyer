@@ -15,6 +15,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { registerDaskiExactEvmScheme } from "@daski/x402-scheme";
 
 const client = new x402Client();
+client.setSpendControls({ maxAmountPerPayment: "$25" }); // the default is $1
 registerDaskiExactEvmScheme(client, {
   network: "eip155:84532",
   signer,                              // your SignerAdapter
@@ -36,6 +37,10 @@ The scheme name stays `"exact"`, because that is the only name the facilitator
 knows — inventing a second one would make the payments unverifiable.
 `findDefaultAsset` and `schemeHooks` are forwarded, so registering the
 composite does not quietly disable the host's spend controls.
+Those controls apply to Daski purchases too: `x402Client` refuses anything
+above $1 by default, and Daski's cheapest service is $9.99, so choose your own
+limit. Keep a limit rather than passing `false`: it is the only cap on
+challenges the wrapped stock handler signs.
 
 ## The policy validator
 

@@ -94,6 +94,9 @@ const policy: PolicyConfig = {
 };
 
 const client = new x402Client();
+// The client refuses to pay above $1 unless told otherwise, and Daski's
+// cheapest service is $9.99. Set the most one purchase may cost you.
+client.setSpendControls({ maxAmountPerPayment: "$25" });
 registerDaskiExactEvmScheme(client, {
   network: NETWORK,
   signer,

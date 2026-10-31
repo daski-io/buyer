@@ -70,6 +70,9 @@ const policy: PolicyConfig = {
 let spent = 0n;
 
 const client = new x402Client();
+// The client refuses to pay above $1 unless told otherwise, and Daski's
+// cheapest service is $9.99. Set the most one purchase may cost you.
+client.setSpendControls({ maxAmountPerPayment: "$25" });
 // Register the composite for this network. It wraps the stock handler rather
 // than replacing it: challenges without `daski-order-binding` are delegated
 // untouched, and the scheme name stays `exact` because that is the only name
