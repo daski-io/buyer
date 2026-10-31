@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.11 — unreleased
+
+### @daski/pay
+
+- **`@x402/core` moves from 2.24.0 to 2.29.0, past GHSA-mrhx-c7xc-m3w5.** 2.24.0 asks for zod 3, every release of which carries the advisory, so an install of 0.5.10 carried a zod 3 under `@x402/core` and failed `npm audit`. The CLI never loads `@x402/core` or that zod: the MCP SDK already resolved zod 4.6.7 on a clean install. A project with zod 3 at its top level still gives it to the SDK, before and after this change. No payment-policy or wire change.
+- The repository lockfile also takes the patched body-parser, fast-uri, ip-address, qs and `@hono/node-server`, and `npm audit` reports no vulnerabilities. An install of the CLI resolves these itself.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy change. The `@x402/core` peer range stays `>=2.20.0 <3`.
+
 ## 0.5.10 — unreleased
 
 ### @daski/pay
