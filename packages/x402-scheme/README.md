@@ -37,10 +37,12 @@ The scheme name stays `"exact"`, because that is the only name the facilitator
 knows — inventing a second one would make the payments unverifiable.
 `findDefaultAsset` and `schemeHooks` are forwarded, so registering the
 composite does not quietly disable the host's spend controls.
-Those controls apply to Daski purchases too: `x402Client` refuses anything
-above $1 by default, and Daski's cheapest service is $9.99, so choose your own
-limit. Keep a limit rather than passing `false`: it is the only cap on
-challenges the wrapped stock handler signs.
+Those controls apply to Daski purchases too. From `@x402/core` 2.23,
+`x402Client` refuses anything above $1 by default. Mailboxes cost $9.99 and
+other services are quoted per order, so choose your own limit. Keep a limit
+rather than passing `false`: this package puts no other cap on challenges the
+wrapped stock handler signs. Before 2.23 the client has no spend controls, so
+leave the `setSpendControls` line out and add your own cap.
 
 ## The policy validator
 
