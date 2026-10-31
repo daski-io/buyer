@@ -95,6 +95,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { registerDaskiExactEvmScheme } from "@daski/x402-scheme";
 
 const client = new x402Client();
+client.setSpendControls({ maxAmountPerPayment: "$25" }); // the default is $1
 registerDaskiExactEvmScheme(client, {
   network: "eip155:84532",
   signer, payerAddress, policy,
