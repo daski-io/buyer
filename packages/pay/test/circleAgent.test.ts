@@ -47,6 +47,9 @@ function fakeCircle(script: (args: readonly string[]) => Partial<CommandResult> 
 }
 
 const listing = (...addresses: string[]) => JSON.stringify({ wallets: addresses.map((address) => ({ address, blockchain: "BASE-SEPOLIA", type: "agent" })) });
+const sessionStatus = (testnet = "VALID", mainnet = "NOT_LOGGED_IN") => JSON.stringify({ data: {
+  testnet: { tokenStatus: testnet }, mainnet: { tokenStatus: mainnet },
+} });
 
 test("chain names map from the profile chain id and nothing else", () => {
   assert.equal(circleChainName(8453), "BASE");
@@ -96,7 +99,8 @@ test("the address comes from the wallet list and the signature from sign typed-d
 });
 
 test("wallet selection: none, several, an explicit address, and an unknown one", async () => {
-  await assert.rejects(createCircleAgentSigner({ chainId: 84532, run: fakeCircle(() => ({ stdout: listing() })).run }),
+  await assert.rejects(createCircleAgentSigner({ chainId: 84532,
+    run: fakeCircle(args => ({ stdout: args[1] === "status" ? sessionStatus() : listing() })).run }),
     (error: unknown) => code("DASKI_CIRCLE_AGENT_WALLET_MISSING")(error) && /circle wallet create/.test((error as CliError).remediation));
   await assert.rejects(createCircleAgentSigner({ chainId: 84532, run: fakeCircle(() => ({ stdout: listing(WALLET, OTHER) })).run }),
     code("DASKI_CIRCLE_AGENT_WALLET_AMBIGUOUS"));
@@ -104,6 +108,67 @@ test("wallet selection: none, several, an explicit address, and an unknown one",
   assert.equal(await chosen.getAddress(), getAddress(OTHER));
   await assert.rejects(createCircleAgentSigner({ chainId: 84532, address: "0x3333333333333333333333333333333333333333",
     run: fakeCircle(() => ({ stdout: listing(WALLET) })).run }), code("DASKI_CIRCLE_AGENT_WALLET_NOT_FOUND"));
+});
+
+test("empty listing checks only the selected network's authentication without changing wallet state", async () => {
+  for (const [chainId, status] of [[84532, sessionStatus("EXPIRED", "VALID")], [8453, sessionStatus("VALID", "NOT_LOGGED_IN")]] as const) {
+    const { run, calls } = fakeCircle(args => ({ stdout: args[1] === "status" ? status : listing() }));
+    await assert.rejects(createCircleAgentSigner({ chainId, run }), (error: unknown) => {
+      assert.ok(error instanceof CliError);
+      assert.equal(error.code, "DASKI_CIRCLE_AGENT_LOGIN_REQUIRED");
+      assert.match(error.message, new RegExp(chainId === 84532 ? "testnet" : "mainnet"));
+      assert.match(error.remediation, /Before requesting a code/);
+      assert.match(error.remediation, /logout clears both sessions/);
+      assert.match(error.remediation, chainId === 84532 ? /--testnet to both login steps/ : /omit --testnet/);
+      return true;
+    });
+    assert.deepEqual(calls.map(args => args.slice(0, 2)), [["wallet", "list"], ["wallet", "status"]]);
+  }
+});
+
+test("valid authentication with no wallet gives conditional recovery, never diagnoses initialization from emptiness", async () => {
+  const { run, calls } = fakeCircle(args => ({ stdout: args[1] === "status" ? sessionStatus() : listing() }));
+  await assert.rejects(createCircleAgentSigner({ chainId: 84532, run }), (error: unknown) => {
+    assert.ok(error instanceof CliError);
+    assert.equal(error.code, "DASKI_CIRCLE_AGENT_WALLET_MISSING");
+    assert.match(error.message, /valid testnet token/);
+    assert.match(error.remediation, /create --testnet --output json once/);
+    assert.match(error.remediation, /If it reports User not initialized/);
+    assert.match(error.remediation, /#circle-initialization-recovery/);
+    assert.doesNotMatch(error.message, /not initialized|initialization failed/);
+    return true;
+  });
+  assert.equal(calls.length, 2);
+  for (const args of calls) assert.ok(["list", "status"].includes(args[1]!));
+});
+
+test("an unreadable session status is not treated as proof of missing wallets or initialization", async () => {
+  for (const status of ["null", "{}", '{"data":{"testnet":{"tokenStatus":"NEW_STATUS"}}}', "bad JSON"]) {
+    const { run } = fakeCircle(args => ({ stdout: args[1] === "status" ? status : listing() }));
+    await assert.rejects(createCircleAgentSigner({ chainId: 84532, run }), code("DASKI_CIRCLE_CLI_OUTPUT_INVALID"));
+  }
+});
+
+test("known vendor refusals produce safe specific diagnostics and never echo account or credential data", async () => {
+  const cases = [
+    ["AUTH_REQUIRED", "User not initialized. Run 'circle wallet login private@example.invalid --type agent' first.", "DASKI_CIRCLE_AGENT_INITIALIZATION_REQUIRED"],
+    ["AUTH_REQUIRED", "Not logged in (or session expired). private@example.invalid", "DASKI_CIRCLE_AGENT_LOGIN_REQUIRED"],
+    ["CONFLICT", "This CLI session is logged in as private@example.invalid on live mainnet. Log out or use the same email before logging in as other@example.invalid.", "DASKI_CIRCLE_AGENT_ACCOUNT_CONFLICT"],
+  ];
+  for (const [vendorCode, message, expected] of cases) {
+    const { run, calls } = fakeCircle(() => ({ status: 1, stdout: JSON.stringify({ error: { code: vendorCode, message, userToken: "secret-token" } }) }));
+    await assert.rejects(createCircleAgentSigner({ chainId: 84532, run }), (error: unknown) => {
+      assert.ok(error instanceof CliError);
+      assert.equal(error.code, expected);
+      assert.doesNotMatch(JSON.stringify(error.toJSON()), /private@|other@|secret-token/);
+      return true;
+    });
+    assert.equal(calls.length, 1, "diagnosis does not retry or perform authentication");
+  }
+  for (const vendorError of [{ code: "AUTH_REQUIRED", message: "Unexpected refusal" }, { code: "CONFLICT", message: "Unrelated transaction conflict" }]) {
+    await assert.rejects(createCircleAgentSigner({ chainId: 84532,
+      run: fakeCircle(() => ({ status: 1, stdout: JSON.stringify({ error: vendorError }) })).run }), code("DASKI_CIRCLE_CLI_FAILED"));
+  }
 });
 
 test("vendor failures are named without repeating the vendor's output", async () => {

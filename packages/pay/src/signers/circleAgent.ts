@@ -30,6 +30,7 @@ import { NOT_DEPLOYED_REMEDIATION } from "./contract.js";
 import { hasErc6492Suffix, isBoundedSignature } from "./signature.js";
 
 const DOC = "https://github.com/daski-io/buyer/blob/main/docs/signers.md#circle-agent";
+const RECOVERY_DOC = "https://github.com/daski-io/buyer/blob/main/docs/signers.md#circle-initialization-recovery";
 export const CIRCLE_CLI_PACKAGE = "@circle-fin/cli";
 export const CIRCLE_COMMAND_TIMEOUT_MS = 30_000;
 /** More output than this is not a wallet listing or a signature. */
@@ -207,15 +208,50 @@ function cliMissing(shimWithoutPackage?: string): CliError {
 }
 
 /**
- * How to establish the vendor session the profile's chain needs. Circle keeps
- * its Base Sepolia session and wallet apart from the main ones, and this is
- * the one place that says so, so the gateway's setup skill need not.
+ * Session selection is network-specific, but Circle's local agent profile
+ * still requires the same email across its two environment slots.
  */
 export function loginHint(chain: string | undefined): string {
   const skill = "Log in with Circle's login skill (curl -sL https://agents.circle.com/skills/wallet-login.md)";
-  return chain === "BASE-SEPOLIA"
-    ? `${skill}, adding --testnet to the login command; Circle keeps that session apart from the main one`
-    : skill;
+  return `${skill}${chain === "BASE-SEPOLIA" ? ", adding --testnet to both login steps" : " for mainnet (omit --testnet)"}. ` +
+    "Before requesting a code, compare the intended email with both sections of circle wallet status --output json; " +
+    "the emails must match, and circle wallet logout clears both sessions";
+}
+
+/** Classify only known vendor failures; never include vendor output or account data. */
+function vendorFailure(output: string, chain?: string): CliError | undefined {
+  let error: { code?: unknown; message?: unknown } | undefined;
+  try { error = (JSON.parse(output) as { error?: typeof error }).error; } catch { return undefined; }
+  if (!error || typeof error.message !== "string") return undefined;
+  if (error.code === "AUTH_REQUIRED" && error.message.startsWith("User not initialized.")) {
+    return new CliError({
+      code: "DASKI_CIRCLE_AGENT_INITIALIZATION_REQUIRED",
+      message: "Circle authentication did not finish wallet initialization.",
+      remediation: `Keep the same account and ${chain === "BASE-SEPOLIA" ? "testnet" : "mainnet"} network. ` +
+        `Do not repeat normal login/create attempts; follow the bounded initialization recovery at ${RECOVERY_DOC}.`,
+    });
+  }
+  if (error.code === "AUTH_REQUIRED" && /^Not logged in(?: with type| \(or session expired\)|\.)/.test(error.message)) {
+    return loginRequired(chain);
+  }
+  if (error.code === "CONFLICT" && error.message.startsWith("This CLI session is logged in as ") &&
+      error.message.includes("Log out or use the same email before logging in as ")) {
+    return new CliError({
+      code: "DASKI_CIRCLE_AGENT_ACCOUNT_CONFLICT",
+      message: "Circle refused an email change because its other network still has a saved session.",
+      remediation: "Read circle wallet status --output json and resolve the account choice before requesting another code. " +
+        `Logout clears both sessions; changing CIRCLE_CLI_HOME alone does not isolate the OS keychain. See ${RECOVERY_DOC}.`,
+    });
+  }
+  return undefined;
+}
+
+function loginRequired(chain?: string): CliError {
+  return new CliError({
+    code: "DASKI_CIRCLE_AGENT_LOGIN_REQUIRED",
+    message: `Circle has no valid ${chain === "BASE-SEPOLIA" ? "testnet" : "mainnet"} login for this profile.`,
+    remediation: `${loginHint(chain)}. See ${DOC}.`,
+  });
 }
 
 async function runCircle(
@@ -237,17 +273,19 @@ async function runCircle(
     throw new CliError({
       code: "DASKI_CIRCLE_CLI_TIMEOUT",
       message: `The circle CLI did not ${what} within ${CIRCLE_COMMAND_TIMEOUT_MS / 1000} seconds.`,
-      remediation: `Check the vendor session and connectivity, then re-run. ${loginHint(chain)}.`,
+      remediation: `Check circle wallet status --output json and connectivity before retrying. A timeout alone does not call for login. See ${DOC}`,
     });
   }
   if (result.status !== 0) {
-    // The vendor's output is never repeated here: it is not this CLI's to print.
+    const known = vendorFailure(result.stdout, chain);
+    if (known) throw known;
+    // Unknown vendor output is never repeated or assumed to be an auth failure.
     throw new CliError({
       code: "DASKI_CIRCLE_CLI_FAILED",
       message: `The circle CLI exited with status ${result.status ?? "unknown"} when asked to ${what}.`,
       remediation:
-        "Run the same circle command in the user's terminal to see the vendor's message; a " +
-        `logged-out session is the usual cause. ${loginHint(chain)}. See ${DOC}`,
+        "Inspect the same circle command's result in the current environment. Do not log out or " +
+        `repeat login unless its error calls for authentication. See ${DOC}`,
     });
   }
   return result.stdout;
@@ -317,12 +355,24 @@ export async function createCircleAgentSigner(options: CircleAgentSignerOptions)
   } else if (addresses.length === 1) {
     address = addresses[0]!;
   } else if (addresses.length === 0) {
+    // list can succeed while logged out. Status is a read, and VALID only
+    // describes token expiry; it is not proof of initialization or a wallet.
+    const status = await runCircle(run, ["wallet", "status", "--type", "agent", "--output", "json"], "check session status", chain);
+    let tokenStatus: unknown;
+    try {
+      const parsed = JSON.parse(status) as { data?: unknown };
+      const data = (parsed.data ?? parsed) as Record<string, { tokenStatus?: unknown }>;
+      tokenStatus = data[chain === "BASE-SEPOLIA" ? "testnet" : "mainnet"]?.tokenStatus;
+    } catch { throw outputInvalid("wallet status"); }
+    if (tokenStatus === "EXPIRED" || tokenStatus === "NOT_LOGGED_IN") throw loginRequired(chain);
+    if (tokenStatus !== "VALID") throw outputInvalid("wallet status");
     throw new CliError({
       code: "DASKI_CIRCLE_AGENT_WALLET_MISSING",
-      message: `The circle CLI lists no agent wallet on ${chain}.`,
+      message: `Circle reports a valid ${chain === "BASE-SEPOLIA" ? "testnet" : "mainnet"} token but lists no agent wallet on ${chain}.`,
       remediation:
-        `${loginHint(chain)}, then create one: circle wallet create` +
-        `${chain === "BASE-SEPOLIA" ? " --testnet" : ""} --output json. See ${DOC}`,
+        "A valid token does not prove wallet initialization. Under the user's wallet-setup authorization, run " +
+        `circle wallet create${chain === "BASE-SEPOLIA" ? " --testnet" : ""} --output json once. ` +
+        `If it reports User not initialized, keep the same account and follow ${RECOVERY_DOC}; do not repeat normal login/create attempts.`,
     });
   } else {
     throw new CliError({

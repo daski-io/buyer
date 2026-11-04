@@ -109,10 +109,64 @@ no vendor version and pins no build, and runs the `circle` on PATH. The
 direct-review adapter, the one vendor integration that can send a transaction,
 runs @circle-fin/cli 1.2.0 or later, refuses anything else, and believes that
 a failed run sent nothing only on a qualified build
-([direct reviews](direct-reviews.md#qualified-builds)). Circle keeps
-its Base Sepolia session and wallet apart from the main ones (`--testnet`);
-the adapter's remediations say so when that is the profile's chain, so the
-setup skill does not.
+([direct reviews](direct-reviews.md#qualified-builds)). Circle has separate
+network tokens (`--testnet` selects Base Sepolia), but its local agent profile
+requires the same email across both saved sessions, even when one has expired.
+Before requesting an OTP, compare the intended exact email against both
+sections of `circle wallet status --output json`. Resolve any account choice
+first. If the user has authorized a switch, explain that `circle wallet logout
+--type agent` clears both sessions and switch before requesting a code.
+Preserve email `+tags`; they are not evidence of a separate Circle identity.
+Changing `CIRCLE_CLI_HOME` alone does not isolate the OS keychain.
+
+An empty wallet list triggers a read-only `circle wallet status` check.
+`DASKI_CIRCLE_AGENT_LOGIN_REQUIRED` means the selected network is logged out
+or expired; a valid session on the other network does not satisfy it.
+`DASKI_CIRCLE_AGENT_WALLET_MISSING` with a valid token is incomplete setup,
+not proof that initialization failed. Under wallet-setup authorization, try
+`circle wallet create --testnet --output json` once for Base Sepolia (omit
+`--testnet` on Base). If Circle specifically reports `User not initialized`,
+use the recovery below. Daski never performs login, logout or wallet creation
+inside a signer or `doctor`.
+
+### Circle initialization recovery
+
+Apply this only to a valid selected-network session with no wallet and Circle's
+specific `User not initialized` refusal. In Circle CLI 1.2.0 and 1.2.2, an
+interrupted first login can leave authentication complete but wallet
+initialization unfinished; returning v2 logins skip that initialization.
+The same versions contain a legacy login path that attempts initialization.
+Its control flow is tested with the unmodified CLI and a fake API. Live service
+acceptance is not guaranteed; a successful login alone is not proof of repair.
+
+Within the user's existing wallet-setup authorization, make at most one
+compatibility recovery attempt using the same exact email and network.
+Keep the session and existing Terms consent. Do not reset credentials, change
+signers, create a replacement identity or patch the installed CLI.
+
+For Base Sepolia, use a process-scoped setting on both commands:
+
+```bash
+CIRCLE_EXPERIMENTAL_AUTH_V2=0 circle wallet login "<same-email>" --type agent --testnet --init --output json
+CIRCLE_EXPERIMENTAL_AUTH_V2=0 circle wallet login --type agent --testnet --request <fresh-request-id> --otp <fresh-code> --output json
+circle wallet status --output json
+circle wallet list --chain BASE-SEPOLIA --type agent --output json
+```
+
+Obtain the new request ID from the first command and the fresh code from the
+user; use the code immediately and never retain or echo it. On Base mainnet,
+omit `--testnet` on both login commands and list `--chain BASE`. The prefix is
+POSIX shell syntax; other hosts should set the variable only in those child
+processes, not in global configuration.
+
+Initialization may create the wallets, so list them before creating any more.
+Continue only when the correct network lists a wallet, then run
+`daski doctor --json --signer circle-agent` with the original Daski profile.
+If authentication is refused, initialization fails or no wallet appears,
+stop and report the vendor error and incomplete setup. Do not repeat the
+compatibility recovery or read/modify Circle's private credential storage.
+
+### Deployment and signing
 
 **The wallet must be deployed.** `doctor` and `buy` read `getCode` and refuse
 an undeployed wallet with `DASKI_SIGNER_NOT_DEPLOYED`; the remediation is a
@@ -137,9 +191,11 @@ DASKI_CONFORMANCE_SPEND_OK=1 npm run conformance -- --profile sandbox --signer c
 | `DASKI_KEY_BACKEND=circle-agent` | Declares that no local key exists on this host |
 | `--circle-wallet <address>` | Selects one agent wallet when the CLI lists several |
 
-Refusals, each with the command that fixes it: `DASKI_CIRCLE_CLI_MISSING`,
+Refusals with targeted remediation: `DASKI_CIRCLE_CLI_MISSING`,
 `DASKI_CIRCLE_CLI_FAILED`, `DASKI_CIRCLE_CLI_TIMEOUT`,
-`DASKI_CIRCLE_CLI_OUTPUT_INVALID`, `DASKI_CIRCLE_AGENT_WALLET_MISSING`,
+`DASKI_CIRCLE_CLI_OUTPUT_INVALID`, `DASKI_CIRCLE_AGENT_LOGIN_REQUIRED`,
+`DASKI_CIRCLE_AGENT_ACCOUNT_CONFLICT`, `DASKI_CIRCLE_AGENT_INITIALIZATION_REQUIRED`,
+`DASKI_CIRCLE_AGENT_WALLET_MISSING`,
 `DASKI_CIRCLE_AGENT_WALLET_AMBIGUOUS`, `DASKI_CIRCLE_AGENT_WALLET_NOT_FOUND`,
 `DASKI_CIRCLE_AGENT_CHAIN_UNSUPPORTED`, `DASKI_SIGNER_NOT_DEPLOYED`,
 `DASKI_GATEWAY_EOA_ONLY`.

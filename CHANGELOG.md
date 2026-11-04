@@ -3,6 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.12 — unreleased
+
+### @daski/pay
+
+- **Circle setup distinguishes an expired login from an empty wallet list.** When no wallet is returned, the signer reads the selected network's session status. An expired or missing session reports `DASKI_CIRCLE_AGENT_LOGIN_REQUIRED`; a valid token with no wallet reports `DASKI_CIRCLE_AGENT_WALLET_MISSING` without claiming initialization succeeded or failed. Known vendor initialization and account-conflict errors carry specific remediation without echoing private vendor output. Doctor and signing never log in, log out or create a wallet.
+- Setup guidance checks both saved emails before requesting an OTP, explains that logout clears both networks, and documents one bounded same-account compatibility login for Circle's specific `User not initialized` failure. It requires a wallet and the usual deployment/signing checks before continuing. Offline tests run the unmodified vendor CLI through returning and compatibility login paths, including initialization conflict and failed-challenge cases; live account recovery is not established by these tests.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy or wire change.
+
 ## 0.5.11 — unreleased
 
 ### @daski/pay
