@@ -4,8 +4,8 @@ name: Circle CLI
 # (docs/direct-reviews.md). Every week, and on demand for any version, this
 # installs the floor and Circle's latest release outside the repository and
 # runs the offline adapter tests against each: the installed CLI runs a whole
-# review in the review child, against a fake of Circle's API
-# (packages/pay/test/circleReviewVendor.test.ts). It is an early warning only:
+# review and the documented login recovery against fake Circle APIs
+# (packages/pay/test/circle*Vendor.test.ts). It is an early warning only:
 # Circle's setup installs its latest release at once, so agents may run a
 # build before this has seen it. It is not part of the package proof or the
 # release evidence (the CI workflow).

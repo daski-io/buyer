@@ -64,10 +64,12 @@ The separate Circle CLI workflow (`circle-cli.yml`) watches the vendor rather
 than this repository's commits. Every week, and on demand for any version, it
 installs `@circle-fin/cli` 1.2.0 and Circle's latest release and runs the
 offline adapter tests against each, the real CLI running a whole review against
-a fake of Circle's API. It is an early warning only: Circle's setup installs
+a fake of Circle's API. It also checks the documented login recovery with
+synthetic sessions, forced file storage and blocked credential subprocesses.
+These tests prove client control flow, not live recovery. It is an early warning only: Circle's setup installs
 its latest release at once, so agents may run a build before the workflow has
-seen it. A failure means that release breaks reviews; fix the adapter here and
-release it. Because it runs vendor code nobody here reviewed, it has a
+seen it. A failure can indicate a changed review or login flow; diagnose it and update
+the adapter or recovery guidance before relying on that flow. Because it runs vendor code nobody here reviewed, it has a
 read-only token, no secrets, no persisted checkout credentials, actions pinned
 by commit and no npm cache. It is not part of the package proof or the
 engine's release evidence.

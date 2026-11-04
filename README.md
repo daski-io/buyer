@@ -26,7 +26,7 @@ The buyer side of Daski: a CLI for purchasing service outcomes and the x402 clie
 Install the release pinned by your gateway, state where the CLI runs, then diagnose the existing configuration before choosing a signer:
 
 ```bash
-npm install -g @daski/pay@0.5.11
+npm install -g @daski/pay@0.5.12
 export DASKI_HOST_CLASS=durable   # or ephemeral on an agent-managed, shared, or resettable host
 daski doctor --json
 ```
@@ -136,8 +136,11 @@ No registry access, wallet or live gateway is needed. See
 
 Existing unit tests use isolated temporary state and fixture signers. Live conformance uses sandbox USDC and requires explicit spending authorization; see the conformance guide.
 
-The direct-review adapter's offline tests can also run a real `@circle-fin/cli`
-against a fake of Circle's API: set `DASKI_TEST_CIRCLE_CLI` to the directory
+The offline tests can also run a real `@circle-fin/cli` through direct reviews
+and the documented login recovery against fake Circle APIs. The login tests
+use synthetic sessions and block access to the OS keychain; they prove client
+control flow, not acceptance by Circle's live service.
+Set `DASKI_TEST_CIRCLE_CLI` to the directory
 that holds an install's `circle` and run `npm run test:circle --workspace
 @daski/pay`. The Circle CLI workflow does this every week, and on demand for
 any version, with 1.2.0 and Circle's latest release. It is an early warning
