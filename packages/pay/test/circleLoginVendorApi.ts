@@ -8,7 +8,7 @@ import { syncBuiltinESMExports } from "node:module";
 interface Api {
   root: string; email: string; deviceEncryptionKey: string; encryptionKey: string; storageKey: string;
   userToken: string; otpToken: string; publicKey: string; log: string; initialized: string;
-  outcome: "complete" | "conflict" | "failed";
+  outcome: "complete" | "conflict" | "failed" | "v2-required";
 }
 const api = JSON.parse(readFileSync(process.env.CIRCLE_LOGIN_TEST_API!, "utf8")) as Api;
 
@@ -45,6 +45,7 @@ globalThis.fetch = async (input, init) => {
   appendFileSync(api.log, JSON.stringify({ route, body: init?.body }) + "\n");
   if (route === "POST /v1/w3s/users/email/token") {
     assert.equal(JSON.parse(String(init?.body)).email, api.email, "preserve the exact email, including the plus tag");
+    if (api.outcome === "v2-required") return json({ message: "Account must use the v2 authentication path." }, 409);
     return json({ data: { otpToken: api.otpToken, deviceToken: "synthetic-device-token", deviceEncryptionKey: api.deviceEncryptionKey } });
   }
   if (route === "GET /config") return json({ appId: "synthetic-app" });

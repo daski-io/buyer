@@ -137,7 +137,7 @@ No registry access, wallet or live gateway is needed. See
 Existing unit tests use isolated temporary state and fixture signers. Live conformance uses sandbox USDC and requires explicit spending authorization; see the conformance guide.
 
 The offline tests can also run a real `@circle-fin/cli` through direct reviews
-and the documented login recovery against fake Circle APIs. The login tests
+and login initialization and legacy refusal against fake Circle APIs. The login tests
 use synthetic sessions and block access to the OS keychain; they prove client
 control flow, not acceptance by Circle's live service.
 Set `DASKI_TEST_CIRCLE_CLI` to the directory

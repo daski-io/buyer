@@ -1,11 +1,11 @@
-/** Qualify the documented recovery against an installed, unmodified Circle CLI.
+/** Inspect initialization and legacy refusal against an installed, unmodified Circle CLI.
  * This proves client control flow with a fake API, not live account recovery.
  * Uses the same opt-in and vendor-version matrix as circleReviewVendor.test.ts.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -86,7 +86,7 @@ test("installed Circle returning login saves a valid session but skips initializ
     "GET /v1/w3s/auth/challenges/auth-1", "GET /v1/w3s/wallets", "GET /v1/w3s/user"]);
 });
 
-test("installed Circle compatibility login initializes the same exact email on the selected network", { skip }, t => {
+test("installed Circle legacy login initializes when the service accepts it: the same exact email on the selected network", { skip }, t => {
   for (const testnet of [true, false]) {
     const v = vendor(t, testnet);
     // First reproduce the partial state, then recover it without logout. Keep
@@ -112,7 +112,7 @@ test("installed Circle compatibility login initializes the same exact email on t
   }
 });
 
-test("installed Circle can report compatibility login success without a usable wallet: verify the result", { skip }, t => {
+test("installed Circle can report legacy login success without a usable wallet: verify the result", { skip }, t => {
   for (const outcome of ["conflict", "failed"]) {
     const v = vendor(t, true, outcome);
     const requestId = v.startLegacy();
@@ -121,5 +121,31 @@ test("installed Circle can report compatibility login success without a usable w
     assert.equal(v.run(["status"]).output.data.testnet.tokenStatus, "VALID");
     assert.deepEqual(v.list().output.data.wallets, [], "a successful login alone is not recovery");
     assert.equal(v.routes().filter(route => route === "POST /v1/w3s/user/initialize").length, 1);
+  }
+});
+
+test("installed Circle v2-required account refuses legacy login before OTP or initialization and preserves sessions", { skip }, t => {
+  for (const testnet of [true, false]) {
+    const v = vendor(t, testnet, "v2-required");
+    assert.equal(v.run(["login", ...v.flags, "--request", v.seedV2Returning(), "--otp", "123456"]).status, 0);
+    const before = JSON.parse(readFileSync(v.sessionFile, "utf8"));
+    const otherNetwork = testnet ? "mainnet" : "testnet";
+    before[otherNetwork] = { ...before[testnet ? "testnet" : "mainnet"], deviceId: "other-network-device" };
+    writeFileSync(v.sessionFile, JSON.stringify(before));
+    const savedSession = readFileSync(v.sessionFile, "utf8");
+    const requests = readdirSync(join(v.circleHome, "login-requests"));
+    const priorRoutes = v.routes().length;
+
+    const result = v.run(["login", email, ...v.flags, "--init"], true);
+    assert.equal(result.status, 1);
+    assert.equal(result.output.error.code, "CONFLICT");
+    assert.match(result.output.error.message, /Account must use the v2 authentication path\./);
+    assert.doesNotMatch(JSON.stringify(result.output), /--request|--otp/);
+    assert.deepEqual(v.routes().slice(priorRoutes), ["POST /v1/w3s/users/email/token"],
+      "refusal must not reach OTP verification, initialization, or a retry");
+    assert.deepEqual(readdirSync(join(v.circleHome, "login-requests")), requests, "no pending login request is created");
+    assert.equal(readFileSync(v.sessionFile, "utf8"), savedSession, "both sessions must remain byte-for-byte intact");
+    assert.equal(v.run(["status"]).output.data[testnet ? "testnet" : "mainnet"].tokenStatus, "VALID");
+    assert.deepEqual(v.list().output.data.wallets, []);
   }
 });

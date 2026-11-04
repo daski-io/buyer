@@ -8,7 +8,7 @@ share a version.
 ### @daski/pay
 
 - **Circle setup distinguishes an expired login from an empty wallet list.** When no wallet is returned, the signer reads the selected network's session status. An expired or missing session reports `DASKI_CIRCLE_AGENT_LOGIN_REQUIRED`; a valid token with no wallet reports `DASKI_CIRCLE_AGENT_WALLET_MISSING` without claiming initialization succeeded or failed. Known vendor initialization and account-conflict errors carry specific remediation without echoing private vendor output. Doctor and signing never log in, log out or create a wallet.
-- Setup guidance checks both saved emails before requesting an OTP, explains that logout clears both networks, and documents one bounded same-account compatibility login for Circle's specific `User not initialized` failure. It requires a wallet and the usual deployment/signing checks before continuing. Offline tests run the unmodified vendor CLI through returning and compatibility login paths, including initialization conflict and failed-challenge cases; live account recovery is not established by these tests.
+- Setup guidance checks both saved emails before requesting an OTP and explains that logout clears both networks. An interrupted v2 setup requires an initialization repair; ordinary login/create retries do not repair it. The earlier legacy-login recommendation is withdrawn after a live `Account must use the v2 authentication path` refusal. Offline tests cover that first-step refusal with both sessions preserved, separately from initialization conflicts and failed challenges. Recovery requires a wallet and the usual deployment/signing checks; a successful login or fake API test is not live recovery evidence.
 
 ### @daski/x402-scheme
 

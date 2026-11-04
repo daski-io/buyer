@@ -135,36 +135,39 @@ Apply this only to a valid selected-network session with no wallet and Circle's
 specific `User not initialized` refusal. In Circle CLI 1.2.0 and 1.2.2, an
 interrupted first login can leave authentication complete but wallet
 initialization unfinished; returning v2 logins skip that initialization.
-The same versions contain a legacy login path that attempts initialization.
-Its control flow is tested with the unmodified CLI and a fake API. Live service
-acceptance is not guaranteed; a successful login alone is not proof of repair.
+There is no public initialize/resume command in these versions. Repeating
+normal login or wallet creation does not repair this state.
 
-Within the user's existing wallet-setup authorization, make at most one
-compatibility recovery attempt using the same exact email and network.
-Keep the session and existing Terms consent. Do not reset credentials, change
-signers, create a replacement identity or patch the installed CLI.
+A legacy login attempt can fail at its first request with HTTP 409 / `CONFLICT`:
+`Account must use the v2 authentication path.` This is an authentication-path
+refusal, not the local email-conflict error and not a failed OTP. It returns no
+usable login request and never reaches wallet initialization. Do not retry it,
+request another code for it, downgrade authentication, or assume that another
+ordinary v2 login will initialize the wallet. An earlier compatibility-login
+recommendation was withdrawn after this live refusal; fake API tests that
+accept the legacy request cannot establish that the live service accepts it.
 
-For Base Sepolia, use a process-scoped setting on both commands:
+Keep the existing session, exact email, network and Terms consent. Do not log
+out, reset credentials, change signers, create a replacement identity or patch
+the installed CLI. Report the CLI version, selected network, token status,
+empty wallet list and the sanitized vendor error, without OTPs or credentials.
+The account needs a Circle-supported v2 initialization repair or a separately
+reviewed maintainer repair; ordinary setup must stop at this point. Daski's
+signer diagnostics do not perform that repair or read private credential storage.
+
+After a repair, verify the result using the public CLI:
 
 ```bash
-CIRCLE_EXPERIMENTAL_AUTH_V2=0 circle wallet login "<same-email>" --type agent --testnet --init --output json
-CIRCLE_EXPERIMENTAL_AUTH_V2=0 circle wallet login --type agent --testnet --request <fresh-request-id> --otp <fresh-code> --output json
 circle wallet status --output json
 circle wallet list --chain BASE-SEPOLIA --type agent --output json
 ```
 
-Obtain the new request ID from the first command and the fresh code from the
-user; use the code immediately and never retain or echo it. On Base mainnet,
-omit `--testnet` on both login commands and list `--chain BASE`. The prefix is
-POSIX shell syntax; other hosts should set the variable only in those child
-processes, not in global configuration.
-
-Initialization may create the wallets, so list them before creating any more.
-Continue only when the correct network lists a wallet, then run
-`daski doctor --json --signer circle-agent` with the original Daski profile.
-If authentication is refused, initialization fails or no wallet appears,
-stop and report the vendor error and incomplete setup. Do not repeat the
-compatibility recovery or read/modify Circle's private credential storage.
+On Base mainnet, use `--chain BASE`. Initialization may already create the
+wallets, so list them before creating any more. Login success alone is
+insufficient: continue only when the correct network lists a wallet, then run
+`daski doctor --json --signer circle-agent` with the original Daski profile and
+resolve its deployment and signing checks. If the list remains empty, preserve
+the session and stop; do not repeat an unverified repair.
 
 ### Deployment and signing
 
