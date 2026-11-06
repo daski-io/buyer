@@ -120,11 +120,12 @@ test("the review preflight spends two eth_calls, inside a public RPC's allowance
     await preflight(reader);
     assert.equal(seen.ethCalls, 4, "a second run still fits");
   });
-  // Read one at a time, the same values are six eth_calls, and the sixth is refused.
+  // Read one at a time, the same values are five eth_calls: a second run is refused, where batched it fits.
   await withRpc({}, async (url, seen) => {
     const { readContracts: _batched, ...unbatched } = createChainReader(url, "finalized");
+    await preflight(unbatched);
+    assert.equal(seen.ethCalls, 5);
     await assert.rejects(preflight(unbatched), (error: unknown) => error instanceof CliError && error.code === "DASKI_RPC_RATE_LIMITED");
-    assert.equal(seen.ethCalls, 6);
   });
 });
 

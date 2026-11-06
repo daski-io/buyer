@@ -3,6 +3,21 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.13 — unreleased
+
+### @daski/pay
+
+- **Reviews work again on Base after its EAS upgrade, and survive the next upgrade that keeps the signing format.** At block 53508490 (2026-11-04T15:32:07Z) Base moved its EAS predeploy from 1.0.1 to 1.4.1-beta.3 (implementation `0xb6288de3f61e3acfaf4f1b0923656e2ab78c1ad4`). Every earlier buyer refuses a review there with `DASKI_CONFIRMATION_EAS_INCOMPATIBLE`, before anything is signed, because each review profile pinned one chain's implementation address and bytecode hash.
+  - A review profile is now a signing format: the EIP-712 domain version and the `Attest` and `Revoke` type hashes. The buyer still reads them itself, through its own profile RPC at the final block, and requires Base or Base Sepolia, the EAS predeploy address, and a domain separator computed for that chain and address. It no longer reads or compares the implementation, its bytecode or `version()`.
+  - Base's new deployment presents the `eas-native-1.4.1-beta.3` format Base Sepolia's 2026-10-22 upgrade introduced, so reviews on Base sign the payer as `attester` or `revoker`, as on Base Sepolia.
+  - An upgrade that changes what is signed still fails closed, before signing, until a buyer that knows the new format is released.
+  - The review preflight reads three EAS getters instead of four.
+- Vendors the captured Base 1.4.1-beta.3 runtime as `test/fixtures/eas/base-8453-eas-1.4.1-beta.3.json`.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no payment-policy or wire change.
+
 ## 0.5.12 — unreleased
 
 ### @daski/pay
