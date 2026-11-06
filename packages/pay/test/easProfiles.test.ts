@@ -13,32 +13,53 @@ function fixture(name: string) {
   }
   throw new Error("Missing pinned EAS runtime fixture");
 }
-for (const [name, chainId, id] of [["base-8453.json", 8453, "eas-native-1.0.1"], ["base-84532.json", 84532, "eas-native-1.2.0"],
-  ["base-84532-eas-1.4.1-beta.3.json", 84532, "eas-native-1.4.1-beta.3"]] as const) {
-  test("buyer independently verifies pinned EAS runtime/getters for " + id + " on " + chainId, async () => {
+const FIXTURES = [["base-8453.json", 8453, "eas-native-1.0.1"], ["base-84532.json", 84532, "eas-native-1.2.0"],
+  ["base-84532-eas-1.4.1-beta.3.json", 84532, "eas-native-1.4.1-beta.3"],
+  ["base-8453-eas-1.4.1-beta.3.json", 8453, "eas-native-1.4.1-beta.3"]] as const;
+for (const [name, chainId, id] of FIXTURES) {
+  test("buyer independently qualifies the EAS signing format " + id + " on " + chainId, async () => {
     const f = fixture(name);
+    assert.equal(f.chainId, chainId);
     function reader(overrides: Record<string, unknown> = {}): ChainReader {
       const values: Record<string, unknown> = { version: f.version, getDomainSeparator: f.getDomainSeparator,
         getAttestTypeHash: f.getAttestTypeHash, getRevokeTypeHash: f.getRevokeTypeHash, ...overrides };
       return { getFinalBlockNumber: async () => BigInt(f.blockNumber),
-        getStorageAt: async () => overrides.slot ?? "0x" + "0".repeat(24) + f.eas.implementation.slice(2),
-        getCode: async () => overrides.code ?? f.eas.runtimeCode,
+        getStorageAt: async () => "0x" + "0".repeat(24) + f.eas.implementation.slice(2),
+        getCode: async () => f.eas.runtimeCode,
         readContract: async ({ functionName }: { functionName: string }) => values[functionName],
       } as unknown as ChainReader;
     }
     assert.equal((await discoverEasReviewProfile(reader(), chainId, f.eas.address)).id, EAS_REVIEW_PROFILES[id].id);
-    // Another profile's implementation for this chain still needs every one of its own facts.
-    const otherImplementations = Object.values(EAS_REVIEW_PROFILES).filter(p => p.chainId === chainId && p.id !== id)
-      .map(p => ({ slot: "0x" + "0".repeat(24) + p.implementation.slice(2) }));
-    for (const change of [{ version: id === "eas-native-1.4.1-beta.3" ? "1.2.0" : "1.4.1-beta.3" }, { code: "0x6000" }, { slot: "0x" + "0".repeat(64) },
-      ...otherImplementations,
-      { getDomainSeparator: "0x00" }, { getAttestTypeHash: "0x00" }, { getRevokeTypeHash: "0x00" }]) {
+    // A Base upgrade that keeps this signing format, under any contract version or bytecode, keeps qualifying.
+    assert.equal((await discoverEasReviewProfile(reader({ version: "9.9.9" }), chainId, f.eas.address)).id, id);
+    // Another chain's domain separator, or any other format's facts, never select a message.
+    const others = FIXTURES.filter(([otherName]) => otherName !== name).map(([otherName]) => fixture(otherName));
+    for (const change of [{ getDomainSeparator: "0x00" }, { getAttestTypeHash: "0x00" }, { getRevokeTypeHash: "0x00" },
+      { getDomainSeparator: undefined }, { getAttestTypeHash: undefined },
+      ...others.filter(other => other.getDomainSeparator !== f.getDomainSeparator).map(other => ({ getDomainSeparator: other.getDomainSeparator })),
+      ...others.filter(other => other.getAttestTypeHash !== f.getAttestTypeHash).map(other => ({ getAttestTypeHash: other.getAttestTypeHash })),
+      ...others.filter(other => other.getRevokeTypeHash !== f.getRevokeTypeHash).map(other => ({ getRevokeTypeHash: other.getRevokeTypeHash }))]) {
       await assert.rejects(discoverEasReviewProfile(reader(change), chainId, f.eas.address), { code: "DASKI_CONFIRMATION_EAS_INCOMPATIBLE" });
     }
     await assert.rejects(discoverEasReviewProfile(reader(), 1, f.eas.address), { code: "DASKI_CONFIRMATION_EAS_INCOMPATIBLE" });
     await assert.rejects(discoverEasReviewProfile(reader(), chainId, "0x1111111111111111111111111111111111111111"), { code: "DASKI_CONFIRMATION_EAS_INCOMPATIBLE" });
   });
 }
+
+test("Base's 2026-11-04 EAS upgrade presents the format Base Sepolia's 2026-10-22 upgrade qualified", () => {
+  const mainnet = fixture("base-8453-eas-1.4.1-beta.3.json"), sepolia = fixture("base-84532-eas-1.4.1-beta.3.json");
+  assert.equal(mainnet.version, sepolia.version);
+  assert.notEqual(mainnet.eas.runtimeCodeHash, sepolia.eas.runtimeCodeHash, "different bytecode, same signing format");
+  assert.equal(mainnet.getAttestTypeHash, sepolia.getAttestTypeHash);
+  assert.equal(mainnet.getRevokeTypeHash, sepolia.getRevokeTypeHash);
+});
+
+test("each signing format is distinct, so at most one matches a deployment", () => {
+  const profiles = Object.values(EAS_REVIEW_PROFILES);
+  for (const key of ["domainVersion", "attestTypeHash", "revokeTypeHash"] as const) {
+    assert.equal(new Set(profiles.map(profile => profile[key])).size, profiles.length, key);
+  }
+});
 
 test("a batching reader answers the EAS identity getters in one call pinned at the final block", async () => {
   const f = fixture("base-8453.json");
@@ -55,6 +76,6 @@ test("a batching reader answers the EAS identity getters in one call pinned at t
     },
   } as unknown as ChainReader;
   assert.equal((await discoverEasReviewProfile(reader, 8453, f.eas.address)).id, "eas-native-1.0.1");
-  assert.deepEqual(batches, [{ functionNames: ["version", "getDomainSeparator", "getAttestTypeHash", "getRevokeTypeHash"],
+  assert.deepEqual(batches, [{ functionNames: ["getDomainSeparator", "getAttestTypeHash", "getRevokeTypeHash"],
     blockNumber: BigInt(f.blockNumber) }]);
 });
