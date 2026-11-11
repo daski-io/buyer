@@ -4,6 +4,9 @@
  * Everything else about the wrap is negotiable; those two are not.
  */
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { getAddress, type Address, type Hex } from "viem";
 import { DaskiExactEvmScheme, type PaymentRequirementsLike, type SchemeNetworkClientLike } from "../src/scheme.js";
@@ -95,8 +98,25 @@ function scheme(stock: SchemeNetworkClientLike, overrides: Partial<PolicyConfig>
   });
 }
 
+/** The gateway's envelope around a typed-data proposal (daski-sign-request). */
+function gatewaySignRequest(eip712: Record<string, unknown>, version = 2) {
+  return {
+    version,
+    signaturePurpose: "daski-standard-purchase",
+    expiresAt: BINDING.expiresAt,
+    eip712,
+    submitAs: version === 1
+      ? { how: "Sign eip712 into payload.signature; resend this paymentPayload.", paymentPayload: { x402Version: 2 } }
+      : { how: "Sign eip712; echo resource, accepts[0] and echoExtensions.", echoExtensions: ["daski-order-binding"] },
+  };
+}
+
 /** A server proposal that agrees with what we would have computed ourselves. */
-function validSignRequest() {
+function validSignRequest(version = 2) {
+  return gatewaySignRequest(validTypedData(), version);
+}
+
+function validTypedData() {
   return {
     domain: { name: "USDC", version: "2", chainId: 84532, verifyingContract: USDC },
     primaryType: "TransferWithAuthorization",
@@ -211,7 +231,7 @@ test("a server-proposed sign-request is validated, not trusted", async () => {
   };
   await assert.rejects(
     () => scheme(stubStock()).createPaymentPayload(2, REQUIREMENTS, {
-      extensions: { "daski-order-binding": BINDING, "daski-sign-request": forged },
+      extensions: { "daski-order-binding": BINDING, "daski-sign-request": gatewaySignRequest(forged) },
     }),
     (error: unknown) => error instanceof PolicyRefusal &&
       error.detail.code === "DASKI_POLICY_RECIPE_NONCE_MISMATCH",
@@ -276,4 +296,105 @@ test("a valid server proposal is accepted after recomputation agrees", async () 
     "an accepted proposal still carries the nonce we recomputed",
   );
   assert.equal(signer.signed.length, 1);
+});
+
+test("a version 1 sign-request, which also carried a payload copy, is still read", async () => {
+  const signer = stubSigner();
+  const composite = new DaskiExactEvmScheme({
+    signer, payerAddress: PAYER, policy: policy(), stock: stubStock(), now: () => NOW,
+    resolvePurchaseContext: async () => ({
+      providerAgentId: "8327", outcomeId: "create-mailbox", approvedQuoteAtomic: BigInt(AMOUNT),
+    }),
+  });
+  await composite.createPaymentPayload(2, REQUIREMENTS, {
+    extensions: { "daski-order-binding": BINDING, "daski-sign-request": validSignRequest(1) },
+  });
+  assert.equal(signer.signed.length, 1);
+});
+
+test("the flat typed-data layout without the gateway envelope is refused as an open shape", async () => {
+  await assert.rejects(
+    () => scheme(stubStock()).createPaymentPayload(2, REQUIREMENTS, {
+      extensions: { "daski-order-binding": BINDING, "daski-sign-request": validTypedData() },
+    }),
+    (error: unknown) => error instanceof PolicyRefusal &&
+      error.detail.code === "DASKI_SIGN_REQUEST_OPEN_SHAPE",
+  );
+});
+
+test("an unknown sign-request version or purpose is refused before anything is signed", async () => {
+  for (const [patch, code] of [
+    [{ version: 3 }, "DASKI_SIGN_REQUEST_VERSION_UNSUPPORTED"],
+    [{ signaturePurpose: "daski-order-action" }, "DASKI_SIGN_REQUEST_PURPOSE_UNSUPPORTED"],
+    [{ eip712: { ...validTypedData(), extra: 1 } }, "DASKI_SIGN_REQUEST_OPEN_EIP712"],
+  ] as const) {
+    const signer = stubSigner();
+    await assert.rejects(
+      () => new DaskiExactEvmScheme({
+        signer, payerAddress: PAYER, policy: policy(), stock: stubStock(), now: () => NOW,
+        resolvePurchaseContext: async () => ({
+          providerAgentId: "8327", outcomeId: "create-mailbox", approvedQuoteAtomic: BigInt(AMOUNT),
+        }),
+      }).createPaymentPayload(2, REQUIREMENTS, {
+        extensions: { "daski-order-binding": BINDING, "daski-sign-request": { ...validSignRequest(), ...patch } },
+      }),
+      (error: unknown) => error instanceof PolicyRefusal && error.detail.code === code,
+    );
+    assert.equal(signer.signed.length, 0);
+  }
+});
+
+/** The gateway's wire fixtures, vendored at the repository root (or overridden for a pair run). */
+function wireFixture<T>(name: string): T {
+  let directory = process.env.DASKI_GATEWAY_WIRE_FIXTURES;
+  for (let up = dirname(fileURLToPath(import.meta.url)), depth = 0; !directory && depth < 8; depth += 1) {
+    const candidate = join(up, "test", "fixtures", "gateway-wire");
+    if (existsSync(join(candidate, name))) directory = candidate;
+    up = dirname(up);
+  }
+  if (!directory) throw new Error(`gateway wire fixture ${name} is not vendored`);
+  return JSON.parse(readFileSync(join(directory, name), "utf8")) as T;
+}
+
+test("payment-required-sign-ready: the gateway's sign-ready challenge is parsed, validated and signed", async () => {
+  const challenge = wireFixture<{
+    accepts: PaymentRequirementsLike[];
+    extensions: Record<string, unknown> & {
+      "daski-sign-request": { eip712: { message: { nonce: string; from: string } }; submitAs: { echoExtensions: string[] } };
+    };
+  }>("payment-required-sign-ready.json");
+  const requirements = challenge.accepts[0]!;
+  const proposal = challenge.extensions["daski-sign-request"];
+  const payer = getAddress(proposal.eip712.message.from);
+  const signed: unknown[] = [];
+  const composite = new DaskiExactEvmScheme({
+    signer: {
+      getAddress: async () => payer,
+      async signTypedData(payload) { signed.push(payload); return `0x${"11".repeat(65)}` as Hex; },
+      describe: () => ({ provider: "stub", accountType: "eoa" as const }),
+    },
+    payerAddress: payer,
+    policy: policy({
+      payerAddress: payer,
+      resolveSplitter: async () => ({
+        fromOutcome: getAddress(requirements.payTo), fromChainManifest: getAddress(requirements.payTo),
+      }),
+    }),
+    stock: stubStock(),
+    // The fixture was issued at this second.
+    now: () => 1_756_769_000,
+    resolvePurchaseContext: async () => ({
+      providerAgentId: "8327", outcomeId: "register-domain",
+      approvedQuoteAtomic: BigInt(requirements.amount),
+    }),
+  });
+  const result = await composite.createPaymentPayload(2, requirements, { extensions: challenge.extensions });
+  assert.equal(signed.length, 1);
+  const payload = result.payload as { authorization: { nonce: string } };
+  assert.equal(payload.authorization.nonce, proposal.eip712.message.nonce);
+  assert.deepEqual(
+    Object.keys(result.extensions ?? {}).sort(),
+    [...proposal.submitAs.echoExtensions].sort(),
+    "the bridge echoes exactly the extensions the gateway names",
+  );
 });
