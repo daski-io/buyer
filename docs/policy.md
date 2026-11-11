@@ -79,6 +79,8 @@ nonce = keccak256(abi.encode(
 
 The bridge recomputes the payment proposal from the challenge binding, validates it against profile and catalog expectations, and signs the resulting authorization. It returns the payment extensions while excluding the instructional `daski-sign-request`.
 
+When the gateway proposes the authorization, `daski-sign-request` is the closed envelope `{version, signaturePurpose, expiresAt, eip712, submitAs}`, version 1 or 2 with purpose `daski-standard-purchase`. Only `eip712` is read: it must hold exactly `domain`, `message`, `primaryType` and `types`, and it is validated and its nonce recomputed like any other proposal. `submitAs` is guidance for clients without this bridge and is ignored. Another layout, version or purpose is refused before anything is signed.
+
 <a id="daski-order-binding"></a>
 The `daski-order-binding` parser accepts only the closed `recipe-bound-v2` shape (version 2). Unsupported fields, versions, or profiles return a schema error.
 

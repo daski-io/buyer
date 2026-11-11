@@ -3,6 +3,18 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.14 — unreleased
+
+### @daski/x402-scheme
+
+- **A sign-ready gateway challenge is read instead of refused.** The gateway sends `daski-sign-request` as `{version, signaturePurpose, expiresAt, eip712, submitAs}`, with the typed data under `eip712`. `parseSignRequest` accepted only the bare typed data, so every earlier release refused a sign-ready challenge with `DASKI_SIGN_REQUEST_OPEN_SHAPE`. It now reads the gateway's envelope, versions 1 and 2, and passes `eip712` to the policy validator as before. `submitAs` is never read: the bridge builds and echoes the payment itself.
+- New refusals, before anything is signed: `DASKI_SIGN_REQUEST_VERSION_UNSUPPORTED`, `DASKI_SIGN_REQUEST_PURPOSE_UNSUPPORTED`, `DASKI_SIGN_REQUEST_MALFORMED`, `DASKI_SIGN_REQUEST_MALFORMED_EIP712` and `DASKI_SIGN_REQUEST_OPEN_EIP712`.
+- Vendors the gateway's `payment-required-sign-ready.json` wire fixture and signs it offline.
+
+### @daski/pay
+
+- Version moves with @daski/x402-scheme; the CLI does not send a sign-ready challenge through this parser.
+
 ## 0.5.13 — unreleased
 
 ### @daski/pay
