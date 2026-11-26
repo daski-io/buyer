@@ -350,9 +350,10 @@ export async function orderDeliverables(
           message: `The provider ran ${item.actionId} and it failed (${String(done.errorClass)}).`,
           remediation: temporary
             ? `The provider says the failure is temporary. Run the same command again in a minute: ${again}`
-            : "The provider will not deliver it this way now. otherActions lists what it offers on this asset, such " +
-              "as an action that issues a new secret; run one with daski asset action. A destructive one is only " +
-              "staged, and needs the user's approval.",
+            : "The provider will not deliver it this way now. otherActions lists what it offers on this asset: first " +
+              "run a non-destructive one that reads the asset's status, which may say why (still being created, " +
+              "retired); then, if it offers one, an action that issues a new secret. Run them with daski asset action " +
+              "and save their results to files. A destructive one is only staged, and runs once the user approves.",
         } : {
           code: "DASKI_DELIVERABLE_NOT_DELIVERED",
           message: `The provider answered ${item.actionId} with status ${String(done.status)}, not a result. Nothing changed.`,

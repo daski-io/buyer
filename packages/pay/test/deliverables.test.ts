@@ -272,6 +272,7 @@ test("a failed item is named with whether a retry is safe and what else the prov
       { actionId: "download-account-document", name: "Download a document", destructive: false },
     ]);
     assert.equal(items[2]!.otherActions, undefined, "a temporary failure names no alternative");
+    assert.match(String((items[1]!.error as Json).remediation), /first run a non-destructive one that reads the asset's status/);
     assert.match(String(manifest.next), /may fetch Account agreement \(PDF\)/);
     // A gateway refusal marked retryable, or a lost connection, may succeed again; a rejection will not.
     const refused = provider({ answers: {
