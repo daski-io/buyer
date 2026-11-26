@@ -21,7 +21,7 @@ import {
 } from "@daski/x402-scheme";
 import type { CliError } from "../src/cli/errors.js";
 import {
-  GatewayClient, gatewayRefusalRemediation, isRetryableGatewayCode, type McpToolResult,
+  artifactDeliveryState, GatewayClient, gatewayRefusalRemediation, isRetryableGatewayCode, type McpToolResult,
 } from "../src/gateway/client.js";
 import { lifecycleFailure } from "../src/gateway/lifecycle.js";
 import { isAmbiguousPurchaseAnswer, purchaseFailure } from "../src/gateway/purchase.js";
@@ -65,6 +65,8 @@ const railErrors = fixture<{
   walletAuthorizationInvalid: { error: Json };
   authorizationWindow: { error: Json };
   artifactNotAvailable: { error: Json };
+  artifactStillBeingDelivered: { error: Json };
+  artifactAwaitingInput: { error: Json };
   orderActionUnsupported: { error: Json };
   orderActionConflict: { error: Json };
   providerLifecycleUnavailable: { error: Json };
@@ -175,6 +177,45 @@ test("standard-rail-error: the MCP refusal and the HTTP envelopes carry their co
   assert.equal(railErrors.requestSchemaInvalid.error.code, "REQUEST_SCHEMA_INVALID");
   assert.equal(railErrors.artifactNotAvailable.error.code, "ARTIFACT_NOT_AVAILABLE");
   assert.ok(gatewayRefusalRemediation("ARTIFACT_NOT_AVAILABLE", railErrors.artifactNotAvailable.error)?.includes("daski order status"));
+});
+
+test("standard-rail-error: ARTIFACT_NOT_AVAILABLE is read by its deliveryState, not its wording", () => {
+  // The MCP server relays a gateway refusal as the tool error { ...error, next_action }.
+  const relayed = (error: Json): McpToolResult => {
+    const payload = { ...error, next_action: "gateway tool-term guidance" };
+    return { isError: true, content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
+  };
+  const ended = railErrors.artifactNotAvailable.error;
+  const delivering = railErrors.artifactStillBeingDelivered.error;
+  const awaiting = railErrors.artifactAwaitingInput.error;
+  assert.deepEqual([ended, delivering, awaiting].map((error) => [error.code, error.deliveryState]), [
+    ["ARTIFACT_NOT_AVAILABLE", "not_delivering"],
+    ["ARTIFACT_NOT_AVAILABLE", "delivering"],
+    ["ARTIFACT_NOT_AVAILABLE", "awaiting_input"],
+  ]);
+  const [endedFailure, deliveringFailure, awaitingFailure] = [ended, delivering, awaiting]
+    .map((error) => lifecycleFailure("daski_get_order_artifact", relayed(error), "ord_7")) as [CliError, CliError, CliError];
+  assert.match(deliveringFailure.remediation, /still being delivered.*nothing failed.*daski order status ord_7 --json/s);
+  assert.equal(deliveringFailure.details.retryable, true, "a paid order on its way is read again");
+  assert.match(awaitingFailure.remediation, /waiting for your input.*inputRequest.*daski order input ord_7 --request/s);
+  assert.equal(awaitingFailure.details.retryable, undefined, "waiting on the payer: reading again changes nothing");
+  assert.match(endedFailure.remediation, /neither completed nor completed after recovery.*daski order status ord_7 --json/s);
+  assert.doesNotMatch(endedFailure.remediation, /nothing failed/);
+  assert.equal(endedFailure.details.retryable, undefined);
+  assert.equal((deliveringFailure.details.gateway as Json).deliveryState, "delivering", "the field is shown as the gateway sent it");
+
+  // The field decides, whatever the message says.
+  assert.equal(artifactDeliveryState("ARTIFACT_NOT_AVAILABLE", { ...delivering, deliveryState: "not_delivering" }), "not_delivering");
+  assert.equal(artifactDeliveryState("ARTIFACT_NOT_AVAILABLE", { ...ended, deliveryState: "delivering" }), "delivering");
+  // A value this CLI does not know is not guessed at: read the status.
+  assert.equal(artifactDeliveryState("ARTIFACT_NOT_AVAILABLE", { ...delivering, deliveryState: "paused" }), "not_delivering");
+  // A gateway from before the field: its message is read.
+  const { deliveryState: _new, ...olderDelivering } = delivering;
+  const { deliveryState: _old, ...olderEnded } = ended;
+  assert.equal(artifactDeliveryState("ARTIFACT_NOT_AVAILABLE", olderDelivering), "delivering");
+  assert.equal(artifactDeliveryState("ARTIFACT_NOT_AVAILABLE", olderEnded), "not_delivering");
+  assert.equal(artifactDeliveryState("ARTIFACT_NOT_AVAILABLE", undefined), "not_delivering");
+  assert.equal(artifactDeliveryState("ORDER_ACTION_UNSUPPORTED", delivering), undefined);
 });
 
 test("standard-rail-error: the provider's named order-action refusals are read with command-term remediations", () => {

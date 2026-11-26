@@ -86,4 +86,8 @@ test("next-step commands name the real order or intent when the CLI knows it", (
   assert.ok(stillBeingDelivered("ARTIFACT_NOT_AVAILABLE", { message: "The order is paid and still being delivered; it has no artifact yet" }));
   assert.equal(stillBeingDelivered("ARTIFACT_NOT_AVAILABLE", { message: "The order has no artifact: it is neither completed nor recovered" }),
     false, "an order that ended without a result is not 'still being delivered'");
+  // A gateway that states deliveryState is read by it, not by its wording.
+  assert.ok(stillBeingDelivered("ARTIFACT_NOT_AVAILABLE", { message: "No artifact yet", deliveryState: "delivering" }));
+  assert.equal(stillBeingDelivered("ARTIFACT_NOT_AVAILABLE",
+    { message: "The order is paid and still being delivered; it has no artifact yet", deliveryState: "not_delivering" }), false);
 });

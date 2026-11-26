@@ -378,13 +378,33 @@ export function isRetryableGatewayCode(code: string | undefined): boolean {
 }
 
 /**
- * A paid order with no artifact because it is still being delivered: the
- * gateway's ARTIFACT_NOT_AVAILABLE says so in its message (and marks it
- * retryable). An order that ended without a result answers the same code
- * without that, and is not "still being delivered".
+ * Where an order without an artifact stands, from the gateway's
+ * ARTIFACT_NOT_AVAILABLE: `delivering` (paid and on its way; nothing failed),
+ * `awaiting_input` (the provider waits for the payer's input) or
+ * `not_delivering`. The gateway says so in `deliveryState`. A gateway from
+ * before that field says only "still being delivered" in its message, so
+ * without the field the message is read, and anything else is
+ * `not_delivering`. An unrecognised value is not guessed at: it reads as
+ * `not_delivering`, whose advice is to read the order status.
  */
+export type ArtifactDeliveryState = "delivering" | "awaiting_input" | "not_delivering";
+
+export function artifactDeliveryState(
+  code: string | undefined,
+  body: Record<string, unknown> | undefined,
+): ArtifactDeliveryState | undefined {
+  if (code !== "ARTIFACT_NOT_AVAILABLE") return undefined;
+  const stated = body?.deliveryState;
+  if (typeof stated === "string") {
+    return stated === "delivering" || stated === "awaiting_input" ? stated : "not_delivering";
+  }
+  return typeof body?.message === "string" && /still being delivered/i.test(body.message)
+    ? "delivering" : "not_delivering";
+}
+
+/** A paid order with no artifact because it is still being delivered: read again later, nothing failed. */
 export function stillBeingDelivered(code: string | undefined, body: Record<string, unknown> | undefined): boolean {
-  return code === "ARTIFACT_NOT_AVAILABLE" && typeof body?.message === "string" && /still being delivered/i.test(body.message);
+  return artifactDeliveryState(code, body) === "delivering";
 }
 
 /**
@@ -467,11 +487,18 @@ export function gatewayRefusalRemediation(
       return "This outcome has as many open orders as its provider accepts, and nothing was claimed " +
         "or settled. Run the same command again later.";
     case "ARTIFACT_NOT_AVAILABLE":
-      return stillBeingDelivered(code, body)
-        ? "The order is paid and still being delivered, so it has no artifact yet; nothing failed. Read its status " +
-          `again shortly with ${status} --json, and read the artifact once it is FULFILLED.`
-        : "This order has no artifact: it is neither completed nor completed after recovery. Check it with " +
-          `${status} --json, which shows whether it is still in progress or ended another way.`;
+      switch (artifactDeliveryState(code, body)) {
+        case "delivering":
+          return "The order is paid and still being delivered, so it has no artifact yet; nothing failed. Read its status " +
+            `again shortly with ${status} --json, and read the artifact once it is FULFILLED.`;
+        case "awaiting_input":
+          return "The provider is waiting for your input before it can deliver the order, so it has no artifact yet. " +
+            `Read what it needs with ${status} --json (inputRequest), and send it with ` +
+            `daski order input ${orderHandle ?? "<handle>"} --request <file.json>.`;
+        default:
+          return "This order has no artifact: it is neither completed nor completed after recovery. Check it with " +
+            `${status} --json, which shows whether it is still in progress or ended another way.`;
+      }
     // The provider's named refusals of an order action. None returns a spent
     // authorization, so another attempt signs a fresh one; a read reuses its
     // stored read access.

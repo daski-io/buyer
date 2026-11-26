@@ -22,6 +22,11 @@
  * "the asset also has actions": a server order's result already carries the
  * server, and names none of them. The result is only searched for the ids
  * the gateway listed; nothing in it is printed or followed.
+ *
+ * The result's text is read because nothing structured says it yet: no
+ * listing contract, owner action or order status field names the action that
+ * holds an order's result, so the gateway cannot state it until providers
+ * declare it.
  */
 import type { Catalog } from "./catalog.js";
 import type { OwnerAction, ServiceDirectory } from "./services.js";
