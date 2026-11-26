@@ -2,9 +2,9 @@
  * `daski asset action` is `daski_use_asset`: a provider-bound wallet
  * challenge this CLI validates before the wallet signs it, then the
  * authorized retry. The result goes to a mode-600 file and never to stdout.
- * `--asset` also takes an identifier, and `--order` finds the asset an order
- * created and the input that names it. `daski asset list` is
- * `daski_list_assets`.
+ * `--asset` also takes an identifier. `daski asset list` is
+ * `daski_list_assets`. What an order delivered comes from
+ * `daski order deliverables` (deliverables.test.ts).
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -15,7 +15,6 @@ import { canonicalHash, walletActionTypedData } from "@daski/x402-scheme";
 import { CliError } from "../src/cli/errors.js";
 import { assetAction, assetList } from "../src/commands/asset.js";
 import { assetActionName, callAssetAction } from "../src/gateway/lifecycle.js";
-import { upsertOrder } from "../src/store/orders.js";
 import { ACCOUNT, PROFILE, fakeContext, fakeGateway, isolated, mcp, walletChallenge } from "./walletFakes.js";
 
 const code = (wanted: string) => (error: unknown): boolean => error instanceof CliError && error.code === wanted;
@@ -149,81 +148,6 @@ test("--asset takes an identifier, found in the payer's own asset list", async (
   });
 });
 
-test("--order acts on the asset the order created, with the input its result names", async () => {
-  await withHome(async (home) => {
-    const now = new Date().toISOString();
-    upsertOrder({ intentId: "intent", handle: "ord_1", profile: "sandbox", providerAgentId: "8327", outcomeId: "create-inference-account",
-      payer: ACCOUNT.address, amount: "1000000", state: "FULFILLED", createdAt: now, updatedAt: now,
-      readCapability: { token: "cap", expiresAt: Math.floor(Date.now() / 1000) + 600 } });
-    const orderResult = { keyId: KEY_ID, environment: "sandbox", creditUsd: "1.00", inferenceOrigin: "https://inference.example",
-      next: "Call get-inference-key with this keyId to receive the API key secret." };
-    const { client, calls } = fakeGateway({
-      reads: { daski_get_order_status: () => ({ orderHandle: "ord_1", orderState: "FULFILLED", state: "completed",
-        fulfillmentState: "completed", untrustedResult: isolated(orderResult) }) },
-      answers: {
-        daski_list_assets: () => assets([{ ...inferenceAsset, providerAssetId: "00000000-0000-4000-8000-000000000000", identifier: "inf_other" },
-          inferenceAsset]),
-        daski_use_asset: (args) => performed(args, keyResult),
-      },
-    });
-    const printed = await assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
-      async () => fakeContext(client));
-    assert.deepEqual(printed.inputFields, ["keyId"], "only the input's field names are printed");
-    assert.equal(printed.providerAssetId, ASSET);
-    assert.equal(printed.orderHandle, "ord_1");
-    // By default the result goes to a private folder in the CLI's state directory, never the working tree.
-    assert.equal(printed.resultWrittenTo, join(home, "results", "get-inference-key-abababababab.json"));
-    if (process.platform !== "win32") assert.equal(statSync(join(home, "results")).mode & 0o777, 0o700);
-    assert.ok(!JSON.stringify(printed).includes(SECRET));
-    const use = calls.find((call) => call.tool === "daski_use_asset" && call.args.authorization)!;
-    assert.deepEqual(use.args.input, { keyId: KEY_ID });
-    assert.equal(use.args.providerAgentId, "8327");
-    assert.equal(calls[0]!.args.readCapability, "cap", "the order's stored read capability serves the status read");
-
-    // An order that is not fulfilled has no asset to act on yet.
-    // A paid order still being delivered is not a failure: it names this order and says to read it again.
-    for (const state of ["DEPOSIT_FINAL", "DISPATCH_STARTED", "DISPATCHED"]) {
-      const working = fakeGateway({ reads: { daski_get_order_status: () => ({ orderState: state, state: "working" }) } });
-      await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
-        async () => fakeContext(working.client)), (error: unknown) => code("DASKI_ORDER_NOT_FULFILLED")(error) &&
-          /still being delivered/.test((error as CliError).message) && (error as CliError).details.retryable === true &&
-          (error as CliError).remediation.includes("daski order status ord_1 --json"), state);
-      assert.equal(working.calls.some((call) => call.tool === "daski_use_asset"), false, `${state}: nothing was run`);
-    }
-    const failed = fakeGateway({ reads: { daski_get_order_status: () => ({ orderState: "PROVIDER_FAILED", state: "failed" }) } });
-    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
-      async () => fakeContext(failed.client)), (error: unknown) => code("DASKI_ORDER_NOT_FULFILLED")(error) &&
-        (error as CliError).details.retryable === undefined);
-    const held = fakeGateway({ reads: { daski_get_order_status: () => ({ orderState: "LEGAL_HOLD", state: "working" }) } });
-    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
-      async () => fakeContext(held.client)), (error: unknown) => code("DASKI_ORDER_NOT_FULFILLED")(error) &&
-        !/still being delivered/.test((error as CliError).message) && (error as CliError).details.retryable === undefined,
-      "a held order waits on an operator, not on delivery");
-    const working = fakeGateway({ reads: { daski_get_order_status: () => ({ orderState: "DISPATCHED", state: "working" }) } });
-    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1", providerAgentId: "1" }, undefined,
-      async () => fakeContext(working.client)), code("DASKI_ORDER_PROVIDER_MISMATCH"));
-
-    // An explicit --input wins over the derived one; two assets named in the result is ambiguous.
-    const explicit = fakeGateway({
-      reads: { daski_get_order_status: () => ({ orderState: "FULFILLED", untrustedResult: isolated(orderResult) }) },
-      answers: { daski_list_assets: () => assets([inferenceAsset]), daski_use_asset: (args) => performed(args, { usage: [] }) },
-    });
-    const usage = await assetAction({ json: true, actionId: "get-inference-usage", order: "ord_1",
-      input: { keyId: KEY_ID, limit: 5 } }, undefined, async () => fakeContext(explicit.client));
-    assert.deepEqual(usage.inputFields, ["keyId", "limit"]);
-    assert.deepEqual(explicit.calls.find((call) => call.tool === "daski_use_asset" && call.args.authorization)!.args.input,
-      { keyId: KEY_ID, limit: 5 });
-    const twice = fakeGateway({
-      reads: { daski_get_order_status: () => ({ orderState: "FULFILLED", untrustedResult: isolated({ keyId: KEY_ID, assetId: ASSET }) }) },
-      answers: { daski_list_assets: () => assets([inferenceAsset,
-        { ...inferenceAsset, providerAssetId: "8d42e3f9-1111-4222-8333-944455556666".replace("8d", "9d"), identifier: ASSET }]) },
-    });
-    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
-      async () => fakeContext(twice.client)), (error: unknown) => code("DASKI_ASSET_AMBIGUOUS")(error) &&
-        Array.isArray((error as CliError).details.assets));
-  });
-});
-
 test("the CLI signs the gateway's challenge itself, with any signer, and a signer that cannot sign says so", async () => {
   await withHome(async (home) => {
     // A challenge carrying the gateway's sign-ready proposal, which agrees with what the CLI recomputes.
@@ -325,11 +249,11 @@ test("a failed action, and the gateway's refusals, carry their own next step", a
   });
 });
 
-test("the target is exactly one of --asset or --order, and flags are checked before anything is called", async () => {
+test("the target is --provider with --asset, and flags are checked before anything is called", async () => {
   const unreachable = async () => { throw new Error("no context may be built"); };
-  await assert.rejects(assetAction({ json: true, actionId: "get-inference-key" }, unreachable), code("DASKI_ASSET_TARGET_REQUIRED"));
-  await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", asset: ASSET, order: "ord" }, unreachable),
-    code("DASKI_ASSET_TARGET_REQUIRED"));
+  await assert.rejects(assetAction({ json: true, actionId: "get-inference-key" }, unreachable),
+    (error: unknown) => code("DASKI_ASSET_TARGET_REQUIRED")(error) &&
+      (error as CliError).remediation.includes("daski order deliverables <handle> --json"));
   await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", asset: ASSET }, unreachable), code("DASKI_FLAG_REQUIRED"));
   await assert.rejects(assetAction({ json: true, actionId: "Get Key", providerAgentId: "8327", asset: ASSET }, unreachable),
     code("DASKI_ASSET_ACTION_ID_INVALID"));

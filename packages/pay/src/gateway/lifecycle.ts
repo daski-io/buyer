@@ -225,7 +225,8 @@ export function walletSigningFailure(error: unknown, signer: SignerAdapter, paye
       `must be signed by the payer that bought the asset; this profile's signer is ${payer}. Fix the signer and run ` +
       "the same command again (daski doctor --json checks it), or use the --profile or --signer that bought it. " +
       "There is no separate signing step: the CLI signs the gateway's challenge itself.",
-    details: { ...(cause?.details ?? {}), payer },
+    // Marks a failure before anything was sent, so a caller running several actions stops at the first.
+    details: { ...(cause?.details ?? {}), payer, signingFailed: true },
     ...(cause ? { exitCode: cause.exitCode } : {}),
   });
 }

@@ -21,8 +21,7 @@ import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "
 import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
 import { operationalStatus, supportReply } from "../gateway/operations.js";
 import { inputRequest, orderDocuments } from "../gateway/inputRequest.js";
-import { orderComplete, resultStep, type ResultStep } from "../gateway/resultStep.js";
-import { ServiceDirectory } from "../gateway/services.js";
+import { getWhatYouBought, orderFulfilled } from "../gateway/deliverables.js";
 import { randomUUID } from "node:crypto";
 import {
   activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord, type ReadCapability,
@@ -65,7 +64,6 @@ const CAPABILITY_ACCEPTED = new Set([
 export async function orderStatus(
   options: OrderOptions,
   contextFactory: OrderContextFactory = createContext,
-  services?: Pick<ServiceDirectory, "byId">,
 ): Promise<Record<string, unknown>> {
   return withOrder(options, async (context, record) => {
     const body = await readWithCapability(context, record, {
@@ -75,14 +73,15 @@ export async function orderStatus(
     });
     const state = gatewayOrderState(body);
     if (state !== undefined) updateOrder(record.intentId, { state: localOrderState(state, record.handle) });
-    const step = await rememberResultStep(context, record, body, services);
+    const fulfilled = rememberFulfilled(record, body);
+    const handle = record.handle ?? options.handle;
     return {
-      orderHandle: record.handle ?? options.handle,
+      orderHandle: handle,
       intentId: record.intentId,
       provider: record.providerAgentId,
       outcome: record.outcomeId,
       state: state ?? record.state,
-      ...(step ? { resultStep: { actionId: step.actionId, name: step.name, command: step.command }, next: step.next } : {}),
+      ...(fulfilled ? { next: getWhatYouBought(handle) } : {}),
       operationalStatus: operationalStatus(body),
       supportReply: supportReply(body),
       inputRequest: inputRequest(body),
@@ -93,29 +92,13 @@ export async function orderStatus(
 }
 
 /**
- * Finds the owner action that holds a fulfilled order's result, if its result
- * names one, and keeps it on the record so `order confirm` can name it too.
- * Never fails the read it follows.
+ * Whether a status read finds the order fulfilled, kept on the record so
+ * `order confirm` can name the step that gets what it delivered.
  */
-export async function rememberResultStep(
-  context: CommandContext,
-  record: OrderRecord,
-  body: Record<string, unknown>,
-  services?: Pick<ServiceDirectory, "byId">,
-): Promise<ResultStep | undefined> {
-  try {
-    const handle = record.handle;
-    if (!handle || !orderComplete(body)) return undefined;
-    const step = await resultStep({
-      catalog: context.catalog,
-      services: services ?? new ServiceDirectory(context.profile.gatewayUrl),
-      providerAgentId: record.providerAgentId, outcomeId: record.outcomeId, handle, body,
-    });
-    if (step) updateOrder(record.intentId, { resultStep: { actionId: step.actionId, command: step.command, next: step.next } });
-    return step;
-  } catch {
-    return undefined;
-  }
+export function rememberFulfilled(record: OrderRecord, body: Record<string, unknown>): boolean {
+  const fulfilled = orderFulfilled(body);
+  if (record.fulfilled !== fulfilled) updateOrder(record.intentId, { fulfilled });
+  return fulfilled;
 }
 
 export async function orderArtifact(
@@ -162,27 +145,23 @@ export async function orderArtifact(
 
 export async function orderConfirm(options: ConfirmationOptions): Promise<Record<string, unknown>> {
   const { runConfirmation } = await import("./confirmation.js");
-  return withResultNext(await runConfirmation(options), options);
+  return withDeliverablesNext(await runConfirmation(options), options);
 }
 
 /**
- * A review is not the end of an order whose result is behind an owner
- * action: the step that gets it is named after the review's own next step,
- * or as the next step when the review needs none.
+ * A review is not the end of a fulfilled order: what it delivered is fetched
+ * with `daski order deliverables`, named after the review's own next step, or
+ * as the next step when the review needs none.
  */
-export function withResultNext(
+export function withDeliverablesNext(
   result: Record<string, unknown>,
   options: { handle: string; profile?: string | undefined; revoke?: boolean | undefined },
 ): Record<string, unknown> {
   if (options.revoke) return result;
   const record = findOrder(options.handle, loadConfig(options.profile).profileName);
-  const step = record?.resultStep;
-  if (!step) return result;
-  return {
-    ...result,
-    resultStep: { actionId: step.actionId, command: step.command },
-    next: typeof result.next === "string" ? `${result.next} Then get the order's result: ${step.command}` : step.next,
-  };
+  if (!record?.fulfilled || !record.handle) return result;
+  const step = getWhatYouBought(record.handle);
+  return { ...result, next: typeof result.next === "string" ? `${result.next} ${step}` : step };
 }
 
 export async function orderCancel(options: OrderOptions): Promise<Record<string, unknown>> {

@@ -33,12 +33,13 @@ function daski(args: string[]): { stdout: string; status: number } {
   }
 }
 
-test("help says it is a command-line tool, not a library, and lists the result and free-skill commands", () => {
+test("help says it is a command-line tool, not a library, and lists the deliverables, asset and free-skill commands", () => {
   const { stdout, status } = daski(["help"]);
   assert.equal(status, 0);
   assert.match(stdout, /@daski\/pay is a command-line tool, not a library/);
   assert.match(stdout, /It has no API to import from a script\./);
-  assert.match(stdout, /asset action --order <handle> --action <actionId>/);
+  assert.match(stdout, /order deliverables <handle> \[--output-dir <dir>\]/);
+  assert.doesNotMatch(stdout, /--order/);
   assert.match(stdout, /asset action --provider <id> --asset <providerAssetId\|identifier> --action <actionId>/);
   assert.match(stdout, /asset list \[--provider <id>\]/);
   assert.match(stdout, /free-skill --provider <id> --skill <skillId>/);
@@ -50,6 +51,13 @@ test("the new commands refuse unknown flags and missing values before doing anyt
   assert.equal(JSON.parse(missing.stdout).error, "DASKI_FLAG_REQUIRED");
   const unknown = daski(["asset", "action", "--action", "get-server", "--asset-id", "x", "--json"]);
   assert.equal(JSON.parse(unknown.stdout).error, "DASKI_UNKNOWN_FLAG");
+  // 0.5.15's --order names the one command that replaced it.
+  const removed = daski(["asset", "action", "--order", "ord_9", "--action", "get-inference-key", "--json"]);
+  assert.notEqual(removed.status, 0);
+  assert.equal(JSON.parse(removed.stdout).error, "DASKI_FLAG_REMOVED");
+  assert.match(JSON.parse(removed.stdout).remediation, /daski order deliverables ord_9 --json/);
+  const deliverables = daski(["order", "deliverables", "ord_9", "--output", "x", "--json"]);
+  assert.equal(JSON.parse(deliverables.stdout).error, "DASKI_UNKNOWN_FLAG");
   const subcommand = daski(["asset", "use", "--json"]);
   assert.equal(JSON.parse(subcommand.stdout).error, "DASKI_UNKNOWN_SUBCOMMAND");
   const wait = daski(["free-skill", "--provider", "8327", "--skill", "get-pricing", "--wait", "soon", "--json"]);
