@@ -398,12 +398,26 @@ test("an action that completed is recorded at once, so a run cut short later can
   });
 });
 
+test("a listed deliverable this CLI cannot read leaves the order incomplete", async () => {
+  await withHome(async () => {
+    const [key, document] = fixtureItems();
+    const { client, fetchImpl } = provider({ artifact: () => artifactAnswer({ deliverables: [{ kind: "artifact" }, key,
+      { ...document, futureField: "added by a newer gateway" }] }) });
+    const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
+    assert.deepEqual((manifest.items as Json[]).map((item) => item.status), ["saved", "saved"]);
+    assert.equal(manifest.ignoredDeliverables, 1);
+    assert.equal(manifest.complete, false);
+    assert.match(String(manifest.next), /listed 1 more deliverable this CLI cannot read .*upgrade to the @daski\/pay version the gateway pins/);
+  });
+});
+
 test("an older gateway's artifact without deliverables is the whole order", async () => {
   await withHome(async () => {
     const { client, calls, fetchImpl } = provider({ artifact: () => { const { deliverables: _d, ...rest } = artifactAnswer(); return rest; } });
     const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
     assert.equal(manifest.complete, true);
     assert.equal(manifest.deliverablesListed, false);
+    assert.match(String(manifest.next), /This gateway lists no deliverables beside it/);
     assert.equal((manifest.items as Json[]).length, 1);
     assert.equal(calls.filter((call) => call.tool === "daski_use_asset").length, 0);
   });

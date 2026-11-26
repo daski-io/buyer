@@ -6,7 +6,7 @@
  * entry per provider owner action that holds the rest, with exactly the
  * arguments `daski_use_asset` takes besides the payer and its authorization:
  *
- *   {"kind": "owner-action", "providerAgentId": "8327", "actionId": "get-inference-key",
+ *   {"kind": "owner-action", "providerAgentId": "8327", "actionId": "deliver-inference-key",
  *    "assetType": "inference-account", "providerAssetId": "<uuid>",
  *    "input": {"keyId": "inf_…"}, "label": "API key"}
  *

@@ -206,8 +206,8 @@ async function main(argv: string[]): Promise<number> {
           assertKnownFlags(flags, [...GLOBAL_FLAGS, "output-dir"]);
           const manifest = await orderDeliverables({ ...base, outputDir: stringFlag(flags, "output-dir") });
           emit(manifest, output);
-          // Still being delivered is not a failure; an item that could not be fetched is.
-          return (manifest.items as { status: string }[]).some((item) => item.status === "failed") ? 1 : 0;
+          // Still being delivered is not a failure; an order left incomplete for any other reason is.
+          return manifest.complete === true || manifest.state === "delivering" ? 0 : 1;
         }
         case "confirm":
         case "revoke-confirmation":

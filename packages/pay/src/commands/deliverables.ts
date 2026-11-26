@@ -428,7 +428,8 @@ export async function orderDeliverables(
     }
 
     const failed = items.filter((item) => item.status === "failed");
-    const complete = failed.length === 0;
+    // A listed deliverable this CLI could not read may hold part of the order: never claim it complete.
+    const complete = failed.length === 0 && ignored === 0;
     const manifest = {
       orderHandle: handle,
       complete,
@@ -448,10 +449,17 @@ export async function orderDeliverables(
       ...manifest,
       manifestFile,
       next: (complete
-        ? `Everything this order delivered is in ${directory}. Tell the user where the files are.`
-        : `${failed.length} of ${items.length} deliverables could not be fetched; each failed item names its error. ` +
-          (retry.length > 0 ? `Running the same command again is safe and may fetch ${retry.join(", ")}: ${again}` :
-            "Running the same command again is safe, but will not fetch them by itself: follow each item's remediation.")) +
+        ? listed
+          ? `Everything this order delivered is in ${directory}. Tell the user where the files are.`
+          : `The artifact is saved in ${directory}. This gateway lists no deliverables beside it, so it cannot say ` +
+            "whether part of the order comes from an owner action: read the outcome's documentation for any further step."
+        : (failed.length > 0 ? `${failed.length} of ${items.length} deliverables could not be fetched; each failed item ` +
+          "names its error. " + (retry.length > 0 ? `Running the same command again is safe and may fetch ` +
+            `${retry.join(", ")}: ${again}` : "Running the same command again is safe, but will not fetch them by itself: " +
+            "follow each item's remediation.") : `What was read is saved in ${directory}.`) +
+          (ignored > 0 ? ` The gateway listed ${ignored} more deliverable${ignored === 1 ? "" : "s"} this CLI cannot ` +
+            "read (ignoredDeliverables), so the order may hold more: upgrade to the @daski/pay version the gateway pins " +
+            "(daski doctor --json shows it) and run this command again." : "")) +
         (empty.length > 0 ? ` Check emptyFields on ${empty.join(", ")}: the provider answered those fields with null, ` +
           "which can mean it no longer delivers them; otherActions names what it offers instead." : ""),
       note: NOTE,
