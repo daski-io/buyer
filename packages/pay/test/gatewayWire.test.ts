@@ -23,8 +23,9 @@ import type { CliError } from "../src/cli/errors.js";
 import {
   artifactDeliveryState, GatewayClient, gatewayRefusalRemediation, isRetryableGatewayCode, type McpToolResult,
 } from "../src/gateway/client.js";
-import { lifecycleFailure } from "../src/gateway/lifecycle.js";
+import { callAssetAction, lifecycleFailure } from "../src/gateway/lifecycle.js";
 import { isAmbiguousPurchaseAnswer, purchaseFailure } from "../src/gateway/purchase.js";
+import { ACCOUNT, PROFILE, fakeContext, fakeGateway } from "./walletFakes.js";
 
 type Json = Record<string, unknown>;
 
@@ -278,4 +279,28 @@ test("standard-rail-error: a paid submission refused before any settlement is de
   assert.match(capacityFailure.remediation, /nothing was claimed or settled\. Run the same command again later\./);
   assert.equal(capacityFailure.details.retryable, undefined, "capacity frees only as open orders complete");
   assert.equal(isRetryableGatewayCode("OUTCOME_CAPACITY_EXHAUSTED"), false);
+});
+
+test("order-artifact-deliverables: the artifact comes first, and each owner action is exactly a signed asset action's arguments", async () => {
+  const answer = fixture<{ result: Json; deliverables: Json[] }>("order-artifact-deliverables.json");
+  assert.deepEqual(answer.deliverables[0], { kind: "artifact" });
+  const actions = answer.deliverables.slice(1);
+  assert.ok(actions.length > 0);
+  for (const item of actions) {
+    assert.deepEqual(Object.keys(item).sort(),
+      ["actionId", "assetType", "input", "kind", "label", "providerAgentId", "providerAssetId"]);
+    assert.equal(item.kind, "owner-action");
+    assert.ok(item.label === null || typeof item.label === "string");
+    const call = { providerAgentId: String(item.providerAgentId), actionId: String(item.actionId),
+      providerAssetId: String(item.providerAssetId), input: item.input as Json };
+    const { client, calls } = fakeGateway({ answers: { daski_use_asset: () => ({ status: "completed" }) } });
+    const body = await callAssetAction({ client: client as never, signer: fakeContext(client).signer, payer: ACCOUNT.address,
+      ...call, chainId: PROFILE.chainId, gatewayUrl: PROFILE.gatewayUrl });
+    assert.equal(body.status, "completed");
+    // The challenge and the signed retry carry the deliverable's own call, unchanged.
+    assert.deepEqual(calls[0]!.args, { payer: ACCOUNT.address, ...call });
+    assert.deepEqual(calls.map(({ tool }) => tool), ["daski_use_asset", "daski_use_asset"]);
+  }
+  // The raw task keeps the provider's own part; a client reads deliverables, never the part.
+  assert.match(JSON.stringify(answer.result), /https:\/\/daski\.io\/deliverables\/v1/);
 });
