@@ -3,7 +3,17 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
-## 0.5.16 — unreleased
+## 0.5.17 — unreleased
+
+### @daski/pay
+
+- No change to the CLI. Its offline wire tests now also pass against an older gateway's fixtures, which the release engine runs them with for the gateway a rollback returns to. When that gateway publishes no `deliveryState` entries in `standard-rail-error.json` or no `order-artifact-deliverables.json`, the two tests check that the CLI reads the older answer (the refusal's message; an artifact read without deliverables) instead of failing on the missing fixture. 0.5.16, published under npm's `next` tag on 2026-11-26, failed that check against the testnet's serving gateway, so no gateway pins it.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no change.
+
+## 0.5.16 — npm `next` only (2026-11-26), superseded by 0.5.17
 
 ### @daski/pay
 

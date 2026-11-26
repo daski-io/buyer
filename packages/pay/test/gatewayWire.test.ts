@@ -23,6 +23,7 @@ import type { CliError } from "../src/cli/errors.js";
 import {
   artifactDeliveryState, GatewayClient, gatewayRefusalRemediation, isRetryableGatewayCode, type McpToolResult,
 } from "../src/gateway/client.js";
+import { readDeliverables } from "../src/gateway/deliverables.js";
 import { callAssetAction, lifecycleFailure } from "../src/gateway/lifecycle.js";
 import { isAmbiguousPurchaseAnswer, purchaseFailure } from "../src/gateway/purchase.js";
 import { ACCOUNT, PROFILE, fakeContext, fakeGateway } from "./walletFakes.js";
@@ -54,6 +55,14 @@ function fixture<T = Json>(name: string): T {
   return JSON.parse(readFileSync(join(fixtureDirectory(), name), "utf8")) as T;
 }
 
+// The release engine also runs these tests against the fixtures of the gateway
+// that serves now (DASKI_GATEWAY_WIRE_FIXTURES), which a rollback can return
+// to. An older gateway lacks the newer entries; their tests then check that
+// this CLI reads what that gateway sends instead.
+function gatewayPublishes(name: string): boolean {
+  return existsSync(join(fixtureDirectory(), name));
+}
+
 const mcpResult = fixture<{
   success: McpToolResult;
   error: McpToolResult;
@@ -66,8 +75,9 @@ const railErrors = fixture<{
   walletAuthorizationInvalid: { error: Json };
   authorizationWindow: { error: Json };
   artifactNotAvailable: { error: Json };
-  artifactStillBeingDelivered: { error: Json };
-  artifactAwaitingInput: { error: Json };
+  // Since the gateway's deliveryState; an older gateway has neither.
+  artifactStillBeingDelivered?: { error: Json };
+  artifactAwaitingInput?: { error: Json };
   orderActionUnsupported: { error: Json };
   orderActionConflict: { error: Json };
   providerLifecycleUnavailable: { error: Json };
@@ -187,6 +197,15 @@ test("standard-rail-error: ARTIFACT_NOT_AVAILABLE is read by its deliveryState, 
     return { isError: true, content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload };
   };
   const ended = railErrors.artifactNotAvailable.error;
+  if (!railErrors.artifactStillBeingDelivered || !railErrors.artifactAwaitingInput) {
+    // A gateway from before the field sends none: its message is read.
+    assert.equal(ended.deliveryState, undefined, "an older gateway's refusal carries no deliveryState");
+    assert.equal(artifactDeliveryState("ARTIFACT_NOT_AVAILABLE", ended), "not_delivering");
+    const failure = lifecycleFailure("daski_get_order_artifact", relayed(ended), "ord_7") as CliError;
+    assert.match(failure.remediation, /neither completed nor completed after recovery.*daski order status ord_7 --json/s);
+    assert.equal(failure.details.retryable, undefined);
+    return;
+  }
   const delivering = railErrors.artifactStillBeingDelivered.error;
   const awaiting = railErrors.artifactAwaitingInput.error;
   assert.deepEqual([ended, delivering, awaiting].map((error) => [error.code, error.deliveryState]), [
@@ -282,6 +301,12 @@ test("standard-rail-error: a paid submission refused before any settlement is de
 });
 
 test("order-artifact-deliverables: the artifact comes first, and each owner action is exactly a signed asset action's arguments", async () => {
+  if (!gatewayPublishes("order-artifact-deliverables.json")) {
+    // A gateway from before deliverables lists none on its artifact read: the
+    // order delivers its artifact alone, and the CLI says nothing was listed.
+    assert.deepEqual(readDeliverables({ result: {} }, "8327"), { items: [{ kind: "artifact" }], listed: false, ignored: 0 });
+    return;
+  }
   const answer = fixture<{ result: Json; deliverables: Json[] }>("order-artifact-deliverables.json");
   assert.deepEqual(answer.deliverables[0], { kind: "artifact" });
   const actions = answer.deliverables.slice(1);
