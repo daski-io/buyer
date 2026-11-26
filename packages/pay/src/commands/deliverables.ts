@@ -462,7 +462,9 @@ export async function orderDeliverables(
             "read (ignoredDeliverables), so the order may hold more: upgrade to the @daski/pay version the gateway pins " +
             "(daski doctor --json shows it) and run this command again." : "")) +
         (empty.length > 0 ? ` Check emptyFields on ${empty.join(", ")}: the provider answered those fields with null, ` +
-          "which can mean it no longer delivers them; otherActions names what it offers instead." : ""),
+          "which can mean it no longer delivers them. otherActions names what it offers instead: first run a " +
+          "non-destructive one that reads the asset's status, which may say why; then, if it offers one, an action " +
+          "that issues a new secret, which is only staged and runs once the user approves." : ""),
       note: NOTE,
     };
   }, contextFactory);
