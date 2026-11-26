@@ -282,6 +282,11 @@ export interface WalletActionExpectations {
   request: Record<string, unknown>;
   /** True only for provider-scoped asset actions. */
   requireProviderBinding: boolean;
+  /**
+   * For a provider-scoped asset action: the provider the caller named. A
+   * bound challenge must bind exactly this provider.
+   */
+  providerAgentId?: string;
   nowSeconds?: number;
 }
 
@@ -393,6 +398,20 @@ export function validateWalletActionChallenge(
         expected: "a provider-bound wallet challenge",
         actual: "provider slots are zeroed",
         remediation: `See ${DOC}`,
+      });
+    }
+    if (
+      expectations.providerAgentId !== undefined &&
+      String(message.providerAgentId) !== expectations.providerAgentId
+    ) {
+      refuse({
+        check: "lifecycle-binding",
+        code: "DASKI_WALLET_PROVIDER_MISMATCH",
+        expected: `provider ${expectations.providerAgentId}`,
+        actual: `provider ${String(message.providerAgentId)}`,
+        remediation:
+          "The challenge would authorize an action at a provider we did not name. " +
+          `Do not sign it; see ${DOC}`,
       });
     }
   } else if (

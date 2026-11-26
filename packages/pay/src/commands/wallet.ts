@@ -92,16 +92,7 @@ export async function createWallet(options: WalletOptions): Promise<Record<strin
   }
 
   if (!options.yesHumanApproved) {
-    if (!isInteractive()) {
-      throw new CliError({
-        code: "DASKI_KEY_CREATION_NEEDS_HUMAN",
-        message:
-          "Wallet setup needs authorization; this session has no interactive terminal.",
-        remediation:
-          "Ask the user to create the wallet interactively, or use " +
-          "`daski wallet create --yes-human-approved` after they authorize wallet setup.",
-      });
-    }
+    if (!isInteractive()) throw keyCreationNeedsHuman(host, backend, profileName);
     const approved = await confirmPhrase(
       `This creates a new signing key for the "${profileName}" profile ` +
       `(${loaded.profile.network}).\n` +
@@ -135,6 +126,41 @@ export async function createWallet(options: WalletOptions): Promise<Record<strin
     hostClass: host.hostClass,
     keyMaterial: "never printed, never logged, never sent to the gateway",
   };
+}
+
+/**
+ * Wallet creation without a terminal: it still needs the user's
+ * authorization, and the error names the exact route this CLI supports once
+ * it is given, for the backend this host would use. Whether the machine is
+ * the user's own durable one is the user's statement, so the command never
+ * declares it: an undeclared host is told what the user must confirm.
+ */
+export function keyCreationNeedsHuman(host: HostEnvironment, backend: string, profile: string): CliError {
+  const env: Record<string, string> = {};
+  if (backend === "file") {
+    env.DASKI_KEY_BACKEND = "file";
+    if (!host.passphraseFile) env.DASKI_KEYSTORE_PASSPHRASE_FILE = "<path to a mode-600 file holding a passphrase of at least 8 characters>";
+  }
+  const prefix = Object.entries(env).map(([name, value]) => `${name}=${value.startsWith("<") ? "<path>" : value} `).join("");
+  const command = `${prefix}daski wallet create --yes-human-approved --profile ${profile} --json`;
+  const durable = host.hostClass === "durable"
+    ? ""
+    : " The host must be the user's own durable machine: only the user can say so, and then it is declared with " +
+      "DASKI_HOST_CLASS=durable. An agent-managed, shared or resettable host is DASKI_HOST_CLASS=ephemeral and keeps no local key.";
+  return new CliError({
+    code: "DASKI_KEY_CREATION_NEEDS_HUMAN",
+    message: "Creating a local wallet needs the user's authorization, and this session has no terminal to ask in.",
+    remediation:
+      "Ask the user first. A local key belongs only on the user's own durable machine, and only when they ask for one." +
+      durable +
+      ` Once they authorize wallet setup, run it without a terminal: ${command}` +
+      (env.DASKI_KEYSTORE_PASSPHRASE_FILE
+        ? " where <path> is a file only its owner can read (chmod 600) holding a passphrase of at least 8 characters."
+        : ".") +
+      " Otherwise use the Circle agent wallet (--signer circle-agent), the default, which keeps no local key. " +
+      `See ${DOC}`,
+    details: { nonInteractive: { env, command, hostClass: host.hostClass === "durable" ? "durable" : "declared by the user: durable" } },
+  });
 }
 
 async function activeSigner(options: WalletOptions) {

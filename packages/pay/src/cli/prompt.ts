@@ -51,8 +51,9 @@ export async function readPassphrase(prompt: string): Promise<string> {
       code: "DASKI_PASSPHRASE_REQUIRES_TTY",
       message: "A passphrase is required, but this session has no terminal.",
       remediation:
-        "Run the command from an interactive terminal, or configure an OS " +
-        "keychain so no passphrase is needed.",
+        "Run the command from an interactive terminal. Without one, set DASKI_KEYSTORE_PASSPHRASE_FILE=<path> " +
+        "to a file only its owner can read (chmod 600) holding the passphrase, or use the OS keychain " +
+        "(DASKI_KEY_BACKEND=keychain, macOS and Windows) so no passphrase is needed.",
     });
   }
   process.stderr.write(prompt);

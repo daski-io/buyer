@@ -5,6 +5,7 @@
  * an error rather than something silently ignored, so a typo in
  * `--max-per-order` can never be mistaken for a cap that was applied.
  */
+import { readFileSync } from "node:fs";
 import { CliError } from "./errors.js";
 
 export interface ParsedArgs {
@@ -87,4 +88,39 @@ export function assertKnownFlags(
         "An ignored flag could look like an applied spend cap, so unknown flags are refused.",
     });
   }
+}
+
+/**
+ * `--input '<json>'` or `--input-file <file.json>`: one JSON object, or
+ * undefined when neither is given.
+ */
+export function inputFlag(flags: Record<string, string | boolean>): Record<string, unknown> | undefined {
+  const inline = stringFlag(flags, "input");
+  const file = stringFlag(flags, "input-file");
+  if (inline !== undefined && file !== undefined) {
+    throw new CliError({ code: "DASKI_INPUT_INVALID", message: "Pass --input or --input-file, not both.",
+      remediation: "Keep one of them." });
+  }
+  if (inline === undefined && file === undefined) return undefined;
+  let text = inline;
+  if (file !== undefined) {
+    try {
+      text = readFileSync(file, "utf8");
+    } catch (error) {
+      throw new CliError({ code: "DASKI_INPUT_INVALID", message: `Could not read ${file}: ${(error as Error).message}`,
+        remediation: "Pass --input-file with a path to a JSON object." });
+    }
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text!);
+  } catch (error) {
+    throw new CliError({ code: "DASKI_INPUT_INVALID", message: `The input is not JSON: ${(error as Error).message}`,
+      remediation: `Pass one JSON object, quoted for the shell, e.g. --input '{"keyId":"inf_..."}'.` });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new CliError({ code: "DASKI_INPUT_INVALID", message: "The input must be a JSON object.",
+      remediation: `Pass one JSON object, e.g. --input '{"keyId":"inf_..."}'.` });
+  }
+  return parsed as Record<string, unknown>;
 }

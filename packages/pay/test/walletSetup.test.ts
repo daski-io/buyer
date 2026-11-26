@@ -10,7 +10,8 @@ import { test } from "node:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWallet, walletAddress } from "../src/commands/wallet.js";
+import { createWallet, keyCreationNeedsHuman, walletAddress } from "../src/commands/wallet.js";
+import { passphraseNeedsFile } from "../src/store/keystore.js";
 import { runBuy } from "../src/commands/buy.js";
 import { CliError } from "../src/cli/errors.js";
 import {
@@ -61,6 +62,49 @@ test("missing-wallet setup names the authorized command, while an existing signe
   });
 });
 
+test("without a terminal, wallet setup names the exact non-interactive route for this host's backend", async () => {
+  await withHome(async (home) => {
+    await assert.rejects(createWallet({ host: host() }), (error: unknown) => {
+      assert.ok(code("DASKI_KEY_CREATION_NEEDS_HUMAN")(error));
+      const failure = error as CliError;
+      const route = "DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> " +
+        "daski wallet create --yes-human-approved --profile sandbox --json";
+      assert.ok(failure.remediation.includes(route), failure.remediation);
+      assert.match(failure.remediation, /^Ask the user first\./, "authorization still comes first");
+      assert.match(failure.remediation, /chmod 600/);
+      assert.match(failure.remediation, /--signer circle-agent/);
+      // The command never declares the host durable for the user; an undeclared host is told the user must.
+      assert.ok(!failure.remediation.includes("DASKI_HOST_CLASS=durable DASKI_KEY"));
+      assert.match(failure.remediation, /only the user can say so, and then it is declared with DASKI_HOST_CLASS=durable/);
+      assert.deepEqual(Object.keys((failure.details.nonInteractive as { env: object }).env),
+        ["DASKI_KEY_BACKEND", "DASKI_KEYSTORE_PASSPHRASE_FILE"]);
+      return true;
+    });
+    // A passphrase file already set, and the OS keychain, need no passphrase variable.
+    await assert.rejects(createWallet({ host: host({ passphraseFile: passphraseFile(home) }) }), (error: unknown) =>
+      code("DASKI_KEY_CREATION_NEEDS_HUMAN")(error) && (error as CliError).remediation.includes(
+        "run it without a terminal: DASKI_KEY_BACKEND=file daski wallet create --yes-human-approved --profile sandbox --json."));
+    // The keychain is not opened here: the route is built from the backend this host would use.
+    const keychain = keyCreationNeedsHuman(host({ platform: "darwin", declaredBackend: undefined }), "keychain", "sandbox");
+    assert.ok(keychain.remediation.includes("run it without a terminal: daski wallet create --yes-human-approved --profile sandbox --json."));
+    assert.ok(keyCreationNeedsHuman(host(), "file", "work").remediation.includes("--yes-human-approved --profile work --json"));
+    // A host the user already declared durable is not asked about again.
+    assert.ok(!keyCreationNeedsHuman(host({ hostClass: "durable" }), "file", "sandbox").remediation.includes("only the user can say so"));
+    assert.equal(existsSync(join(home, "keystore.json")), false);
+  });
+});
+
+test("an existing keystore without a terminal names the passphrase file for the passphrase it was created with", async () => {
+  await withHome(async (home) => {
+    await createWallet({ host: host({ passphraseFile: passphraseFile(home) }), yesHumanApproved: true });
+    await assert.rejects(walletAddress({ host: host() }), (error: unknown) => code("DASKI_PASSPHRASE_REQUIRES_TTY")(error) &&
+      (error as CliError).remediation.includes("put the passphrase chosen when the key was created in a file only its owner can read " +
+        "(chmod 600 <path>), set DASKI_KEYSTORE_PASSPHRASE_FILE=<path>, and run the same command again."));
+  });
+  assert.deepEqual(passphraseNeedsFile("unlock").details.nonInteractive,
+    { env: { DASKI_KEYSTORE_PASSPHRASE_FILE: "<path to a mode-600 file holding the passphrase>" } });
+});
+
 test("the host facts come from the environment and refuse unknown values", () => {
   assert.equal(resolveHost({}, "linux").hostClass, "undeclared");
   assert.equal(resolveHost({ DASKI_HOST_CLASS: "ephemeral" }, "linux").hostClass, "ephemeral");
@@ -92,7 +136,9 @@ test("wallet create is refused for a non-local signer, on an ephemeral host, wit
     // With neither a terminal nor a passphrase file the file backend refuses before writing anything.
     await assert.rejects(createWallet({ host: host(), yesHumanApproved: true }),
       (error: unknown) => code("DASKI_PASSPHRASE_REQUIRES_TTY")(error) &&
-        /DASKI_KEYSTORE_PASSPHRASE_FILE/.test((error as CliError).remediation));
+        (error as CliError).remediation.includes("a new passphrase of at least 8 characters in a file only its owner can read " +
+          "(chmod 600 <path>), set DASKI_KEYSTORE_PASSPHRASE_FILE=<path>") &&
+        (error as CliError).remediation.includes("DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --json"));
     assert.equal(existsSync(join(home, "keystore.json")), false);
   });
 });

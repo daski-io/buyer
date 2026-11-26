@@ -390,6 +390,27 @@ export function readPassphraseFile(path: string, platform: NodeJS.Platform): str
   return passphrase;
 }
 
+/**
+ * No terminal and no passphrase file: name the one non-interactive route,
+ * exactly, so an agent without a terminal does not have to search for it.
+ */
+export function passphraseNeedsFile(purpose: "create" | "unlock"): CliError {
+  const passphrase = purpose === "create"
+    ? `a new passphrase of at least ${MIN_PASSPHRASE_LENGTH} characters`
+    : "the passphrase chosen when the key was created";
+  return new CliError({
+    code: "DASKI_PASSPHRASE_REQUIRES_TTY",
+    message: "The encrypted keystore needs a passphrase, and this session has no terminal to type it in.",
+    remediation:
+      `Without a terminal, put ${passphrase} in a file only its owner can read (chmod 600 <path>), set ` +
+      "DASKI_KEYSTORE_PASSPHRASE_FILE=<path>, and run the same command again" +
+      (purpose === "create" ? ", e.g. DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --json" : "") +
+      ". The passphrase is never taken from a flag or an environment value. Or run the command from an " +
+      `interactive terminal. See ${DOC}`,
+    details: { nonInteractive: { env: { DASKI_KEYSTORE_PASSPHRASE_FILE: "<path to a mode-600 file holding the passphrase>" } } },
+  });
+}
+
 function passphraseTooShort(): CliError {
   return new CliError({
     code: "DASKI_PASSPHRASE_TOO_SHORT",
@@ -412,16 +433,7 @@ export async function keystorePassphrase(
     if (purpose === "create" && passphrase.length < MIN_PASSPHRASE_LENGTH) throw passphraseTooShort();
     return passphrase;
   }
-  if (!isInteractive()) {
-    throw new CliError({
-      code: "DASKI_PASSPHRASE_REQUIRES_TTY",
-      message: "The encrypted keystore needs a passphrase, and this session has no terminal.",
-      remediation:
-        "Run the command from an interactive terminal, or set DASKI_KEYSTORE_PASSPHRASE_FILE " +
-        "to a regular file (mode 600) containing the passphrase. The passphrase is never " +
-        `taken from a flag. See ${DOC}`,
-    });
-  }
+  if (!isInteractive()) throw passphraseNeedsFile(purpose);
   if (purpose === "unlock") return readPassphrase(`Passphrase for the ${profile} keystore: `);
   const passphrase = await readPassphrase(`Choose a passphrase for ${keystorePath()}: `);
   if (passphrase.length < MIN_PASSPHRASE_LENGTH) throw passphraseTooShort();

@@ -6,7 +6,7 @@
  * and a remediation. Nothing here signs anything: the commands do, and only
  * through the §4 validator.
  */
-import { assertKnownFlags, boolFlag, parseArgs, requireFlag, stringFlag } from "../cli/args.js";
+import { assertKnownFlags, boolFlag, inputFlag, parseArgs, requireFlag, stringFlag } from "../cli/args.js";
 import { CliError } from "../cli/errors.js";
 import { emit, emitError } from "../cli/output.js";
 import { runBuy } from "../commands/buy.js";
@@ -15,6 +15,8 @@ import {
   orderArtifact, orderCancel, orderConfirm, orderImport, orderInput, orderStatus, orderSupport,
   orderReconcile,
 } from "../commands/order.js";
+import { assetAction, assetList } from "../commands/asset.js";
+import { runFreeSkill } from "../commands/freeSkill.js";
 import { runSignPayment } from "../commands/signPayment.js";
 import { createWallet, walletAddress, walletBalance } from "../commands/wallet.js";
 import { CLI_VERSION } from "../version.js";
@@ -30,6 +32,9 @@ const USAGE = `daski ${CLI_VERSION} — the Daski buyer bridge
 
   The server proposes; this bridge validates against its own expectations and
   recomputes; your wallet signs; the gateway never sees your key.
+
+  @daski/pay is a command-line tool, not a library: run these commands and
+  read their --json output. It has no API to import from a script.
 
 Commands
   doctor                              Readiness report, with a remediation per issue
@@ -62,6 +67,21 @@ Commands
   order cancel <handle>               Request cancellation
   order reconcile <handle|intentId>   Ask the gateway whether a payment settled; never re-signs
   order import                        Rehydrate the local order store from the gateway's history
+  asset list [--provider <id>] [--cursor <cursor>]
+                                      The assets this payer owns at its providers
+  asset action --order <handle> --action <actionId> [--input '<json>' | --input-file <file.json>] [--output <file>]
+                                      Run an owner action on the asset an order created,
+                                      e.g. get an inference key once the order is FULFILLED
+  asset action --provider <id> --asset <providerAssetId|identifier> --action <actionId>
+               [--input '<json>' | --input-file <file.json>] [--output <file>]
+                                      Run an owner action on an asset (daski_use_asset): the CLI
+                                      signs the gateway's challenge itself, with any signer; the
+                                      result goes to a mode-600 file under ~/.daski/results (or
+                                      --output), never to stdout
+  free-skill --provider <id> --skill <skillId> [--service <slug>] [--input '<json>' | --input-file <file.json>]
+             [--output <file>] [--wait <seconds>]
+                                      Call a provider's public free skill, such as get-pricing;
+                                      no wallet, nothing is paid or ordered
   sign-payment --challenge <file.json> [--provider <id> --outcome <id>]
                                       Validate, recompute, sign; print the paymentPayload
 
@@ -77,7 +97,8 @@ Global flags
   --session-cap <usdc>                Apply a temporary total budget
 
 Environment: DASKI_HOST_CLASS (durable|ephemeral), DASKI_KEY_BACKEND
-(keychain|file|circle-agent|cdp|none), DASKI_KEYSTORE_PASSPHRASE_FILE.
+(keychain|file|circle-agent|cdp|none), DASKI_KEYSTORE_PASSPHRASE_FILE (a mode-600
+file holding the keystore passphrase, for sessions without a terminal).
 New profiles use quote approval, with optional budgets. Doctor reports the
 active configuration path. See https://github.com/daski-io/buyer#readme
 `;
@@ -219,6 +240,36 @@ async function main(argv: string[]): Promise<number> {
           throw unknownSubcommand("order", command[1],
             ["status", "artifact", "confirm", "revoke-confirmation", "input", "support", "cancel", "reconcile", "import"]);
       }
+    }
+
+    case "asset": {
+      if (command[1] === "list") {
+        assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "cursor"]);
+        emit(await assetList({ ...shared, json, providerAgentId: stringFlag(flags, "provider"),
+          cursor: stringFlag(flags, "cursor") }), output);
+        return 0;
+      }
+      if (command[1] === "action") {
+        assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "asset", "order", "action", "input", "input-file", "output"]);
+        emit(await assetAction({ ...shared, json, actionId: requireFlag(flags, "action"),
+          providerAgentId: stringFlag(flags, "provider"), asset: stringFlag(flags, "asset"), order: stringFlag(flags, "order"),
+          input: inputFlag(flags), output: stringFlag(flags, "output") }), output);
+        return 0;
+      }
+      throw unknownSubcommand("asset", command[1], ["list", "action"]);
+    }
+
+    case "free-skill": {
+      assertKnownFlags(flags, ["json", "profile", "provider", "skill", "service", "input", "input-file", "output", "wait"]);
+      const wait = stringFlag(flags, "wait");
+      if (wait !== undefined && !/^\d{1,3}$/.test(wait)) {
+        throw new CliError({ code: "DASKI_FLAG_INVALID", message: "--wait takes whole seconds, 0 to 999.",
+          remediation: "Pass e.g. --wait 30." });
+      }
+      emit(await runFreeSkill({ profile: shared.profile, json, providerAgentId: requireFlag(flags, "provider"),
+        skillId: requireFlag(flags, "skill"), service: stringFlag(flags, "service"), input: inputFlag(flags),
+        output: stringFlag(flags, "output"), waitSeconds: wait === undefined ? undefined : Number(wait) }), output);
+      return 0;
     }
 
     case "sign-payment": {
