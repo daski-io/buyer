@@ -350,9 +350,10 @@ export async function orderDeliverables(
           message: `The provider ran ${item.actionId} and it failed (${String(done.errorClass)}).`,
           remediation: temporary
             ? `The provider says the failure is temporary. Run the same command again in a minute: ${again}`
-            : "The provider will not deliver it this way now. otherActions lists what it offers on this asset, such " +
-              "as an action that issues a new secret; run one with daski asset action. A destructive one is only " +
-              "staged, and needs the user's approval.",
+            : "The provider will not deliver it this way now. otherActions lists what it offers on this asset: first " +
+              "run a non-destructive one that reads the asset's status, which may say why (still being created, " +
+              "retired); then, if it offers one, an action that issues a new secret. Run them with daski asset action " +
+              "and save their results to files. A destructive one is only staged, and runs once the user approves.",
         } : {
           code: "DASKI_DELIVERABLE_NOT_DELIVERED",
           message: `The provider answered ${item.actionId} with status ${String(done.status)}, not a result. Nothing changed.`,
@@ -461,7 +462,9 @@ export async function orderDeliverables(
             "read (ignoredDeliverables), so the order may hold more: upgrade to the @daski/pay version the gateway pins " +
             "(daski doctor --json shows it) and run this command again." : "")) +
         (empty.length > 0 ? ` Check emptyFields on ${empty.join(", ")}: the provider answered those fields with null, ` +
-          "which can mean it no longer delivers them; otherActions names what it offers instead." : ""),
+          "which can mean it no longer delivers them. otherActions names what it offers instead: first run a " +
+          "non-destructive one that reads the asset's status, which may say why; then, if it offers one, an action " +
+          "that issues a new secret, which is only staged and runs once the user approves." : ""),
       note: NOTE,
     };
   }, contextFactory);
