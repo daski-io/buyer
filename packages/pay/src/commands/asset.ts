@@ -22,13 +22,14 @@
  * names are printed.
  */
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { getAddress } from "viem";
 import { CliError } from "../cli/errors.js";
 import { createContext, type CommandContext, type ContextOptions } from "../context.js";
+import { daskiHome } from "../paths.js";
 import { gatewayUnsupported } from "../gateway/client.js";
-import { ASSET_ACTION_TOOL, assetActionFailure, callAssetAction, callWalletQuery } from "../gateway/lifecycle.js";
+import { ASSET_ACTION_TOOL, assetActionFailure, callAssetAction, callWalletQuery, walletSigningFailure } from "../gateway/lifecycle.js";
 import { decodeOrderResult, orderComplete, resultStrings } from "../gateway/resultStep.js";
 import { readWithCapability, withOrder, type OrderContextFactory } from "./order.js";
 
@@ -124,6 +125,7 @@ export async function listAssetsPage(
     gatewayUrl: context.profile.gatewayUrl,
     failure: (result) => assetActionFailure(result,
       { providerAgentId: providerAgentId ?? "<id>", actionId: "list-assets", gatewayUrl: context.profile.gatewayUrl }, LIST_TOOL),
+    signingFailure: (error) => walletSigningFailure(error, context.signer, context.payerAddress, "the asset list"),
   });
   if (!Array.isArray(body.providers)) {
     throw new CliError({
@@ -164,13 +166,14 @@ export async function assetList(
   try {
     await requireTool(context, LIST_TOOL);
     const page = await listAssetsPage(context, options.providerAgentId ?? null, options.cursor ?? null);
-    const more = page.providers.find((provider) => provider.nextCursor !== null);
+    const more = page.providers.filter((provider) => provider.nextCursor !== null)
+      .map((provider) => `daski asset list --provider ${provider.providerAgentId} --cursor ${provider.nextCursor} --json`);
     return {
       profile: context.profileName,
       payer: context.payerAddress,
       providers: page.providers,
       ...(page.warning ? { warning: page.warning } : {}),
-      ...(more ? { next: `More assets remain. Continue with: daski asset list --provider ${more.providerAgentId} --cursor ${more.nextCursor} --json` } : {}),
+      ...(more.length ? { next: `More assets remain. Continue with: ${more.join("; ")}` } : {}),
       note: "Run an owner action on one of these with: daski asset action --provider <id> --asset <providerAssetId> --action <actionId> --json",
     };
   } finally {
@@ -198,10 +201,18 @@ async function findAssets(
       });
     }
     found.push(...provider.assets.filter(match));
-    if (provider.nextCursor === null) break;
+    if (provider.nextCursor === null) return found;
     cursor = provider.nextCursor;
   }
-  return found;
+  if (found.length > 0) return found;
+  throw new CliError({
+    code: "DASKI_ASSET_LIST_TOO_LONG",
+    message: `This payer owns more than ${MAX_LOOKUP_PAGES * 100} assets at provider ${providerAgentId}; the first ` +
+      `${MAX_LOOKUP_PAGES * 100} do not include the one wanted.`,
+    remediation: `Find its providerAssetId with daski asset list --provider ${providerAgentId} --cursor ${cursor} --json ` +
+      "(and further pages), then pass it with --asset.",
+    details: { resumeCursor: cursor },
+  });
 }
 
 /** `--asset <identifier>`: the one asset at this provider with that identifier. */
@@ -258,7 +269,7 @@ async function assetForOrder(
 
 /** Gateway states of a paid order still on its way to its result. */
 const DELIVERING = new Set(["FACILITATOR_CONFIRMED", "DEPOSIT_FINAL", "RELEASE_FINAL", "DISPATCH_STARTED",
-  "DISPATCH_AMBIGUOUS", "DISPATCHED", "LEGAL_HOLD"]);
+  "DISPATCH_AMBIGUOUS", "DISPATCHED"]);
 
 /**
  * An order without its result yet. A paid order still being delivered is not
@@ -366,7 +377,7 @@ async function run(
   handle?: string,
 ): Promise<Record<string, unknown>> {
   // A secret may be delivered once: make sure it has somewhere to go first.
-  assertWritable(options.output);
+  const outputDir = prepareOutput(options.output);
   const body = await callAssetAction({
     client: context.client,
     signer: context.signer,
@@ -394,7 +405,8 @@ async function run(
     providerAssetId: asset.providerAssetId,
     ...("identifier" in asset ? { asset: { identifier: asset.identifier, type: asset.type, serviceSlug: asset.serviceSlug } } : {}),
     ...(handle ? { orderHandle: handle } : {}),
-    input,
+    // Field names only: an input can hold a value the user would not want printed.
+    inputFields: Object.keys(input),
     status: body.status,
     actionExecutionId: body.actionExecutionId,
   };
@@ -431,10 +443,13 @@ async function run(
   if (body.status !== "completed") return { ...common, gateway: envelope };
 
   const result = decodeOrderResult(body);
-  const path = resolve(options.output ??
-    `./${options.actionId}-${String(body.actionExecutionId ?? randomBytes(6).toString("hex")).replace(/^0x/, "").slice(0, 12)}.json`);
+  // The default name uses the execution id only in the shape the gateway signs, never as a path.
+  const execution = typeof body.actionExecutionId === "string" && /^0x[0-9a-f]{64}$/.test(body.actionExecutionId)
+    ? body.actionExecutionId.slice(2, 14) : randomBytes(6).toString("hex");
+  const path = options.output !== undefined ? resolve(options.output) : join(outputDir, `${options.actionId}-${execution}.json`);
   const bytes = Buffer.from(`${JSON.stringify(result ?? null, null, 2)}\n`, "utf8");
-  writePrivateFile(path, bytes);
+  writePrivateFile(path, bytes, "The action already ran. If its result can be delivered again, run the same command " +
+    "with a writable --output; a key delivered once may need the provider's rotate action.");
   return {
     ...common,
     resultWrittenTo: path,
@@ -446,31 +461,43 @@ async function run(
   };
 }
 
-/** Refuses, before anything runs, an output the result could not be written to. */
-function assertWritable(output: string | undefined): void {
-  const path = resolve(output ?? "./result.json");
+/** Where results go by default: a private folder in the CLI's own state directory, never a working tree. */
+export function resultsDirectory(): string {
+  return join(daskiHome(), "results");
+}
+
+/**
+ * Refuses, before anything runs, an output the result could not be written
+ * to, and returns the folder a default-named result goes in (created
+ * owner-only).
+ */
+function prepareOutput(output: string | undefined): string {
+  const directory = output === undefined ? resultsDirectory() : dirname(resolve(output));
   try {
     if (output !== undefined) {
       let isDirectory = false;
-      try { isDirectory = statSync(path).isDirectory(); } catch { /* a new file */ }
+      try { isDirectory = statSync(resolve(output)).isDirectory(); } catch { /* a new file */ }
       if (isDirectory) throw new Error("it is a directory");
+    } else {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      chmodSync(directory, 0o700);
     }
-    accessSync(dirname(path), constants.W_OK);
+    accessSync(directory, constants.W_OK);
   } catch (error) {
     throw new CliError({
       code: "DASKI_OUTPUT_UNWRITABLE",
-      message: `The result could not be written to ${output === undefined ? `the current directory (${dirname(path)})` : path}: ` +
-        `${(error as Error).message}`,
+      message: `The result could not be written to ${output === undefined ? directory : resolve(output)}: ${(error as Error).message}`,
       remediation: "Nothing was run. Pass --output with a file path in a writable directory.",
     });
   }
+  return directory;
 }
 
 /**
  * Writes owner-only bytes atomically: a fresh mode-600 file beside the target,
  * then a rename over it, so an existing file's wider mode never applies.
  */
-export function writePrivateFile(path: string, bytes: Buffer): void {
+export function writePrivateFile(path: string, bytes: Buffer, whenFailed: string): void {
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
   let descriptor: number | undefined;
   try {
@@ -485,7 +512,7 @@ export function writePrivateFile(path: string, bytes: Buffer): void {
     throw new CliError({
       code: "DASKI_OUTPUT_UNWRITABLE",
       message: `Could not write the result to ${path}: ${(error as Error).message}`,
-      remediation: "Pass --output with a writable file path. The action already ran: running it again repeats it.",
+      remediation: whenFailed,
     });
   }
 }

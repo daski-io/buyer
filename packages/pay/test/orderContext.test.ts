@@ -83,13 +83,24 @@ test("an artifact the order does not have yet is reported without dropping the c
     } } } as unknown as CommandContext;
     const capability = { token: "cap", expiresAt: Math.floor(Date.now() / 1000) + 600 };
     const stored = upsertOrder(record("intent", "handle", { readCapability: capability }));
-    // A paid order still being delivered is not a failure: the advice names this order and says to read it again.
+    // An order that is not completed: the advice names this order and does not claim it is still being delivered.
     await assert.rejects(readWithCapability(refusing, stored, { toolName: "daski_get_order_artifact", action: "artifact", request: {} }),
+      (error: unknown) => code("ARTIFACT_NOT_AVAILABLE")(error) &&
+        (error as CliError).remediation.includes("daski order status handle --json") &&
+        !(error as CliError).remediation.includes("nothing failed") && (error as CliError).details.retryable === undefined);
+    // A paid order the gateway says is still being delivered is not a failure: read it again.
+    const delivering = { ...refusing, client: { hasTool: async () => true, callTool: async (name: string) => {
+      calls.push(name);
+      const refusal = { code: "ARTIFACT_NOT_AVAILABLE", message: "The order is paid and still being delivered; it has no artifact yet",
+        retryable: true, next_action: "Read the order status again shortly." };
+      return { isError: true, content: [{ type: "text", text: JSON.stringify(refusal) }], structuredContent: refusal };
+    } } } as unknown as CommandContext;
+    await assert.rejects(readWithCapability(delivering, stored, { toolName: "daski_get_order_artifact", action: "artifact", request: {} }),
       (error: unknown) => code("ARTIFACT_NOT_AVAILABLE")(error) &&
         (error as CliError).remediation.includes("nothing failed") &&
         (error as CliError).remediation.includes("daski order status handle --json") &&
         !(error as CliError).remediation.includes("<handle>") && (error as CliError).details.retryable === true);
-    assert.deepEqual(calls, ["daski_get_order_artifact"], "no grant-read, so no new signature");
+    assert.deepEqual(calls, ["daski_get_order_artifact", "daski_get_order_artifact"], "no grant-read, so no new signature");
     assert.deepEqual(findByIntent("intent")?.readCapability, capability);
     await context.close();
   });

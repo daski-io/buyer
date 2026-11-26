@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalHash } from "@daski/x402-scheme";
+import { canonicalHash, walletActionTypedData } from "@daski/x402-scheme";
 import { CliError } from "../src/cli/errors.js";
 import { assetAction, assetList } from "../src/commands/asset.js";
 import { assetActionName, callAssetAction } from "../src/gateway/lifecycle.js";
@@ -166,19 +166,15 @@ test("--order acts on the asset the order created, with the input its result nam
         daski_use_asset: (args) => performed(args, keyResult),
       },
     });
-    const previous = process.cwd();
-    process.chdir(home);
-    try {
-      const printed = await assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
-        async () => fakeContext(client));
-      assert.deepEqual(printed.input, { keyId: KEY_ID }, "the input is the result field naming the asset");
-      assert.equal(printed.providerAssetId, ASSET);
-      assert.equal(printed.orderHandle, "ord_1");
-      assert.match(String(printed.resultWrittenTo), /get-inference-key-abababababab\.json$/);
-      assert.ok(!JSON.stringify(printed).includes(SECRET));
-    } finally {
-      process.chdir(previous);
-    }
+    const printed = await assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
+      async () => fakeContext(client));
+    assert.deepEqual(printed.inputFields, ["keyId"], "only the input's field names are printed");
+    assert.equal(printed.providerAssetId, ASSET);
+    assert.equal(printed.orderHandle, "ord_1");
+    // By default the result goes to a private folder in the CLI's state directory, never the working tree.
+    assert.equal(printed.resultWrittenTo, join(home, "results", "get-inference-key-abababababab.json"));
+    if (process.platform !== "win32") assert.equal(statSync(join(home, "results")).mode & 0o777, 0o700);
+    assert.ok(!JSON.stringify(printed).includes(SECRET));
     const use = calls.find((call) => call.tool === "daski_use_asset" && call.args.authorization)!;
     assert.deepEqual(use.args.input, { keyId: KEY_ID });
     assert.equal(use.args.providerAgentId, "8327");
@@ -198,9 +194,99 @@ test("--order acts on the asset the order created, with the input its result nam
     await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
       async () => fakeContext(failed.client)), (error: unknown) => code("DASKI_ORDER_NOT_FULFILLED")(error) &&
         (error as CliError).details.retryable === undefined);
+    const held = fakeGateway({ reads: { daski_get_order_status: () => ({ orderState: "LEGAL_HOLD", state: "working" }) } });
+    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
+      async () => fakeContext(held.client)), (error: unknown) => code("DASKI_ORDER_NOT_FULFILLED")(error) &&
+        !/still being delivered/.test((error as CliError).message) && (error as CliError).details.retryable === undefined,
+      "a held order waits on an operator, not on delivery");
     const working = fakeGateway({ reads: { daski_get_order_status: () => ({ orderState: "DISPATCHED", state: "working" }) } });
     await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1", providerAgentId: "1" }, undefined,
       async () => fakeContext(working.client)), code("DASKI_ORDER_PROVIDER_MISMATCH"));
+
+    // An explicit --input wins over the derived one; two assets named in the result is ambiguous.
+    const explicit = fakeGateway({
+      reads: { daski_get_order_status: () => ({ orderState: "FULFILLED", untrustedResult: isolated(orderResult) }) },
+      answers: { daski_list_assets: () => assets([inferenceAsset]), daski_use_asset: (args) => performed(args, { usage: [] }) },
+    });
+    const usage = await assetAction({ json: true, actionId: "get-inference-usage", order: "ord_1",
+      input: { keyId: KEY_ID, limit: 5 } }, undefined, async () => fakeContext(explicit.client));
+    assert.deepEqual(usage.inputFields, ["keyId", "limit"]);
+    assert.deepEqual(explicit.calls.find((call) => call.tool === "daski_use_asset" && call.args.authorization)!.args.input,
+      { keyId: KEY_ID, limit: 5 });
+    const twice = fakeGateway({
+      reads: { daski_get_order_status: () => ({ orderState: "FULFILLED", untrustedResult: isolated({ keyId: KEY_ID, assetId: ASSET }) }) },
+      answers: { daski_list_assets: () => assets([inferenceAsset,
+        { ...inferenceAsset, providerAssetId: "8d42e3f9-1111-4222-8333-944455556666".replace("8d", "9d"), identifier: ASSET }]) },
+    });
+    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", order: "ord_1" }, undefined,
+      async () => fakeContext(twice.client)), (error: unknown) => code("DASKI_ASSET_AMBIGUOUS")(error) &&
+        Array.isArray((error as CliError).details.assets));
+  });
+});
+
+test("the CLI signs the gateway's challenge itself, with any signer, and a signer that cannot sign says so", async () => {
+  await withHome(async (home) => {
+    // A challenge carrying the gateway's sign-ready proposal, which agrees with what the CLI recomputes.
+    const { client, calls } = fakeGateway({
+      challenge: { daski_use_asset: (args) => {
+        const challenge = walletChallenge({ action: "use-asset:8327:get-inference-key", resource: "/wallet/assets/action",
+          providerAgentId: "8327", request: { actionId: args.actionId, providerAssetId: args.providerAssetId, input: args.input } });
+        const typed = walletActionTypedData(challenge);
+        return { ...challenge, signRequest: { domain: challenge.domain, types: typed.types, primaryType: typed.primaryType,
+          message: challenge.message } } as never;
+      } },
+      answers: { daski_use_asset: (args) => performed(args, keyResult) },
+    });
+    // A contract-account signer, as the Circle agent wallet is.
+    const circle = fakeContext(client);
+    circle.signer.describe = () => ({ provider: "circle-agent", accountType: "contract", conformance: "verified" }) as never;
+    const printed = await assetAction({ json: true, actionId: "get-inference-key", providerAgentId: "8327", asset: ASSET,
+      input: { keyId: KEY_ID }, output: join(home, "k.json") }, async () => circle);
+    assert.equal(printed.status, "completed");
+    assert.ok(calls[1]!.args.authorization, "the retry carries the CLI's own signature");
+
+    const failing = fakeGateway({ answers: { daski_use_asset: () => { throw new Error("nothing may be sent"); } } });
+    const broken = fakeContext(failing.client);
+    broken.signer.describe = () => ({ provider: "circle-agent", accountType: "contract", conformance: "verified" }) as never;
+    broken.signer.signTypedData = async () => { throw new CliError({ code: "DASKI_CIRCLE_AGENT_LOGIN_REQUIRED",
+      message: "The Circle session expired.", remediation: "Log in with circle wallet login." }); };
+    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", providerAgentId: "8327", asset: ASSET,
+      input: { keyId: KEY_ID }, output: join(home, "k2.json") }, async () => broken), (error: unknown) => {
+      const failure = error as CliError;
+      assert.equal(failure.code, "DASKI_CIRCLE_AGENT_LOGIN_REQUIRED");
+      assert.match(failure.message, /^The circle-agent signer could not sign the wallet authorization for the asset action/);
+      assert.match(failure.remediation, /^Log in with circle wallet login\. Nothing was sent, so the asset action did not run\./);
+      assert.match(failure.remediation, /There is no separate signing step/);
+      return true;
+    });
+    assert.equal(failing.calls.filter((call) => call.args.authorization).length, 0, "nothing unsigned or half-signed was sent");
+  });
+});
+
+test("an execution id that is not the gateway's shape never becomes part of a path, and errors never carry the result", async () => {
+  await withHome(async (home) => {
+    const { client } = fakeGateway({ answers: { daski_use_asset: (args) => ({ ...performed(args, keyResult), actionExecutionId: "../../escape" }) } });
+    const printed = await assetAction({ json: true, actionId: "get-inference-key", providerAgentId: "8327", asset: ASSET,
+      input: { keyId: KEY_ID } }, async () => fakeContext(client));
+    assert.match(String(printed.resultWrittenTo), new RegExp(`^${join(home, "results")}/get-inference-key-[0-9a-f]{12}\\.json$`));
+
+    const leaking = fakeGateway({ answers: { daski_use_asset: () => mcp({ code: "SOMETHING_NEW", message: "unexpected",
+      untrustedResult: isolated(keyResult), result: keyResult }, true) } });
+    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", providerAgentId: "8327", asset: ASSET,
+      input: { keyId: KEY_ID } }, async () => fakeContext(leaking.client)), (error: unknown) => {
+      const text = JSON.stringify((error as CliError).toJSON());
+      return !text.includes(SECRET) && !text.includes(isolated(keyResult).content as string);
+    });
+  });
+});
+
+test("an identifier past the lookup's page limit is reported as such, not as missing", async () => {
+  await withHome(async () => {
+    const { client } = fakeGateway({ answers: { daski_list_assets: (args) =>
+      assets([{ ...inferenceAsset, identifier: `inf_${String(args.cursor)}` }], `page-${Math.random()}`) } });
+    await assert.rejects(assetAction({ json: true, actionId: "get-inference-key", providerAgentId: "8327", asset: "inf_far_away" },
+      async () => fakeContext(client)), (error: unknown) => code("DASKI_ASSET_LIST_TOO_LONG")(error) &&
+        /daski asset list --provider 8327 --cursor page-/.test((error as CliError).remediation));
   });
 });
 

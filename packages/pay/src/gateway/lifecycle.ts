@@ -21,6 +21,7 @@ import {
   gatewayRefusalRemediation,
   isRetryableGatewayCode,
   reviewHeldForOperator,
+  stillBeingDelivered,
   unreadableResultError,
   type McpToolResult,
 } from "./client.js";
@@ -92,6 +93,8 @@ export interface WalletQueryOptions {
   nowSeconds?: number;
   /** The refusal to raise instead of the order-centred default. */
   failure?: ((result: McpToolResult) => CliError) | undefined;
+  /** The error to raise when the signer cannot sign the challenge. */
+  signingFailure?: ((error: unknown) => CliError) | undefined;
 }
 
 /**
@@ -119,7 +122,12 @@ export async function callWalletQuery(
     requireProviderBinding: false,
     ...(options.nowSeconds === undefined ? {} : { nowSeconds: options.nowSeconds }),
   });
-  const signature = await options.signer.signTypedData(walletActionTypedData(challenge));
+  let signature: `0x${string}`;
+  try {
+    signature = await options.signer.signTypedData(walletActionTypedData(challenge));
+  } catch (error) {
+    throw options.signingFailure ? options.signingFailure(error) : error;
+  }
   const authorized = await client.callTool(toolName, {
     payer,
     ...request,
@@ -181,7 +189,12 @@ export async function callAssetAction(options: AssetActionCallOptions): Promise<
     providerAgentId,
     ...(options.nowSeconds === undefined ? {} : { nowSeconds: options.nowSeconds }),
   });
-  const signature = await options.signer.signTypedData(walletActionTypedData(challenge));
+  let signature: `0x${string}`;
+  try {
+    signature = await options.signer.signTypedData(walletActionTypedData(challenge));
+  } catch (error) {
+    throw walletSigningFailure(error, options.signer, payer, "the asset action");
+  }
   const authorized = await client.callTool(ASSET_ACTION_TOOL, {
     ...args,
     authorization: { message: challenge.message, signature },
@@ -192,6 +205,30 @@ export async function callAssetAction(options: AssetActionCallOptions): Promise<
 }
 
 export const ASSET_ACTION_TOOL = "daski_use_asset";
+
+/**
+ * The profile's signer could not sign a wallet authorization. Every signer
+ * this CLI supports signs EIP-712 typed data (a local key, the Circle agent
+ * wallet, CDP, Circle), and the CLI runs the challenge, signature and retry
+ * itself: nothing is left for the agent to sign. When signing fails anyway,
+ * say so, say nothing was sent, and name what to do.
+ */
+export function walletSigningFailure(error: unknown, signer: SignerAdapter, payer: Address, what: string): CliError {
+  let kind = "profile's";
+  try { kind = `${signer.describe().provider}`; } catch { /* not built yet */ }
+  const cause = error instanceof CliError ? error : undefined;
+  const reason = cause ? cause.message : error instanceof Error ? error.message : String(error);
+  return new CliError({
+    code: cause?.code ?? "DASKI_WALLET_SIGNING_FAILED",
+    message: `The ${kind} signer could not sign the wallet authorization for ${what}: ${reason}`,
+    remediation: `${cause ? `${cause.remediation} ` : ""}Nothing was sent, so ${what} did not run. The authorization ` +
+      `must be signed by the payer that owns the asset, ${payer}. Fix the signer and run the same command again ` +
+      "(daski doctor --json checks it), or select that payer's signer with --signer. There is no separate signing " +
+      "step: the CLI signs the gateway's challenge itself.",
+    details: { ...(cause?.details ?? {}), payer },
+    ...(cause ? { exitCode: cause.exitCode } : {}),
+  });
+}
 
 /** The gateway's refusal of an asset action, with a next step in command terms. */
 export function assetActionFailure(
@@ -227,14 +264,20 @@ export function assetActionFailure(
   return new CliError({
     code,
     message: typeof body?.message === "string" ? body.message : `${tool} was refused by the gateway.`,
-    remediation: remediation[code] ??
+    remediation: remediation[code] ?? gatewayRefusalRemediation(code, body) ??
       (typeof body?.next_action === "string" ? body.next_action : "Run daski doctor --json, then retry."),
     details: {
       tool,
-      gateway: body ?? describeResult(result),
+      gateway: body ? withoutResults(body) : describeResult(result),
       ...(code === "WALLET_TEMPORARILY_UNAVAILABLE" || code === "WALLET_RATE_LIMITED" ? { retryable: true } : {}),
     },
   });
+}
+
+/** A gateway answer as an error may show it: without a provider result, which can hold a secret. */
+export function withoutResults(body: Record<string, unknown>): Record<string, unknown> {
+  const { untrustedResult: _isolated, result: _result, ...rest } = body;
+  return rest;
 }
 
 /** The gateway's answer to a lifecycle or read call, as an operator-facing error. */
@@ -254,8 +297,9 @@ export function lifecycleFailure(toolName: string, result: McpToolResult, orderH
       : `Run \`daski order status ${orderHandle ?? "<handle>"}\` to see the order's current state.`),
     details: {
       tool: toolName,
-      gateway: body ?? describeResult(result),
-      ...(isRetryableGatewayCode(code) && !reviewHeldForOperator(body) ? { retryable: true } : {}),
+      gateway: body ? withoutResults(body) : describeResult(result),
+      ...((isRetryableGatewayCode(code) && !reviewHeldForOperator(body)) || stillBeingDelivered(code, body)
+        ? { retryable: true } : {}),
     },
   });
 }

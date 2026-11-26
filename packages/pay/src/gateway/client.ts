@@ -374,10 +374,17 @@ export async function readiness(gatewayUrl: string, timeoutMs = 10_000): Promise
 export function isRetryableGatewayCode(code: string | undefined): boolean {
   return code === "SIGNATURE_VERIFICATION_UNAVAILABLE" || code === "SIGNATURE_VERIFICATION_BUSY" ||
     code === "CONFIRMATION_SUBMISSION_PENDING" || code === "PROVIDER_LIFECYCLE_UNAVAILABLE" ||
-    code === "PAYMENT_ADMISSION_UNAVAILABLE" ||
-    // No artifact yet: a paid order still being delivered answers this, and
-    // the same read succeeds once the order completes.
-    code === "ARTIFACT_NOT_AVAILABLE";
+    code === "PAYMENT_ADMISSION_UNAVAILABLE";
+}
+
+/**
+ * A paid order with no artifact because it is still being delivered: the
+ * gateway's ARTIFACT_NOT_AVAILABLE says so in its message (and marks it
+ * retryable). An order that ended without a result answers the same code
+ * without that, and is not "still being delivered".
+ */
+export function stillBeingDelivered(code: string | undefined, body: Record<string, unknown> | undefined): boolean {
+  return code === "ARTIFACT_NOT_AVAILABLE" && typeof body?.message === "string" && /still being delivered/i.test(body.message);
 }
 
 /**
@@ -460,9 +467,11 @@ export function gatewayRefusalRemediation(
       return "This outcome has as many open orders as its provider accepts, and nothing was claimed " +
         "or settled. Run the same command again later.";
     case "ARTIFACT_NOT_AVAILABLE":
-      return "This order has no artifact yet, and nothing failed: a paid order is still being delivered until it " +
-        `is completed or completed after recovery. Check it with ${status} --json and read the artifact once it ` +
-        "is FULFILLED.";
+      return stillBeingDelivered(code, body)
+        ? "The order is paid and still being delivered, so it has no artifact yet; nothing failed. Read its status " +
+          `again shortly with ${status} --json, and read the artifact once it is FULFILLED.`
+        : "This order has no artifact: it is neither completed nor completed after recovery. Check it with " +
+          `${status} --json, which shows whether it is still in progress or ended another way.`;
     // The provider's named refusals of an order action. None returns a spent
     // authorization, so another attempt signs a fresh one; a read reuses its
     // stored read access.

@@ -69,14 +69,17 @@ Commands
   order import                        Rehydrate the local order store from the gateway's history
   asset list [--provider <id>] [--cursor <cursor>]
                                       The assets this payer owns at its providers
-  asset action --order <handle> --action <actionId> [--input '<json>']
+  asset action --order <handle> --action <actionId> [--input '<json>' | --input-file <file.json>] [--output <file>]
                                       Run an owner action on the asset an order created,
                                       e.g. get an inference key once the order is FULFILLED
   asset action --provider <id> --asset <providerAssetId|identifier> --action <actionId>
                [--input '<json>' | --input-file <file.json>] [--output <file>]
-                                      Run an owner action on an asset (daski_use_asset); the
-                                      result goes to a file with mode 600, never to stdout
+                                      Run an owner action on an asset (daski_use_asset): the CLI
+                                      signs the gateway's challenge itself, with any signer; the
+                                      result goes to a mode-600 file under ~/.daski/results (or
+                                      --output), never to stdout
   free-skill --provider <id> --skill <skillId> [--service <slug>] [--input '<json>' | --input-file <file.json>]
+             [--output <file>] [--wait <seconds>]
                                       Call a provider's public free skill, such as get-pricing;
                                       no wallet, nothing is paid or ordered
   sign-payment --challenge <file.json> [--provider <id> --outcome <id>]

@@ -404,7 +404,7 @@ export function passphraseNeedsFile(purpose: "create" | "unlock"): CliError {
     remediation:
       `Without a terminal, put ${passphrase} in a file only its owner can read (chmod 600 <path>), set ` +
       "DASKI_KEYSTORE_PASSPHRASE_FILE=<path>, and run the same command again" +
-      (purpose === "create" ? ", e.g. DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --json" : "") +
+      (purpose === "create" ? ", e.g. DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --json" : "") +
       ". The passphrase is never taken from a flag or an environment value. Or run the command from an " +
       `interactive terminal. See ${DOC}`,
     details: { nonInteractive: { env: { DASKI_KEYSTORE_PASSPHRASE_FILE: "<path to a mode-600 file holding the passphrase>" } } },

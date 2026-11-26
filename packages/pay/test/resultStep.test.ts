@@ -55,7 +55,12 @@ test("a fulfilled order whose result names a non-destructive owner action of its
   const found = await step(fulfilled(created));
   assert.equal(found?.actionId, "get-inference-key");
   assert.equal(found?.command, "daski asset action --order ord_1 --action get-inference-key --json");
-  assert.match(String(found?.next), /^The order is fulfilled, but its result is behind the provider's owner action get-inference-key\. /);
+  assert.match(String(found?.next), /^The order is fulfilled, and its result points to the provider's owner action get-inference-key /);
+  // Several named: the one the result names first.
+  const both = { ...created, next: "Call get-inference-usage later; first call get-inference-key." };
+  assert.equal((await step(fulfilled({ keyId: created.keyId, next: both.next })))?.actionId, "get-inference-usage");
+  assert.equal((await step(fulfilled({ keyId: created.keyId, next: "Call get-inference-key, then get-inference-usage." })))?.actionId,
+    "get-inference-key");
   // The A2A task envelope a provider may sign is searched the same way.
   const task = { id: "t", status: { state: "TASK_STATE_COMPLETED" }, artifacts: [{ name: "inference_key_created",
     parts: [{ kind: "data", data: created }] }] };
@@ -83,6 +88,9 @@ test("no step when the result is in the order itself, the order is not done, or 
   // An action of another asset type is not this order's.
   const other: PublicService = { ...inference, ownerActions: [{ ...inference.ownerActions[2]!, assetType: "mailbox" }] };
   assert.equal(await step(fulfilled(created), sources(other)), undefined);
+  // An action id the gateway would not admit is never printed as a command.
+  const unsafe: PublicService = { ...inference, ownerActions: [{ ...inference.ownerActions[2]!, actionId: "get-key;rm -rf ~" }] };
+  assert.equal(await step(fulfilled({ next: "Call get-key;rm -rf ~ now." }), sources(unsafe)), undefined);
   // A failing lookup leaves the read as it was.
   const failing = { catalog: { getOutcome: async () => { throw new Error("offline"); } }, services: sources().services };
   assert.equal(await step(fulfilled(created), failing as never), undefined);
@@ -127,7 +135,7 @@ test("order status names the step, and order confirm names it after its own next
     assert.equal(findOrder("ord_1", "sandbox")?.resultStep?.actionId, "get-inference-key", "kept for order confirm");
 
     const confirmed = withResultNext({ orderHandle: "ord_1", mode: "sponsored", state: "final" }, { handle: "ord_1" });
-    assert.match(String(confirmed.next), /^The order is fulfilled, but its result is behind/);
+    assert.match(String(confirmed.next), /^The order is fulfilled, and its result points to/);
     const pending = withResultNext({ state: "pending", next: "Run daski order confirm ord_1 --resume." }, { handle: "ord_1" });
     assert.equal(pending.next, "Run daski order confirm ord_1 --resume. Then get the order's result: " +
       "daski asset action --order ord_1 --action get-inference-key --json");

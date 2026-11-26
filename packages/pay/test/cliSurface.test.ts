@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { inputFlag } from "../src/cli/args.js";
 import { CliError } from "../src/cli/errors.js";
-import { gatewayRefusalRemediation, isRetryableGatewayCode } from "../src/gateway/client.js";
+import { gatewayRefusalRemediation, stillBeingDelivered } from "../src/gateway/client.js";
 import { purchaseFailure } from "../src/gateway/purchase.js";
 
 const code = (wanted: string) => (error: unknown): boolean => error instanceof CliError && error.code === wanted;
@@ -79,7 +79,11 @@ test("next-step commands name the real order or intent when the CLI knows it", (
   assert.ok(purchaseFailure(refusal, { afterSubmit: true, intentId: "int_abc" }).remediation.includes("daski order reconcile int_abc"));
   assert.ok(gatewayRefusalRemediation("ORDER_ACTION_UNSUPPORTED", undefined, "ord_9")!.includes("daski order status ord_9"));
   assert.ok(gatewayRefusalRemediation("ARTIFACT_NOT_AVAILABLE", undefined, "ord_9")!.includes("daski order status ord_9 --json"));
+  assert.ok(gatewayRefusalRemediation("ARTIFACT_NOT_AVAILABLE", { message: "The order is paid and still being delivered; it has no artifact yet" },
+    "ord_9")!.includes("nothing failed"));
   assert.ok(gatewayRefusalRemediation("PROVIDER_LIFECYCLE_UNAVAILABLE", undefined)!.includes("daski order status <handle>"),
     "without a known order the placeholder stays");
-  assert.ok(isRetryableGatewayCode("ARTIFACT_NOT_AVAILABLE"), "an order still being delivered is read again later");
+  assert.ok(stillBeingDelivered("ARTIFACT_NOT_AVAILABLE", { message: "The order is paid and still being delivered; it has no artifact yet" }));
+  assert.equal(stillBeingDelivered("ARTIFACT_NOT_AVAILABLE", { message: "The order has no artifact: it is neither completed nor recovered" }),
+    false, "an order that ended without a result is not 'still being delivered'");
 });

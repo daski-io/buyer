@@ -67,24 +67,29 @@ test("without a terminal, wallet setup names the exact non-interactive route for
     await assert.rejects(createWallet({ host: host() }), (error: unknown) => {
       assert.ok(code("DASKI_KEY_CREATION_NEEDS_HUMAN")(error));
       const failure = error as CliError;
-      const route = "DASKI_HOST_CLASS=durable DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> " +
-        "daski wallet create --yes-human-approved --json";
+      const route = "DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> " +
+        "daski wallet create --yes-human-approved --profile sandbox --json";
       assert.ok(failure.remediation.includes(route), failure.remediation);
       assert.match(failure.remediation, /^Ask the user first\./, "authorization still comes first");
       assert.match(failure.remediation, /chmod 600/);
       assert.match(failure.remediation, /--signer circle-agent/);
+      // The command never declares the host durable for the user; an undeclared host is told the user must.
+      assert.ok(!failure.remediation.includes("DASKI_HOST_CLASS=durable DASKI_KEY"));
+      assert.match(failure.remediation, /only the user can say so, and then it is declared with DASKI_HOST_CLASS=durable/);
       assert.deepEqual(Object.keys((failure.details.nonInteractive as { env: object }).env),
-        ["DASKI_HOST_CLASS", "DASKI_KEY_BACKEND", "DASKI_KEYSTORE_PASSPHRASE_FILE"]);
+        ["DASKI_KEY_BACKEND", "DASKI_KEYSTORE_PASSPHRASE_FILE"]);
       return true;
     });
     // A passphrase file already set, and the OS keychain, need no passphrase variable.
     await assert.rejects(createWallet({ host: host({ passphraseFile: passphraseFile(home) }) }), (error: unknown) =>
       code("DASKI_KEY_CREATION_NEEDS_HUMAN")(error) && (error as CliError).remediation.includes(
-        "DASKI_HOST_CLASS=durable DASKI_KEY_BACKEND=file daski wallet create --yes-human-approved --json."));
+        "run it without a terminal: DASKI_KEY_BACKEND=file daski wallet create --yes-human-approved --profile sandbox --json."));
     // The keychain is not opened here: the route is built from the backend this host would use.
     const keychain = keyCreationNeedsHuman(host({ platform: "darwin", declaredBackend: undefined }), "keychain", "sandbox");
-    assert.ok(keychain.remediation.includes("DASKI_HOST_CLASS=durable daski wallet create --yes-human-approved --json."));
+    assert.ok(keychain.remediation.includes("run it without a terminal: daski wallet create --yes-human-approved --profile sandbox --json."));
     assert.ok(keyCreationNeedsHuman(host(), "file", "work").remediation.includes("--yes-human-approved --profile work --json"));
+    // A host the user already declared durable is not asked about again.
+    assert.ok(!keyCreationNeedsHuman(host({ hostClass: "durable" }), "file", "sandbox").remediation.includes("only the user can say so"));
     assert.equal(existsSync(join(home, "keystore.json")), false);
   });
 });

@@ -44,7 +44,7 @@ const task = (state: string, data: unknown, id = "task-1") => ({
   ],
 });
 
-interface Sent { url: string; method: string; headers: Record<string, string>; body: Record<string, unknown> | undefined }
+interface Sent { url: string; method: string; headers: Record<string, string>; body: Record<string, unknown> | undefined; redirect: string | undefined }
 
 function fakeFetch(answers: (body: Record<string, unknown>) => unknown, cards: Record<string, unknown> = {}) {
   const sent: Sent[] = [];
@@ -52,7 +52,7 @@ function fakeFetch(answers: (body: Record<string, unknown>) => unknown, cards: R
     const url = String(input);
     const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>));
     const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : undefined;
-    sent.push({ url, method: init?.method ?? "GET", headers, body });
+    sent.push({ url, method: init?.method ?? "GET", headers, body, redirect: init?.redirect });
     const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
     if (url.startsWith(`${GATEWAY}/public/v3/services?providerAgentId=`)) {
       const provider = new URL(url).searchParams.get("providerAgentId");
@@ -86,7 +86,8 @@ test("the request is the one shape the provider accepts, sent to the service's J
     assert.equal(printed.endpoint, `${ORIGIN}/a2a/server-hosting`);
     assert.equal(printed.state, "completed");
     assert.deepEqual(printed.result, quote, "the data part, without the anonymous access token");
-    assert.equal(printed.message, "Here is the price.");
+    assert.equal(printed.providerMessage, "Here is the price.", "the provider's words are labelled as the provider's");
+    assert.equal("message" in printed, false);
     assert.ok(!JSON.stringify(printed).includes("t".repeat(43)));
 
     const call = sent.find((item) => item.method === "POST")!;
@@ -100,6 +101,7 @@ test("the request is the one shape the provider accepts, sent to the service's J
     assert.equal(message.role, "ROLE_USER");
     assert.equal(typeof message.messageId, "string");
     assert.deepEqual(sent.map((item) => item.method), ["GET", "GET", "POST"], "registry, agent card, the call; nothing signed");
+    assert.deepEqual(sent.slice(1).map((item) => item.redirect), ["error", "error"], "the card and the call never follow a redirect");
   });
 });
 
@@ -126,17 +128,26 @@ test("a refusal, a failed task and an endpoint that is not https are reported, a
   await withHome(async () => {
     const refusing = fakeFetch((body) => ({ jsonrpc: "2.0", id: body.id, error: { code: -32602, message: "Missing required fields: hours" } }));
     await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: refusing.impl }),
-      (error: unknown) => code("DASKI_FREE_SKILL_REFUSED")(error) && /hours/.test((error as CliError).message) &&
+      (error: unknown) => code("DASKI_FREE_SKILL_REFUSED")(error) && !/hours/.test((error as CliError).message) &&
+        (error as CliError).details.providerMessage === "Missing required fields: hours" &&
         (error as CliError).remediation.includes(`${ORIGIN}/skills/server-hosting/get-pricing.md`));
+    // An answer to another request is not this request's answer.
+    const confused = fakeFetch(() => ({ jsonrpc: "2.0", id: "someone-else", result: task("TASK_STATE_COMPLETED", {}) }));
+    await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: confused.impl }),
+      code("DASKI_FREE_SKILL_UNREACHABLE"));
 
     const failing = fakeFetch((body) => ({ jsonrpc: "2.0", id: body.id, result: task("TASK_STATE_FAILED", {}) }));
     await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: failing.impl }),
       code("DASKI_FREE_SKILL_FAILED"));
 
-    const plain = fakeFetch(() => ({}), { "server-hosting": { supportedInterfaces: [{ url: "http://provider.example/a2a/x", protocolBinding: "JSONRPC" }] } });
-    await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: plain.impl }),
-      code("DASKI_FREE_SKILL_NO_ENDPOINT"));
-    assert.equal(plain.sent.some((item) => item.method === "POST"), false, "nothing is sent to a plain-http endpoint");
+    // The card decides only an https endpoint on its own origin: never plain http, loopback or another host.
+    for (const url of ["http://provider.example/a2a/x", "http://127.0.0.1:8080/a2a/x", "http://localhost/a2a/x",
+      "https://elsewhere.example/a2a/x"]) {
+      const plain = fakeFetch(() => ({}), { "server-hosting": { supportedInterfaces: [{ url, protocolBinding: "JSONRPC" }] } });
+      await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: plain.impl }),
+        code("DASKI_FREE_SKILL_NO_ENDPOINT"), url);
+      assert.equal(plain.sent.some((item) => item.method === "POST"), false, `nothing is sent to ${url}`);
+    }
 
     let polls = 0;
     const slow = fakeFetch((body) => {
@@ -150,6 +161,21 @@ test("a refusal, a failed task and an endpoint that is not https are reported, a
     assert.equal(printed.state, "completed");
     assert.deepEqual(printed.result, { done: true });
     assert.equal(polls, 2);
+  });
+});
+
+test("an agent card that is not https is not read", async () => {
+  await withHome(async () => {
+    const saved = registry.services[1]!.agentCardUrl;
+    registry.services[1]!.agentCardUrl = "http://provider.example/agent-cards/server-hosting.json";
+    try {
+      const { impl, sent } = fakeFetch(() => ({}));
+      await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: impl }),
+        code("DASKI_FREE_SKILL_NO_ENDPOINT"));
+      assert.equal(sent.length, 1, "only the registry was read");
+    } finally {
+      registry.services[1]!.agentCardUrl = saved;
+    }
   });
 });
 

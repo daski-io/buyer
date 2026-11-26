@@ -103,15 +103,17 @@ Without a terminal, once the user has authorized wallet setup on their own
 durable machine, the route is:
 
 ```bash
-DASKI_HOST_CLASS=durable DASKI_KEY_BACKEND=file \
-DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --json
+DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> \
+  daski wallet create --yes-human-approved --profile <profile> --json
 ```
 
 where `<path>` is a regular file only its owner can read (`chmod 600`)
 holding a passphrase of at least 8 characters. Keep the same
 `DASKI_KEYSTORE_PASSPHRASE_FILE` set for later commands, which unlock the key
 with it. With the OS keychain (macOS, Windows) no passphrase variable is
-needed. The refusal carries this route in `nonInteractive` (`env` and
+needed. The command never sets `DASKI_HOST_CLASS=durable`: that is the user's
+statement that the machine is their own durable one, and the refusal says so
+when the host class is undeclared. The refusal carries this route in `nonInteractive` (`env` and
 `command`), built for the backend the host would use.
 
 Before that, every fact must line up:
