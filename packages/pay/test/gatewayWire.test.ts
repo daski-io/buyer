@@ -75,7 +75,7 @@ const railErrors = fixture<{
   walletAuthorizationInvalid: { error: Json };
   authorizationWindow: { error: Json };
   artifactNotAvailable: { error: Json };
-  // Since the gateway's deliveryState (ENG-76); an older gateway has neither.
+  // Since the gateway's deliveryState; an older gateway has neither.
   artifactStillBeingDelivered?: { error: Json };
   artifactAwaitingInput?: { error: Json };
   orderActionUnsupported: { error: Json };
