@@ -572,7 +572,7 @@ export async function orderImport(
   }
 }
 
-function extensionFor(mediaType: string | undefined): string {
+export function extensionFor(mediaType: string | undefined): string {
   if (!mediaType) return ".bin";
   if (mediaType.includes("json")) return ".json";
   if (mediaType.includes("text")) return ".txt";

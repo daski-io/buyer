@@ -46,12 +46,6 @@ export interface OutcomeSummary {
   serviceName?: string | undefined;
   skillName?: string | undefined;
   requestSchema?: Record<string, unknown> | undefined;
-  /** The bytes32 id of the service that lists this outcome. */
-  serviceId?: string | undefined;
-  /** The provider's skill id behind this outcome. */
-  skillId?: string | undefined;
-  /** Whether a fulfilled order leaves the buyer owning an asset at the provider. */
-  persistentAsset?: boolean | undefined;
 }
 
 export interface ChainManifest {
@@ -172,9 +166,6 @@ export class Catalog {
       serviceName: service?.name,
       skillName: skill?.name,
       requestSchema: body.requestSchema as Record<string, unknown> | undefined,
-      serviceId: typeof body.serviceId === "string" ? body.serviceId : undefined,
-      skillId: typeof body.skillId === "string" ? body.skillId : undefined,
-      persistentAsset: typeof body.persistentAsset === "boolean" ? body.persistentAsset : undefined,
     };
     cache.outcomes[key] = { fetchedAt: this.#now(), value: summary };
     writeCache(cache);

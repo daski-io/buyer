@@ -83,18 +83,28 @@ const documentResult = (url = `${PROVIDER_ORIGIN}/documents/one-time-token`) => 
 });
 const PDF = Buffer.from("%PDF-1.7 account agreement");
 
+const ownerActions = [
+  { actionId: "get-api-key", name: "Get API key", assetType: "api-account", destructive: false },
+  { actionId: "rotate-api-key", name: "Rotate API key", assetType: "api-account", destructive: true },
+  { actionId: "download-account-document", name: "Download a document", assetType: "api-account", destructive: false },
+  { actionId: "delete-server", name: "Delete a server", assetType: "server", destructive: true },
+];
+
 /** The provider's answer per action, and a fetch serving the registry and the one-time link. */
-function provider(options: { answers?: Record<string, Answer>; artifact?: () => unknown } = {}) {
+function provider(options: { answers?: Record<string, Answer>; artifact?: () => unknown;
+  link?: (init: RequestInit | undefined) => Response } = {}) {
   const fetched: string[] = [];
-  const fetchImpl = (async (input: string | URL) => {
+  const inits: (RequestInit | undefined)[] = [];
+  const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     fetched.push(url);
     if (url.includes("/public/v3/services?providerAgentId=8327")) {
       return Response.json({ services: [{ providerAgentId: "8327", serviceId: `0x${"1a".repeat(32)}`,
-        agentCardUrl: `${PROVIDER_ORIGIN}/agent-cards/api-accounts.json`, service: { slug: "api-accounts" } }] });
+        agentCardUrl: `${PROVIDER_ORIGIN}/agent-cards/api-accounts.json`, service: { slug: "api-accounts" }, ownerActions }] });
     }
     if (url === `${PROVIDER_ORIGIN}/documents/one-time-token`) {
-      return new Response(PDF, { headers: { "content-type": "application/pdf" } });
+      inits.push(init);
+      return options.link?.(init) ?? new Response(PDF, { headers: { "content-type": "application/pdf" } });
     }
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
@@ -107,7 +117,7 @@ function provider(options: { answers?: Record<string, Answer>; artifact?: () => 
       return performed(args, args.actionId === "get-api-key" ? keyResult : documentResult());
     } },
   });
-  return { ...gateway, fetched, fetchImpl };
+  return { ...gateway, fetched, inits, fetchImpl };
 }
 
 const signedUses = (calls: { tool: string; args: Json }[]) =>
@@ -135,9 +145,11 @@ test("the gateway's fixture reads as the artifact, then each owner action as the
 
 test("it saves the artifact and each owner action's result, mode 600, and prints a manifest without a value", async () => {
   await withHome(async (home) => {
-    const { client, calls, fetched, fetchImpl } = provider();
+    const { client, calls, fetched, inits, fetchImpl } = provider();
     const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
     const directory = join(home, "results", HANDLE);
+    assert.equal(inits[0]?.redirect, "error", "a redirect is never followed");
+    assert.equal(inits[0]?.method, "GET");
     assert.equal(manifest.complete, true);
     assert.equal(manifest.state, "delivered");
     assert.equal(manifest.outputDir, directory);
@@ -239,10 +251,10 @@ test("an order still being delivered is not complete and says to check again; no
   });
 });
 
-test("a failed item is named with whether a retry is safe; the others are still saved", async () => {
+test("a failed item is named with whether a retry is safe and what else the provider offers; the others are still saved", async () => {
   await withHome(async () => {
     const { client, fetchImpl } = provider({ answers: {
-      "get-api-key": (args) => performed(args, null, "failed", "key_delivery_window_closed"),
+      "get-api-key": (args) => performed(args, null, "failed", "key_not_available"),
       "download-account-document": (args) => performed(args, null, "failed", "provider_retryable"),
     } });
     const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
@@ -252,30 +264,79 @@ test("a failed item is named with whether a retry is safe; the others are still 
     assert.equal(items[0]!.status, "saved");
     assert.deepEqual(items.slice(1).map((item) => [item.label, item.status, item.retrySafe]),
       [["API key", "failed", false], ["Account agreement (PDF)", "failed", true]]);
-    assert.match(String((items[1]!.error as Json).remediation), /public\/v3\/services\?providerAgentId=8327/);
+    // The provider's other actions on the same kind of asset are named, a destructive one as such; none is run.
+    assert.deepEqual(items[1]!.otherActions, [
+      { actionId: "rotate-api-key", name: "Rotate API key", destructive: true },
+      { actionId: "download-account-document", name: "Download a document", destructive: false },
+    ]);
+    assert.equal(items[2]!.otherActions, undefined, "a temporary failure names no alternative");
     assert.match(String(manifest.next), /may fetch Account agreement \(PDF\)/);
-    // A gateway refusal marked retryable is safe to retry; one that is not, is not.
+    // A gateway refusal marked retryable, or a lost connection, may succeed again; a rejection will not.
     const refused = provider({ answers: {
       "get-api-key": () => mcp({ code: "WALLET_RATE_LIMITED", message: "Too many" }, true),
       "download-account-document": () => mcp({ code: "ASSET_ACTION_REJECTED", message: "Rejected" }, true),
     } });
     const second = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(refused.client), refused.fetchImpl);
-    assert.deepEqual((second.items as Json[]).slice(1).map((item) => [(item.error as Json).code, item.retrySafe]),
+    const failures = (second.items as Json[]).slice(1);
+    assert.deepEqual(failures.map((item) => [(item.error as Json).code, item.retrySafe]),
       [["WALLET_RATE_LIMITED", true], ["ASSET_ACTION_REJECTED", false]]);
+    assert.match(String((failures[1]!.error as Json).remediation), new RegExp(`daski order support ${HANDLE}`));
+    assert.doesNotMatch(String((failures[1]!.error as Json).remediation), /--input|--asset/);
+    const lost = provider({ answers: { "get-api-key": () => { throw new Error("socket hang up"); } } });
+    const third = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(lost.client), lost.fetchImpl);
+    assert.deepEqual([((third.items as Json[])[1]!.error as Json).code, (third.items as Json[])[1]!.retrySafe],
+      ["DASKI_DELIVERABLE_UNREACHABLE", true]);
   });
 });
 
-test("a one-time link off the provider's own origin is not fetched", async () => {
+test("a result the provider answers with empty fields names them, and what else it offers", async () => {
   await withHome(async () => {
-    const { client, fetchImpl, fetched } = provider({ answers: {
-      "download-account-document": (args) => performed(args, documentResult("https://elsewhere.example/documents/one-time-token")),
+    // Past a secret's delivery window a provider can still answer completed, with the secret null.
+    const { client, fetchImpl } = provider({ answers: {
+      "get-api-key": (args) => performed(args, { ...keyResult, apiKey: null }),
     } });
     const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
-    const item = (manifest.items as Json[])[2]!;
-    assert.equal(item.status, "failed");
-    assert.equal((item.error as Json).code, "DASKI_DOWNLOAD_REFUSED");
-    assert.equal(item.retrySafe, false);
-    assert.ok(!fetched.some((url) => url.startsWith("https://elsewhere.example")));
+    const item = (manifest.items as Json[])[1]!;
+    assert.equal(item.status, "saved");
+    assert.deepEqual(item.emptyFields, ["apiKey"]);
+    assert.deepEqual((item.otherActions as Json[]).map((action) => action.actionId), ["rotate-api-key", "download-account-document"]);
+    assert.match(String(manifest.next), /Check emptyFields on API key/);
+  });
+});
+
+test("a one-time link that cannot be saved says whether a fresh one may succeed", async () => {
+  await withHome(async () => {
+    for (const [label, link, code, retrySafe] of [
+      ["a wrong content type", () => new Response("<html>", { headers: { "content-type": "text/html" } }), "DASKI_DOWNLOAD_FAILED", false],
+      ["an expired link", () => Response.json({ error: "invalid_or_expired_token" }, { status: 403 }), "DASKI_DOWNLOAD_FAILED", true],
+      ["an empty answer", () => new Response(new Uint8Array(0), { headers: { "content-type": "application/pdf" } }),
+        "DASKI_DOWNLOAD_FAILED", true],
+      ["a declared size over the limit", () => new Response(PDF, { headers: { "content-type": "application/pdf",
+        "content-length": String(60 * 1024 * 1024) } }), "DASKI_DOWNLOAD_FAILED", false],
+    ] as const) {
+      const { client, fetchImpl } = provider({ link });
+      const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
+      const item = (manifest.items as Json[])[2]!;
+      assert.deepEqual([item.status, (item.error as Json).code, item.retrySafe], ["failed", code, retrySafe], label);
+      assert.ok(!JSON.stringify(manifest).includes("one-time-token"), `${label}: the link is not printed`);
+    }
+  });
+});
+
+test("a one-time link off the provider's own origin, or not plain https, is not fetched", async () => {
+  await withHome(async () => {
+    for (const url of ["https://elsewhere.example/documents/one-time-token", "http://provider.example/documents/one-time-token",
+      "https://user:pass@provider.example/documents/one-time-token"]) {
+      const { client, fetchImpl, fetched } = provider({ answers: {
+        "download-account-document": (args) => performed(args, documentResult(url)),
+      } });
+      const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
+      const item = (manifest.items as Json[])[2]!;
+      assert.equal(item.status, "failed", url);
+      assert.equal((item.error as Json).code, "DASKI_DOWNLOAD_REFUSED", url);
+      assert.equal(item.retrySafe, false, url);
+      assert.ok(!fetched.some((seen) => seen.includes("one-time-token")), `${url}: never fetched`);
+    }
   });
 });
 
@@ -297,10 +358,32 @@ test("any signer signs each action itself; a signer that cannot sign stops befor
       const failure = error as CliError;
       assert.equal(failure.code, "DASKI_CIRCLE_AGENT_LOGIN_REQUIRED");
       assert.match(failure.remediation, /Nothing was sent/);
-      assert.equal(failure.details.artifactWrittenTo, join(home, "results", HANDLE, "00-artifact.json"));
+      assert.deepEqual(failure.details.savedFiles, [join(home, "results", HANDLE, "00-artifact.json")]);
       return true;
     });
     assert.equal(signedUses(failing.calls).length, 0);
+  });
+});
+
+test("an action that completed is recorded at once, so a run cut short later can still recover it", async () => {
+  await withHome(async (home) => {
+    const { client, calls, fetchImpl } = provider();
+    const context = fakeContext(client);
+    const sign = context.signer.signTypedData;
+    let signatures = 0;
+    context.signer.signTypedData = async (data) => {
+      signatures += 1;
+      if (signatures > 1) throw new CliError({ code: "DASKI_SIGNER_UNAVAILABLE", message: "gone", remediation: "Fix it." });
+      return sign(data);
+    };
+    await assert.rejects(orderDeliverables({ handle: HANDLE, json: true }, async () => context, fetchImpl), (error: unknown) => {
+      const files = (error as CliError).details.savedFiles as string[];
+      assert.deepEqual(files, [join(home, "results", HANDLE, "00-artifact.json"), join(home, "results", HANDLE, "01-get-api-key.json")]);
+      return true;
+    });
+    assert.equal(signedUses(calls).length, 1);
+    const [key] = fixtureItems();
+    assert.deepEqual(findOrder(HANDLE, "sandbox")?.deliverableExecutions, { [deliverableKey(key!)]: EXECUTION });
   });
 });
 

@@ -121,7 +121,7 @@ export interface OrderRecord {
    */
   fulfilled?: boolean | undefined;
   /**
-   * The first completed execution of each owner-action deliverable, by
+   * The latest completed execution of each owner-action deliverable, by
    * deliverable key, so a later `daski order deliverables` can recover its
    * result with the gateway's `recover-action` follow-up.
    */
