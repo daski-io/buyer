@@ -134,7 +134,7 @@ test("a refusal, a failed task and an endpoint that is not https are reported, a
     // An answer to another request is not this request's answer.
     const confused = fakeFetch(() => ({ jsonrpc: "2.0", id: "someone-else", result: task("TASK_STATE_COMPLETED", {}) }));
     await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: confused.impl }),
-      code("DASKI_FREE_SKILL_UNREACHABLE"));
+      code("DASKI_FREE_SKILL_UNREADABLE"));
 
     const failing = fakeFetch((body) => ({ jsonrpc: "2.0", id: body.id, result: task("TASK_STATE_FAILED", {}) }));
     await assert.rejects(runFreeSkill({ json: true, providerAgentId: "8327", skillId: "get-pricing", service: "server-hosting", fetch: failing.impl }),

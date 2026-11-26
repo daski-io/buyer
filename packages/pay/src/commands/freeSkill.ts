@@ -259,7 +259,15 @@ async function rpc(endpoint: string, body: Record<string, unknown>, fetchImpl: F
   } catch {
     answer = undefined;
   }
-  if (!isRecord(answer) || answer.id !== body.id) {
+  if (isRecord(answer) && answer.id !== body.id) {
+    throw new CliError({
+      code: "DASKI_FREE_SKILL_UNREADABLE",
+      message: `${endpoint} answered a different JSON-RPC request than the one sent.`,
+      remediation: "Retry in a moment. A free skill creates nothing, so retrying is safe.",
+      details: { retryable: true, endpoint },
+    });
+  }
+  if (!isRecord(answer)) {
     throw new CliError({
       code: "DASKI_FREE_SKILL_UNREACHABLE",
       message: `${endpoint} answered HTTP ${response.status} without a JSON-RPC body.`,

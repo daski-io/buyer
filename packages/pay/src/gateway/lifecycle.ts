@@ -222,9 +222,9 @@ export function walletSigningFailure(error: unknown, signer: SignerAdapter, paye
     code: cause?.code ?? "DASKI_WALLET_SIGNING_FAILED",
     message: `The ${kind} signer could not sign the wallet authorization for ${what}: ${reason}`,
     remediation: `${cause ? `${cause.remediation} ` : ""}Nothing was sent, so ${what} did not run. The authorization ` +
-      `must be signed by the payer that owns the asset, ${payer}. Fix the signer and run the same command again ` +
-      "(daski doctor --json checks it), or select that payer's signer with --signer. There is no separate signing " +
-      "step: the CLI signs the gateway's challenge itself.",
+      `must be signed by the payer that bought the asset; this profile's signer is ${payer}. Fix the signer and run ` +
+      "the same command again (daski doctor --json checks it), or use the --profile or --signer that bought it. " +
+      "There is no separate signing step: the CLI signs the gateway's challenge itself.",
     details: { ...(cause?.details ?? {}), payer },
     ...(cause ? { exitCode: cause.exitCode } : {}),
   });
