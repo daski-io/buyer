@@ -9,6 +9,7 @@ import { keccak256, stringToHex, verifyTypedData, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import type { CommandContext } from "../src/context.js";
+import { assetActionName } from "../src/gateway/lifecycle.js";
 
 export const PROFILE = DEFAULT_CONFIG.profiles.sandbox!;
 export const ACCOUNT = privateKeyToAccount(`0x${"11".repeat(32)}`);
@@ -86,7 +87,8 @@ export function fakeGateway(options: {
           const challenge = options.challenge?.[tool]?.(args) ?? (tool === "daski_list_assets"
             ? walletChallenge({ action: "list-assets", resource: "/wallet/assets",
               request: { providerAgentId: args.providerAgentId, limit: args.limit, cursor: args.cursor } })
-            : walletChallenge({ action: `use-asset:${String(args.providerAgentId)}:${String(args.actionId)}`,
+            : walletChallenge({ action: assetActionName(String(args.providerAgentId), String(args.actionId),
+              args.input as Record<string, unknown>),
               resource: "/wallet/assets/action", providerAgentId: String(args.providerAgentId),
               request: { actionId: args.actionId, providerAssetId: args.providerAssetId, input: args.input } }));
           issued.set(tool, challenge);

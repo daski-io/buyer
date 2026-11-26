@@ -204,8 +204,9 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
       authorizationNonce: authorized.nonce,
       receipt: body.receipt ?? null,
       gatewayCalls: context.client.callCount,
-      next: `Paying is not the end of the purchase: read the order until it is fulfilled and its result is in hand: ` +
-        `daski order status ${body.orderHandle} --json`,
+      next: `Paying is not the end of the purchase: read the order until it is FULFILLED with ` +
+        `daski order status ${body.orderHandle} --json, then get what you bought: ` +
+        `daski order deliverables ${body.orderHandle} --json`,
     };
   } finally {
     await context.close();

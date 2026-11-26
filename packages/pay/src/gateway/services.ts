@@ -130,21 +130,6 @@ export class ServiceDirectory {
     });
   }
 
-  /** One service by its bytes32 id. */
-  async byId(serviceId: string): Promise<PublicService> {
-    if (!/^0x[0-9a-fA-F]{64}$/.test(serviceId)) {
-      throw new CliError({
-        code: "DASKI_SERVICE_ID_INVALID",
-        message: `"${serviceId}" is not a bytes32 service id.`,
-        remediation: "Read the service id from the outcome: the gateway's daski_get_outcome tool returns it as serviceId.",
-      });
-    }
-    const body = await this.#read(`${this.#gatewayUrl}/public/v3/services/${serviceId.toLowerCase()}`);
-    const parsed = parseService(body);
-    if (!parsed) throw unreadable(`${this.#gatewayUrl}/public/v3/services/${serviceId}`, "no service in the answer");
-    return parsed;
-  }
-
   async #read(url: string): Promise<Record<string, unknown>> {
     let response: Response;
     try {

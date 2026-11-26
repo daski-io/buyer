@@ -16,6 +16,7 @@ import {
   orderReconcile,
 } from "../commands/order.js";
 import { assetAction, assetList } from "../commands/asset.js";
+import { orderDeliverables } from "../commands/deliverables.js";
 import { runFreeSkill } from "../commands/freeSkill.js";
 import { runSignPayment } from "../commands/signPayment.js";
 import { createWallet, walletAddress, walletBalance } from "../commands/wallet.js";
@@ -49,6 +50,12 @@ Commands
   order status <handle>               Read an order's state
   order artifact <handle> [--output <file>]
                                       Write the result bytes to a file (never to stdout)
+  order deliverables <handle> [--output-dir <dir>]
+                                      After FULFILLED, get what you bought: the artifact and
+                                      every owner action the order lists (an API key, a
+                                      document), each in its own mode-600 file under
+                                      ~/.daski/results/<handle>/; prints a manifest with
+                                      complete: true|false, never a secret. Safe to run again
   order confirm <handle> --choice <Confirmed|NotConfirmed> [--submission <sponsored|direct>]
                                       Record the user's delivery review; the mode follows the signer
   order revoke-confirmation <handle>  Withdraw the active review
@@ -69,15 +76,13 @@ Commands
   order import                        Rehydrate the local order store from the gateway's history
   asset list [--provider <id>] [--cursor <cursor>]
                                       The assets this payer owns at its providers
-  asset action --order <handle> --action <actionId> [--input '<json>' | --input-file <file.json>] [--output <file>]
-                                      Run an owner action on the asset an order created,
-                                      e.g. get an inference key once the order is FULFILLED
   asset action --provider <id> --asset <providerAssetId|identifier> --action <actionId>
                [--input '<json>' | --input-file <file.json>] [--output <file>]
-                                      Run an owner action on an asset (daski_use_asset): the CLI
-                                      signs the gateway's challenge itself, with any signer; the
-                                      result goes to a mode-600 file under ~/.daski/results (or
-                                      --output), never to stdout
+                                      Run an owner action on an asset you own (daski_use_asset),
+                                      such as rotate or top-up: the CLI signs the gateway's
+                                      challenge itself, with any signer; the result goes to a
+                                      mode-600 file under ~/.daski/results (or --output), never
+                                      to stdout
   free-skill --provider <id> --skill <skillId> [--service <slug>] [--input '<json>' | --input-file <file.json>]
              [--output <file>] [--wait <seconds>]
                                       Call a provider's public free skill, such as get-pricing;
@@ -197,6 +202,13 @@ async function main(argv: string[]): Promise<number> {
           assertKnownFlags(flags, [...GLOBAL_FLAGS, "output"]);
           emit(await orderArtifact({ ...base, output: stringFlag(flags, "output") }), output);
           return 0;
+        case "deliverables": {
+          assertKnownFlags(flags, [...GLOBAL_FLAGS, "output-dir"]);
+          const manifest = await orderDeliverables({ ...base, outputDir: stringFlag(flags, "output-dir") });
+          emit(manifest, output);
+          // Still being delivered is not a failure; an order left incomplete for any other reason is.
+          return manifest.complete === true || manifest.state === "delivering" ? 0 : 1;
+        }
         case "confirm":
         case "revoke-confirmation":
           assertKnownFlags(flags, [...GLOBAL_FLAGS, "choice", "resume", "acknowledge-final-transition",
@@ -238,7 +250,7 @@ async function main(argv: string[]): Promise<number> {
           return 0;
         default:
           throw unknownSubcommand("order", command[1],
-            ["status", "artifact", "confirm", "revoke-confirmation", "input", "support", "cancel", "reconcile", "import"]);
+            ["status", "artifact", "deliverables", "confirm", "revoke-confirmation", "input", "support", "cancel", "reconcile", "import"]);
       }
     }
 
@@ -250,9 +262,18 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       if (command[1] === "action") {
-        assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "asset", "order", "action", "input", "input-file", "output"]);
+        if ("order" in flags) {
+          // 0.5.15 had --order; what an order delivered now comes from one command.
+          const handle = typeof flags.order === "string" && /^[\w-]{1,128}$/.test(flags.order) ? flags.order : "<handle>";
+          throw new CliError({
+            code: "DASKI_FLAG_REMOVED",
+            message: "`daski asset action --order` was removed in 0.5.16.",
+            remediation: `To get what an order delivered, run: daski order deliverables ${handle} --json`,
+          });
+        }
+        assertKnownFlags(flags, [...GLOBAL_FLAGS, "provider", "asset", "action", "input", "input-file", "output"]);
         emit(await assetAction({ ...shared, json, actionId: requireFlag(flags, "action"),
-          providerAgentId: stringFlag(flags, "provider"), asset: stringFlag(flags, "asset"), order: stringFlag(flags, "order"),
+          providerAgentId: stringFlag(flags, "provider"), asset: stringFlag(flags, "asset"),
           input: inputFlag(flags), output: stringFlag(flags, "output") }), output);
         return 0;
       }

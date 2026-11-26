@@ -3,6 +3,21 @@
 Notable changes to `@daski/pay` and `@daski/x402-scheme`. The two packages
 share a version.
 
+## 0.5.16 — unreleased
+
+### @daski/pay
+
+- **`daski order deliverables <handle> [--output-dir <dir>] --json`: one command gets what any order delivered.** After `FULFILLED`, it reads the order's artifact and the `deliverables` the gateway lists beside it: the artifact first, then each provider owner action that holds the rest, such as an inference account's API key (`deliver-inference-key`) or an entity's documents (`download-entity-document`). The CLI names no action: it runs whatever the order lists. It saves the artifact, runs each owner action with the same challenge, signature and retry as `daski asset action`, for any signer, and writes each result to its own mode-600 file in `~/.daski/results/<handle>/` (under `DASKI_HOME` when set, mode 700), beside a `manifest.json`. A result that is a one-time download link is fetched at once, only over https from the provider's own origin (its agent cards' origin in the gateway's public registry), without following a redirect and up to 50 MiB. It prints the manifest: `complete: true|false`, then per item its kind, label, file and field names; no value is printed. An order still being delivered (`deliveryState: delivering`) answers `complete: false` and says to check again. A failed item names its error and `retrySafe`, whether running the command again may fetch it (a temporary refusal or a lost connection; running it again is always safe). A provider failure, or a result with fields the provider answered with null (`emptyFields`, such as a secret past its delivery window), also lists the provider's other owner actions on that kind of asset (`otherActions`, a destructive one marked as such); none is run. Running it again is safe: an action already run is recovered with the gateway's `recover-action` follow-up where the provider keeps its result, and otherwise runs again. Each completed action is recorded as it completes, so a run cut short loses nothing a later run could recover. A signer that cannot sign stops the command at that action, before it is sent, and names the files already saved. A listed deliverable this CLI cannot read is counted in `ignoredDeliverables` and makes the order incomplete. A gateway without the field lists nothing, and the artifact is then the whole order. The exit code is non-zero when the order is not complete, except while it is still being delivered.
+- **The next step is the same for every fulfilled order.** `order status` and `order confirm` now say `Get what you bought: daski order deliverables <handle> --json` for any order that is fulfilled or completed after recovery, and `daski buy` names both commands. This replaces 0.5.15's `resultStep`, which looked for an action name in the order's result on the status read; the gateway never puts the result in a status read, so it could not name a step for a real order.
+- **`daski asset action --order` is removed**, for the same reason. `asset action --provider <id> --asset <providerAssetId|identifier>` stays for managing an asset, such as a rotation, DNS or a top-up. `--order` now fails with `DASKI_FLAG_REMOVED`, naming `daski order deliverables`.
+- A wallet signing failure carries `signingFailed: true` in its details.
+- The outcome summary no longer caches `serviceId`, `skillId` and `persistentAsset`, which only the result step read.
+- The offline tests parse the gateway's `order-artifact-deliverables.json` wire fixture and run the command against it.
+
+### @daski/x402-scheme
+
+- Version moves with @daski/pay; no change.
+
 ## 0.5.15 — unreleased
 
 ### @daski/pay

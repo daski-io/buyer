@@ -116,10 +116,16 @@ export interface OrderRecord {
   /** The direct-mode confirmation in flight or last observed, if any. */
   confirmationTx?: ConfirmationTxRecord | undefined;
   /**
-   * The owner action that holds a fulfilled order's result, when its result
-   * names one, as the last status read found it.
+   * The last status read found the order fulfilled (or completed after
+   * recovery): its deliverables can be fetched with `daski order deliverables`.
    */
-  resultStep?: { actionId: string; command: string; next: string } | undefined;
+  fulfilled?: boolean | undefined;
+  /**
+   * The latest completed execution of each owner-action deliverable, by
+   * deliverable key, so a later `daski order deliverables` can recover its
+   * result with the gateway's `recover-action` follow-up.
+   */
+  deliverableExecutions?: Record<string, string> | undefined;
   createdAt: string;
   updatedAt: string;
   /** The request body, kept so an interrupted purchase can be replayed byte-identically. */
