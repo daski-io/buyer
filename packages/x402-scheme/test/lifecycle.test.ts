@@ -232,6 +232,28 @@ test("a wallet challenge committing to a different request is refused", () => {
   );
 });
 
+test("an asset-action challenge must bind the provider the caller named", () => {
+  const request = { actionId: "get-inference-key", providerAssetId: "8d42e3f9-1111-4222-8333-944455556666", input: { keyId: "inf_1" } };
+  const bound = walletChallenge({
+    providerAgentId: "8327", serviceId: `0x${"ee".repeat(32)}`,
+    actionHash: keccak256(stringToHex("use-asset:8327:get-inference-key")), requestHash: canonicalHash(request),
+  });
+  const asset = walletExpectations({
+    action: "use-asset:8327:get-inference-key", request, requireProviderBinding: true, providerAgentId: "8327",
+  });
+  assert.equal(validateWalletActionChallenge(bound, 84532, asset).message.providerAgentId, "8327");
+  assert.equal(
+    refusalCode(() => validateWalletActionChallenge(bound, 84532, { ...asset, providerAgentId: "10763" })),
+    "DASKI_WALLET_PROVIDER_MISMATCH",
+  );
+  assert.equal(
+    refusalCode(() => validateWalletActionChallenge(walletChallenge({
+      actionHash: keccak256(stringToHex("use-asset:8327:get-inference-key")), requestHash: canonicalHash(request),
+    }), 84532, asset)),
+    "DASKI_WALLET_PROVIDER_BINDING_MISSING",
+  );
+});
+
 test("a wallet challenge on the wrong chain is refused", () => {
   assert.equal(
     refusalCode(() => validateWalletActionChallenge(walletChallenge(), 8453, walletExpectations())),

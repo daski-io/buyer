@@ -74,8 +74,9 @@ The file store's passphrase comes from a terminal, or from the file named by
 `DASKI_KEYSTORE_PASSPHRASE_FILE`: a regular file with owner-only permissions
 (`chmod 600`) containing only the passphrase. It is never taken from a flag,
 so it never reaches a process list or a shell history. With neither a
-terminal nor the file, `wallet create` refuses
-(`DASKI_PASSPHRASE_REQUIRES_TTY`).
+terminal nor the file, any command that needs the key refuses
+(`DASKI_PASSPHRASE_REQUIRES_TTY`), and its remediation names the file
+variable.
 
 ## The environment variable
 
@@ -94,9 +95,24 @@ unset DASKI_PAYER_PRIVATE_KEY && daski wallet create --profile sandbox
 
 `daski wallet create` generates a local EOA **only after a human confirms**:
 an interactive terminal, and the phrase `create a new key` typed in full. In a
-non-TTY session it refuses unless `--yes-human-approved` is passed, whose name
-is its documentation — whoever passes it is asserting that a human approved
-this.
+non-TTY session it refuses (`DASKI_KEY_CREATION_NEEDS_HUMAN`) unless
+`--yes-human-approved` is passed, whose name is its documentation — whoever
+passes it is asserting that a human approved this.
+
+Without a terminal, once the user has authorized wallet setup on their own
+durable machine, the route is:
+
+```bash
+DASKI_HOST_CLASS=durable DASKI_KEY_BACKEND=file \
+DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --json
+```
+
+where `<path>` is a regular file only its owner can read (`chmod 600`)
+holding a passphrase of at least 8 characters. Keep the same
+`DASKI_KEYSTORE_PASSPHRASE_FILE` set for later commands, which unlock the key
+with it. With the OS keychain (macOS, Windows) no passphrase variable is
+needed. The refusal carries this route in `nonInteractive` (`env` and
+`command`), built for the backend the host would use.
 
 Before that, every fact must line up:
 

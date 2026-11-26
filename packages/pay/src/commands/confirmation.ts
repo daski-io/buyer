@@ -65,7 +65,7 @@ import {
   findByIntent, updateOrder, withOrderLock,
   type ConfirmationTxExpected, type ConfirmationTxRecord, type OrderRecord,
 } from "../store/orders.js";
-import { readWithCapability, type OrderOptions } from "./order.js";
+import { readWithCapability, rememberResultStep, type OrderOptions } from "./order.js";
 
 export interface ConfirmationOptions extends OrderOptions {
   confirmation?: string | undefined;
@@ -1251,6 +1251,8 @@ function reviewEffect(check: Record<string, unknown>, tracked: ConfirmationTxRec
 export async function readConfirmationFacts(context: CommandContext, record: OrderRecord, profileReader = discoverEasReviewProfile): Promise<ConfirmationFacts> {
   const status = await readWithCapability(context, record, { toolName: "daski_get_order_status", action: "status", request: {} });
   if (typeof status.orderKey !== "string" || !HEX32.test(status.orderKey)) throw invalidPreparation();
+  // The review's answer names the step that gets a result held behind an owner action.
+  await rememberResultStep(context, record, status);
   const pins = (await context.metadata()).confirmationSigning;
   if (!pins) throw confirmationPinsMissing(context.profile.gatewayUrl);
   if (pins.chainId !== context.profile.chainId) throw invalidPreparation();

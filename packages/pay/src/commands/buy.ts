@@ -183,7 +183,7 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
       const refused = result.isError && body?.paymentMayHaveSettled === false;
       updateOrder(intentId, { state: refused ? "NOT_SETTLED" : "PENDING_RECONCILIATION" });
       const { purchaseFailure } = await import("../gateway/purchase.js");
-      throw purchaseFailure(result, { afterSubmit: true, refused });
+      throw purchaseFailure(result, { afterSubmit: true, refused, intentId });
     }
 
     // -- 6 & 7. persist and report ----------------------------------------
@@ -204,6 +204,8 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
       authorizationNonce: authorized.nonce,
       receipt: body.receipt ?? null,
       gatewayCalls: context.client.callCount,
+      next: `Paying is not the end of the purchase: read the order until it is fulfilled and its result is in hand: ` +
+        `daski order status ${body.orderHandle} --json`,
     };
   } finally {
     await context.close();

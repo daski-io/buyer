@@ -21,6 +21,8 @@ import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "
 import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
 import { operationalStatus, supportReply } from "../gateway/operations.js";
 import { inputRequest, orderDocuments } from "../gateway/inputRequest.js";
+import { orderComplete, resultStep, type ResultStep } from "../gateway/resultStep.js";
+import { ServiceDirectory } from "../gateway/services.js";
 import { randomUUID } from "node:crypto";
 import {
   activeReadCapability, findByIntent, findOrder, updateOrder, upsertOrder, type OrderRecord, type ReadCapability,
@@ -60,7 +62,11 @@ const CAPABILITY_ACCEPTED = new Set([
   "ARTIFACT_NOT_AVAILABLE", "ORDER_ACTION_UNSUPPORTED", "ORDER_ACTION_CONFLICT", "PROVIDER_LIFECYCLE_UNAVAILABLE",
 ]);
 
-export async function orderStatus(options: OrderOptions): Promise<Record<string, unknown>> {
+export async function orderStatus(
+  options: OrderOptions,
+  contextFactory: OrderContextFactory = createContext,
+  services?: Pick<ServiceDirectory, "byId">,
+): Promise<Record<string, unknown>> {
   return withOrder(options, async (context, record) => {
     const body = await readWithCapability(context, record, {
       toolName: "daski_get_order_status",
@@ -69,19 +75,47 @@ export async function orderStatus(options: OrderOptions): Promise<Record<string,
     });
     const state = gatewayOrderState(body);
     if (state !== undefined) updateOrder(record.intentId, { state: localOrderState(state, record.handle) });
+    const step = await rememberResultStep(context, record, body, services);
     return {
       orderHandle: record.handle ?? options.handle,
       intentId: record.intentId,
       provider: record.providerAgentId,
       outcome: record.outcomeId,
       state: state ?? record.state,
+      ...(step ? { resultStep: { actionId: step.actionId, name: step.name, command: step.command }, next: step.next } : {}),
       operationalStatus: operationalStatus(body),
       supportReply: supportReply(body),
       inputRequest: inputRequest(body),
       documents: orderDocuments(body),
       gateway: body,
     };
-  });
+  }, contextFactory);
+}
+
+/**
+ * Finds the owner action that holds a fulfilled order's result, if its result
+ * names one, and keeps it on the record so `order confirm` can name it too.
+ * Never fails the read it follows.
+ */
+export async function rememberResultStep(
+  context: CommandContext,
+  record: OrderRecord,
+  body: Record<string, unknown>,
+  services?: Pick<ServiceDirectory, "byId">,
+): Promise<ResultStep | undefined> {
+  try {
+    const handle = record.handle;
+    if (!handle || !orderComplete(body)) return undefined;
+    const step = await resultStep({
+      catalog: context.catalog,
+      services: services ?? new ServiceDirectory(context.profile.gatewayUrl),
+      providerAgentId: record.providerAgentId, outcomeId: record.outcomeId, handle, body,
+    });
+    if (step) updateOrder(record.intentId, { resultStep: { actionId: step.actionId, command: step.command, next: step.next } });
+    return step;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function orderArtifact(
@@ -128,7 +162,27 @@ export async function orderArtifact(
 
 export async function orderConfirm(options: ConfirmationOptions): Promise<Record<string, unknown>> {
   const { runConfirmation } = await import("./confirmation.js");
-  return runConfirmation(options);
+  return withResultNext(await runConfirmation(options), options);
+}
+
+/**
+ * A review is not the end of an order whose result is behind an owner
+ * action: the step that gets it is named after the review's own next step,
+ * or as the next step when the review needs none.
+ */
+export function withResultNext(
+  result: Record<string, unknown>,
+  options: { handle: string; profile?: string | undefined; revoke?: boolean | undefined },
+): Record<string, unknown> {
+  if (options.revoke) return result;
+  const record = findOrder(options.handle, loadConfig(options.profile).profileName);
+  const step = record?.resultStep;
+  if (!step) return result;
+  return {
+    ...result,
+    resultStep: { actionId: step.actionId, command: step.command },
+    next: typeof result.next === "string" ? `${result.next} Then get the order's result: ${step.command}` : step.next,
+  };
 }
 
 export async function orderCancel(options: OrderOptions): Promise<Record<string, unknown>> {
@@ -303,7 +357,7 @@ export async function readWithCapability(
     if (!result.isError && body) return body;
     // The gateway accepted the capability and the answer is about the order:
     // keep it and do not ask for another signature.
-    if (CAPABILITY_ACCEPTED.has(String(body?.code))) throw lifecycleFailure(call.toolName, result);
+    if (CAPABILITY_ACCEPTED.has(String(body?.code))) throw lifecycleFailure(call.toolName, result, handle);
     // Any other rejected capability is a stale capability; drop it and re-authorize.
     updateOrder(record.intentId, { readCapability: undefined });
   }
@@ -314,7 +368,7 @@ export async function readWithCapability(
   const granted = await grantRead(context, record, handle);
   const result = await read(granted.token);
   const body = GatewayClient.json(result);
-  if (result.isError || !body) throw lifecycleFailure(call.toolName, result);
+  if (result.isError || !body) throw lifecycleFailure(call.toolName, result, handle);
   return body;
 }
 

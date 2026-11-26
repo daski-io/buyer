@@ -115,6 +115,11 @@ export interface OrderRecord {
   confirmationHistory?: { submission: ConfirmationSubmissionRecord; outcome: Record<string, unknown>; archivedAt: string }[];
   /** The direct-mode confirmation in flight or last observed, if any. */
   confirmationTx?: ConfirmationTxRecord | undefined;
+  /**
+   * The owner action that holds a fulfilled order's result, when its result
+   * names one, as the last status read found it.
+   */
+  resultStep?: { actionId: string; command: string; next: string } | undefined;
   createdAt: string;
   updatedAt: string;
   /** The request body, kept so an interrupted purchase can be replayed byte-identically. */

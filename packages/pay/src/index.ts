@@ -1,9 +1,9 @@
 /**
- * `@daski/pay` as a library.
- *
- * The CLI is the product; this surface exists so a host application can reuse
- * the same validated flows without shelling out. Everything exported here
- * still signs only through the §4 validator.
+ * The package's module entry. It is internal, not a supported API: `@daski/pay`
+ * is a command-line tool, and scripts run `daski <command> --json` and read
+ * its output. These exports serve this repository's own tests and tooling
+ * and change without notice. Everything exported here still signs only
+ * through the §4 validator.
  */
 export { runBuy, type BuyOptions } from "./commands/buy.js";
 export { runDoctor, type DoctorIssue, type DoctorOptions, type DoctorReport } from "./commands/doctor.js";

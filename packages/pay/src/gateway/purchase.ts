@@ -506,6 +506,8 @@ export function purchaseFailure(
     afterSubmit?: boolean | undefined;
     /** The gateway refused the signed submission and said nothing settled. */
     refused?: boolean | undefined;
+    /** The recorded intent, so the reconcile command names it. */
+    intentId?: string | undefined;
   } = {},
 ): CliError {
   if (GatewayClient.unreadable(result)) return unreadableResultError(BUY_TOOL, result, options);
@@ -517,7 +519,7 @@ export function purchaseFailure(
       "The gateway's response is under `gateway` in this error."
     : options.afterSubmit
       ? "The signature was submitted: do not re-run `daski buy` until the recorded intent " +
-        "is reconciled with `daski order reconcile <intentId>`. The gateway's response is " +
+        `is reconciled with \`daski order reconcile ${options.intentId ?? "<intentId>"}\`. The gateway's response is ` +
         "under `gateway` in this error."
       : "Nothing was signed. The gateway's response is under `gateway` in this error.";
   return new CliError({
