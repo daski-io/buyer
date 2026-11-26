@@ -93,6 +93,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+function plainName(name: string): string | undefined {
+  return name.length > 0 && name.length <= 64 && !HIDDEN.test(name) ? name : undefined;
+}
+
 /** A download that could not be saved, and whether a fresh link may succeed where this one did not. */
 class DownloadFailure extends Error {
   constructor(message: string, readonly retrySafe: boolean, readonly code = "DASKI_DOWNLOAD_FAILED") {
@@ -302,7 +308,8 @@ export async function orderDeliverables(
         const found = (await services(item.providerAgentId)).flatMap((service) => service.ownerActions)
           .filter((action) => action.actionId !== item.actionId && /^[a-z0-9][a-z0-9-]{0,95}$/.test(action.actionId) &&
             (action.assetType === null || action.assetType === item.assetType))
-          .map(({ actionId, name, destructive }) => ({ actionId, name, destructive }));
+          // A name is provider card text printed outside the untrusted result: shown only when it is plain and short.
+          .map(({ actionId, name, destructive }) => ({ actionId, name: plainName(name) ?? actionId, destructive }));
         return found.length > 0 ? found : undefined;
       } catch {
         return undefined;
@@ -355,16 +362,17 @@ export async function orderDeliverables(
         if (!temporary) entry.otherActions = await otherActions(item);
         continue;
       }
-      const execution = executionIdOf(done);
-      if (!recovered && execution && executions[key] !== execution) {
-        // Recorded at once: a run cut short later can still recover it.
-        executions[key] = execution;
-        updateOrder(record.intentId, { deliverableExecutions: { ...executions } });
-      }
       const result = decodeOrderResult(done);
       const file = join(directory, `${index}-${item.actionId}.json`);
       writePrivateFile(file, Buffer.from(`${JSON.stringify(result ?? null, null, 2)}\n`, "utf8"), unwritable);
       saved.push(file);
+      const execution = executionIdOf(done);
+      if (!recovered && execution && executions[key] !== execution) {
+        // Recorded at once, so a run cut short later can still recover it. A store that cannot be
+        // written only costs a later run that recovery: the result is already saved.
+        executions[key] = execution;
+        try { updateOrder(record.intentId, { deliverableExecutions: { ...executions } }); } catch { /* see above */ }
+      }
       entry.file = file;
       entry.fields = fieldNames(result);
       const empty = isRecord(result) ? entry.fields.filter((name) => result[name] === null) : [];
@@ -379,7 +387,13 @@ export async function orderDeliverables(
           if (download.url.protocol !== "https:" || download.url.username || download.url.password) {
             throw new DownloadFailure("the link is not a plain https link", false, "DASKI_DOWNLOAD_REFUSED");
           }
-          const origins = new Set((await services(item.providerAgentId)).flatMap((service) => {
+          let listed: PublicService[];
+          try {
+            listed = await services(item.providerAgentId);
+          } catch (error) {
+            throw new DownloadFailure(`the provider's services could not be read: ${(error as Error).message}`, true);
+          }
+          const origins = new Set(listed.flatMap((service) => {
             try {
               const card = new URL(service.agentCardUrl ?? "");
               return card.protocol === "https:" ? [card.origin] : [];
@@ -395,8 +409,9 @@ export async function orderDeliverables(
           entry.download = { file: downloadFile, mediaType: download.mediaType ?? "application/octet-stream",
             byteLength: bytes.byteLength };
         } catch (error) {
+          // Anything else is the downloaded file's own write failing; a fresh link may be saved once that is fixed.
           const failure = error instanceof DownloadFailure ? error
-            : new DownloadFailure(`the provider's services could not be read: ${(error as Error).message}`, true);
+            : new DownloadFailure((error as Error).message, true, error instanceof CliError ? error.code : "DASKI_DOWNLOAD_FAILED");
           entry.retrySafe = failure.retrySafe;
           entry.error = {
             code: failure.code,

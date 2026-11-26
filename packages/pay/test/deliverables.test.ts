@@ -85,6 +85,7 @@ const PDF = Buffer.from("%PDF-1.7 account agreement");
 
 const ownerActions = [
   { actionId: "get-api-key", name: "Get API key", assetType: "api-account", destructive: false },
+  { actionId: "reset-api-account", name: "Reset\u202e now", assetType: "api-account", destructive: true },
   { actionId: "rotate-api-key", name: "Rotate API key", assetType: "api-account", destructive: true },
   { actionId: "download-account-document", name: "Download a document", assetType: "api-account", destructive: false },
   { actionId: "delete-server", name: "Delete a server", assetType: "server", destructive: true },
@@ -266,6 +267,7 @@ test("a failed item is named with whether a retry is safe and what else the prov
       [["API key", "failed", false], ["Account agreement (PDF)", "failed", true]]);
     // The provider's other actions on the same kind of asset are named, a destructive one as such; none is run.
     assert.deepEqual(items[1]!.otherActions, [
+      { actionId: "reset-api-account", name: "reset-api-account", destructive: true },
       { actionId: "rotate-api-key", name: "Rotate API key", destructive: true },
       { actionId: "download-account-document", name: "Download a document", destructive: false },
     ]);
@@ -299,7 +301,8 @@ test("a result the provider answers with empty fields names them, and what else 
     const item = (manifest.items as Json[])[1]!;
     assert.equal(item.status, "saved");
     assert.deepEqual(item.emptyFields, ["apiKey"]);
-    assert.deepEqual((item.otherActions as Json[]).map((action) => action.actionId), ["rotate-api-key", "download-account-document"]);
+    assert.deepEqual((item.otherActions as Json[]).map((action) => action.actionId),
+      ["reset-api-account", "rotate-api-key", "download-account-document"]);
     assert.match(String(manifest.next), /Check emptyFields on API key/);
   });
 });
@@ -313,6 +316,14 @@ test("a one-time link that cannot be saved says whether a fresh one may succeed"
         "DASKI_DOWNLOAD_FAILED", true],
       ["a declared size over the limit", () => new Response(PDF, { headers: { "content-type": "application/pdf",
         "content-length": String(60 * 1024 * 1024) } }), "DASKI_DOWNLOAD_FAILED", false],
+      ["a body that streams past the limit", () => {
+        let sent = 0;
+        const chunk = new Uint8Array(1024 * 1024);
+        const body = new ReadableStream<Uint8Array>({ pull(controller) {
+          if (sent++ > 51) controller.close(); else controller.enqueue(chunk);
+        } });
+        return new Response(body, { headers: { "content-type": "application/pdf" } });
+      }, "DASKI_DOWNLOAD_FAILED", false],
     ] as const) {
       const { client, fetchImpl } = provider({ link });
       const manifest = await orderDeliverables({ handle: HANDLE, json: true }, async () => fakeContext(client), fetchImpl);
