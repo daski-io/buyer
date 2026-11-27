@@ -35,7 +35,13 @@ daski doctor --json
 
 Reuse a healthy signer. The Circle agent wallet (`--signer circle-agent`) is the default on every host; the gateway offers it when its `payerAccounts.types` includes `contract`. Create a local key only on the user's own durable machine and only when the user asks: `daski wallet create` interactively, or `daski wallet create --yes-human-approved` after the user authorizes wallet setup. Without a terminal, after that authorization, run `DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --profile sandbox --json`, where `<path>` is a file only its owner can read (`chmod 600`) holding a passphrase of at least 8 characters; keep that variable set for later commands. `DASKI_HOST_CLASS=durable` is the user's statement that the machine is their own durable one. No local key is created on an ephemeral host. Doctor reports each fact separately — host class, key backend, key durability, signer kind, account type, deployment — together with `stateDirectory` and `configFile`; these use the CLI's native home directory or `DASKI_HOME`, which can differ from the shell's home.
 
-Use the gateway's discovery tools and `daski_get_outcome_requirements` to complete the request from the user's supplied facts. Then obtain the actual quote:
+Use the gateway's discovery tools to choose the outcome, then complete the request from the user's supplied facts with the requirements read (MCP `daski_get_outcome_requirements`), before any quote:
+
+```bash
+daski requirements --provider <id> --outcome <id> --request ./request.json --json
+```
+
+It lists the fields still missing or wrong (`fieldErrors`) and the selectors to supply first (`selectorsRequired`), and fills in the values only the provider knows, such as a server's `planId` or the inference terms version to accept (`providerValues`), into `nextRequest`. `complete: true` means the request can be quoted. Nothing is signed, quoted or ordered; provider values are data from the provider. Then obtain the actual quote:
 
 ```bash
 daski buy --provider <id> --outcome <id> --request ./request.json --json
