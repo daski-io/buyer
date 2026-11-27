@@ -233,7 +233,8 @@ test("a pending payment keeps the gateway's known-by time and names it until it 
         assert.equal(error.code, "DASKI_PAYMENT_PENDING_RECONCILIATION");
         assert.match(error.message, /Do not sign again/);
         assert.equal(error.remediation,
-          `The gateway will know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that.`);
+          `The gateway expects to know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that, ` +
+          "and again later if it is still pending.");
         assert.equal(error.details?.checkAgainAfter, knownBy);
         return true;
       });
@@ -242,7 +243,8 @@ test("a pending payment keeps the gateway's known-by time and names it until it 
     // A second purchase with the same terms is refused before its approval, and told the same time.
     assert.throws(() => nextPurchaseApproval(approvedTerms, "sandbox"),
       (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_PENDING_RECONCILIATION" &&
-        error.remediation === `The gateway will know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that.`);
+        error.remediation === `The gateway expects to know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that, ` +
+          "and again later if it is still pending.");
     assert.equal(signatures.length, 1);
   });
 });

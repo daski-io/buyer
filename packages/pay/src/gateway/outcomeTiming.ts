@@ -1,7 +1,7 @@
 /** When a payment the gateway could not yet confirm will have a known outcome. */
 
 /**
- * When an ambiguous answer says the payment's outcome will be known: its
+ * When an ambiguous answer says the payment's outcome is expected to be known: its
  * `until` (a settlement the gateway could not confirm, or a captured
  * authorization waiting for sales to reopen), as ISO 8601. Undefined when the
  * answer names no readable time.
@@ -17,6 +17,8 @@ export function outcomeKnownBy(body: Record<string, unknown> | undefined): strin
 export function checkAgainWords(checkAgainAfter: string | undefined, command: string): string {
   if (checkAgainAfter === undefined) return `Check again with ${command}.`;
   return Date.parse(checkAgainAfter) > Date.now()
-    ? `The gateway will know the outcome by ${checkAgainAfter}: run ${command} after that.`
-    : `The gateway expected to know the outcome by ${checkAgainAfter}: run ${command} now.`;
+    ? `The gateway expects to know the outcome by ${checkAgainAfter}: run ${command} after that, ` +
+      "and again later if it is still pending."
+    : `The gateway expected to know the outcome by ${checkAgainAfter}: run ${command} now, ` +
+      "and again later if it is still pending.";
 }

@@ -16,8 +16,10 @@ test("says when to check again: after a future time, now after a past one, plain
   const future = new Date(Date.now() + 60_000).toISOString();
   const past = new Date(Date.now() - 60_000).toISOString();
   assert.equal(checkAgainWords(future, "daski order reconcile int_1"),
-    `The gateway will know the outcome by ${future}: run daski order reconcile int_1 after that.`);
+    `The gateway expects to know the outcome by ${future}: run daski order reconcile int_1 after that, ` +
+    "and again later if it is still pending.");
   assert.equal(checkAgainWords(past, "daski order reconcile int_1"),
-    `The gateway expected to know the outcome by ${past}: run daski order reconcile int_1 now.`);
+    `The gateway expected to know the outcome by ${past}: run daski order reconcile int_1 now, ` +
+    "and again later if it is still pending.");
   assert.equal(checkAgainWords(undefined, "daski order reconcile int_1"), "Check again with daski order reconcile int_1.");
 });
