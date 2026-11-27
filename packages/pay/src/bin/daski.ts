@@ -18,6 +18,7 @@ import {
 import { assetAction, assetList } from "../commands/asset.js";
 import { orderDeliverables } from "../commands/deliverables.js";
 import { runFreeSkill } from "../commands/freeSkill.js";
+import { runRequirements } from "../commands/requirements.js";
 import { runSignPayment } from "../commands/signPayment.js";
 import { createWallet, walletAddress, walletBalance } from "../commands/wallet.js";
 import { CLI_VERSION } from "../version.js";
@@ -44,6 +45,11 @@ Commands
   wallet balance                      Print native + USDC balances
   budget [--per-order <usdc|none>] [--total <usdc|none>] [--approval-above <usdc>]
                                       View or change optional spending settings
+  requirements --provider <id> --outcome <id> [--request <file.json>]
+                                      What the request still needs before a quote: missing or
+                                      wrong fields, and the values only the provider knows
+                                      (a planId, the terms version); prints nextRequest.
+                                      Nothing is signed, quoted or ordered
   buy --provider <id> --outcome <id> --request <file.json> [--payer <addr>]
                                       Challenge, approve, validate, sign, submit, record
                                       After quote approval: repeat with --approve <approval.id>
@@ -278,6 +284,13 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       throw unknownSubcommand("asset", command[1], ["list", "action"]);
+    }
+
+    case "requirements": {
+      assertKnownFlags(flags, ["json", "profile", "provider", "outcome", "request"]);
+      emit(await runRequirements({ profile: shared.profile, json, providerAgentId: requireFlag(flags, "provider"),
+        outcomeId: requireFlag(flags, "outcome"), requestFile: stringFlag(flags, "request") }), output);
+      return 0;
     }
 
     case "free-skill": {

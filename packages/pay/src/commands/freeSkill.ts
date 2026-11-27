@@ -43,9 +43,10 @@ function providerText(text: string): string {
 }
 
 /** A documentation link the CLI may name in its own advice: https only. */
-function docsLink(url: string | null): string | null {
-  if (!url) return null;
-  try { return new URL(url).protocol === "https:" ? url : null; } catch { return null; }
+export function docsLink(url: string | null): string | null {
+  if (!url || url.length > 512) return null;
+  // The parsed form, so text around or inside the link is encoded, never repeated as words.
+  try { const parsed = new URL(url); return parsed.protocol === "https:" ? parsed.href : null; } catch { return null; }
 }
 
 export interface FreeSkillOptions {

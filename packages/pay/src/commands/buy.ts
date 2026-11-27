@@ -339,7 +339,7 @@ function approvalSummary(
   };
 }
 
-function readRequestFile(path: string): Record<string, unknown> {
+export function readRequestFile(path: string): Record<string, unknown> {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
