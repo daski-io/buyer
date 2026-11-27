@@ -7,13 +7,13 @@ share a version.
 
 ### @daski/pay
 
-- **A payment the gateway cannot confirm yet says when to check again.** When the gateway answers a submitted purchase with `PAYMENT_PENDING_RECONCILIATION` and names `until`, the time by which its recovery is expected to have proven the payment or closed the order as not settled, the CLI records it with the order as `checkAgainAfter`. `daski buy`'s `DASKI_PAYMENT_PENDING_RECONCILIATION` then says "Do not sign again" and "The gateway expects to know the outcome by <time>: run daski order reconcile <intentId> after that, and again later if it is still pending", with `checkAgainAfter` in its details. `daski order reconcile` repeats the time while the payment is in flight or ambiguous (`checkAgainAfter` and the `next` text; "run it now" once the time has passed) and clears it once the payment is settled or absent. A new purchase with the same terms is refused with the same time. A gateway that names no `until` gets the previous wording. Seen on the sandbox on 2026-11-27: an agent told only to "check again" stopped a minute before the gateway closed its order as not settled.
+- **A payment the gateway cannot confirm yet says when to check again.** When the gateway answers a submitted purchase with `PAYMENT_PENDING_RECONCILIATION` and names `until`, the time by which it expects its recovery to have proven the payment or closed the order as not settled, the CLI records it with the order as `checkAgainAfter` (only a full ISO 8601 instant at most a day ahead; a sales pause's `until`, when sales reopen, is not taken). `daski buy`'s `DASKI_PAYMENT_PENDING_RECONCILIATION` then says "Do not sign again" and "The gateway expects to know the outcome by <time>: run daski order reconcile <intentId> after that, and again later if it is still pending", with `checkAgainAfter` in its details. `daski order reconcile` repeats the time while the payment is in flight or ambiguous (`checkAgainAfter` and the `next` text; once the time has passed and the payment is still pending, "again in a few minutes"). A new purchase with the same terms is refused with the same time while the payment is unresolved. The time is dropped as soon as the order leaves `PENDING_RECONCILIATION`, whichever command read it. A gateway that names no `until` gets the previous wording, with "later" after a read that found the payment pending. Seen on the sandbox on 2026-11-27: an agent told only to "check again" stopped a minute before the gateway closed its order as not settled.
 
 ### @daski/x402-scheme
 
 - Version moves with @daski/pay; no change.
 
-## 0.5.17 — npm `next` (2026-11-27)
+## 0.5.17 — npm `next` (2026-11-26)
 
 ### @daski/pay
 

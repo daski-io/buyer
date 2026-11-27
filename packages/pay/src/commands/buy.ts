@@ -258,10 +258,10 @@ async function reconcile(
   }
 
   if (outcome.status !== "absent") {
-    const checkAgainAfter = updateOrder(args.intentId, {})?.checkAgainAfter;
+    const checkAgainAfter = record.checkAgainAfter;
     throw new CliError({ code: "DASKI_PAYMENT_PENDING_RECONCILIATION",
       message: "The gateway is still resolving this payment. Do not sign again.",
-      remediation: checkAgainWords(checkAgainAfter, `daski order reconcile ${args.intentId}`),
+      remediation: checkAgainWords(checkAgainAfter, `daski order reconcile ${args.intentId}`, { stillPending: true }),
       details: { intentId: args.intentId, status: outcome.status, reconciliation: outcome.evidence,
         ...(checkAgainAfter === undefined ? {} : { checkAgainAfter }) }, exitCode: 3 });
   }

@@ -309,6 +309,8 @@ export function updateOrder(
       ...changes,
       updatedAt: new Date().toISOString(),
     };
+    // The gateway's expected time belongs to an unresolved payment only.
+    if (merged.state !== "PENDING_RECONCILIATION") delete merged.checkAgainAfter;
     file.orders[index] = merged;
     write(file);
     return merged;

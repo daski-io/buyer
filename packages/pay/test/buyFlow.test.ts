@@ -8,6 +8,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { canonicalHash, type OrderBindingV2, type TypedDataRequest } from "@daski/x402-scheme";
 import { runSignPayment } from "../src/commands/signPayment.js";
 import { runBuy, type BuyOptions } from "../src/commands/buy.js";
+import { orderReconcile } from "../src/commands/order.js";
 import { approvePurchase, nextPurchaseApproval, purchaseApproval } from "../src/commands/approval.js";
 import { DEFAULT_CONFIG, loadConfig } from "../src/config.js";
 import { CliError } from "../src/cli/errors.js";
@@ -217,9 +218,11 @@ test("automatic recovery keeps an in-flight payment pending and does not replay 
   });
 });
 
-test("a pending payment keeps the gateway's known-by time and names it until it is reconciled", async () => {
+test("a pending payment keeps the gateway's expected time, names it while unresolved and drops it once resolved", async () => {
   const knownBy = new Date(Date.now() + 5 * 60_000).toISOString();
-  await withFixture(async ({ options, context, signatures, submissions }) => {
+  const expectsWords = `The gateway expects to know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that, ` +
+    "and again later if it is still pending.";
+  await withFixture(async ({ options, context, signatures, submissions, state }) => {
     const original = context.client.callTool;
     context.client.callTool = async (name: string, args: Record<string, unknown>, meta?: Record<string, unknown>) => {
       if (name !== "daski_buy_outcome") return original(name, args, meta);
@@ -227,25 +230,53 @@ test("a pending payment keeps the gateway's known-by time and names it until it 
       return { content: [], isError: true, structuredContent: {
         code: "PAYMENT_PENDING_RECONCILIATION", paymentMayHaveSettled: true, requiresNewSignature: false, until: knownBy } };
     };
+    // The order is still settling when daski buy reads it back.
     await assert.rejects(runBuy({ ...options, approved: purchaseApproval(approvedTerms).id }, async () => context),
       (error: unknown) => {
         assert.ok(error instanceof CliError);
         assert.equal(error.code, "DASKI_PAYMENT_PENDING_RECONCILIATION");
         assert.match(error.message, /Do not sign again/);
-        assert.equal(error.remediation,
-          `The gateway expects to know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that, ` +
-          "and again later if it is still pending.");
+        assert.equal(error.remediation, expectsWords);
         assert.equal(error.details?.checkAgainAfter, knownBy);
         return true;
       });
     assert.equal(findByIntent(intentId)?.checkAgainAfter, knownBy);
-    assert.equal(signatures.length, 1);
-    // A second purchase with the same terms is refused before its approval, and told the same time.
+    // A second purchase with the same terms is refused before its approval, with the same time.
     assert.throws(() => nextPurchaseApproval(approvedTerms, "sandbox"),
       (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_PENDING_RECONCILIATION" &&
-        error.remediation === `The gateway expects to know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that, ` +
-          "and again later if it is still pending.");
+        error.remediation === expectsWords && error.details?.checkAgainAfter === knownBy);
+    // order reconcile repeats the time while the payment is still in flight.
+    const factory = async () => context;
+    const pending = await orderReconcile({ handle: intentId, json: true, profile: "sandbox" }, factory);
+    assert.equal(pending.reconciled, false);
+    assert.equal(pending.checkAgainAfter, knownBy);
+    assert.match(String(pending.next), new RegExp(`expects to know the outcome by ${knownBy.replace(/[.]/g, "\\.")}`));
+    // Once the order is paid the time is gone, from the output, the record and the refusal of a repeat purchase.
+    state.gatewayState = "DISPATCHED";
+    const settled = await orderReconcile({ handle: intentId, json: true, profile: "sandbox" }, factory);
+    assert.equal(settled.reconciled, true);
+    assert.equal(settled.checkAgainAfter, undefined);
+    assert.equal(findByIntent(intentId)?.checkAgainAfter, undefined);
+    assert.throws(() => nextPurchaseApproval(approvedTerms, "sandbox"),
+      (error: unknown) => error instanceof CliError && error.remediation === `Continue with daski order reconcile ${intentId}.` &&
+        error.details?.checkAgainAfter === undefined);
     assert.equal(signatures.length, 1);
+  });
+});
+
+test("a captured sales pause's until is when sales reopen, not when the outcome is known: it is not kept", async () => {
+  await withFixture(async ({ options, context, submissions }) => {
+    const original = context.client.callTool;
+    context.client.callTool = async (name: string, args: Record<string, unknown>, meta?: Record<string, unknown>) => {
+      if (name !== "daski_buy_outcome") return original(name, args, meta);
+      submissions.push(meta!["x402/payment"] as PaymentSubmission);
+      return { content: [], isError: true, structuredContent: { code: "SALES_PAUSED", phase: "facilitator_settle",
+        paymentMayHaveSettled: true, requiresNewSignature: false, until: new Date(Date.now() + 120_000).toISOString() } };
+    };
+    await assert.rejects(runBuy({ ...options, approved: purchaseApproval(approvedTerms).id }, async () => context),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_PENDING_RECONCILIATION" &&
+        error.remediation === `Check again later with daski order reconcile ${intentId}.` && error.details?.checkAgainAfter === undefined);
+    assert.equal(findByIntent(intentId)?.checkAgainAfter, undefined);
   });
 });
 

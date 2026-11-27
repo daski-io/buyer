@@ -393,7 +393,10 @@ async function grantRead(
  * Settles the local record either way: a handle and state when the order
  * exists, NOT_SETTLED when the gateway lists nothing for the identifier.
  */
-export async function orderReconcile(options: OrderOptions): Promise<Record<string, unknown>> {
+export async function orderReconcile(
+  options: OrderOptions,
+  contextFactory: OrderContextFactory = createContext,
+): Promise<Record<string, unknown>> {
   return withOrder(options, async (context, record) => {
     const outcome = await reconcileByIdentifier({
       client: context.client,
@@ -406,14 +409,13 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
     const reconciled = outcome.status !== "ambiguous" && outcome.status !== "in_flight";
     let updated = record;
     if (outcome.status === "absent") {
-      updated = updateOrder(record.intentId, { state: "NOT_SETTLED", checkAgainAfter: undefined }) ?? record;
+      updated = updateOrder(record.intentId, { state: "NOT_SETTLED" }) ?? record;
     } else if (outcome.orderHandle) {
       updated = updateOrder(record.intentId, {
         handle: outcome.orderHandle,
         state: outcome.status === "settled" && outcome.gatewayState
           ? localOrderState(outcome.gatewayState, outcome.orderHandle)
           : "PENDING_RECONCILIATION",
-        ...(reconciled ? { checkAgainAfter: undefined } : {}),
       }) ?? record;
     }
     const checkAgainAfter = reconciled ? undefined : updated.checkAgainAfter;
@@ -431,10 +433,10 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
         : outcome.status === "settled"
           ? `The order exists: daski order status ${updated.handle ?? record.intentId}`
           : "The payment is still in flight or ambiguous on the gateway's side. Do not sign again. " +
-            checkAgainWords(checkAgainAfter, `daski order reconcile ${record.intentId}`),
+            checkAgainWords(checkAgainAfter, `daski order reconcile ${record.intentId}`, { stillPending: true }),
       ...(checkAgainAfter === undefined ? {} : { checkAgainAfter }),
     };
-  });
+  }, contextFactory);
 }
 
 /** Builds an order-bound context, injectable so the read path can be tested without a signer. */

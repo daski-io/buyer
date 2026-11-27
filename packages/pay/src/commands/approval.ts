@@ -36,10 +36,12 @@ export function nextPurchaseApproval(args: Parameters<typeof purchaseApproval>[0
   const pending = prior.find((order) => ["AUTHORIZED", "SUBMITTED", "PENDING_RECONCILIATION"].includes(order.state));
   if (pending) throw new CliError({ code: "DASKI_PAYMENT_PENDING_RECONCILIATION",
     message: "This purchase already has an authorized or pending order.",
-    remediation: pending.checkAgainAfter === undefined
-      ? `Continue with daski order reconcile ${pending.intentId}.`
-      : checkAgainWords(pending.checkAgainAfter, `daski order reconcile ${pending.intentId}`),
-    details: { intentId: pending.intentId, orderHandle: pending.handle ?? null } });
+    remediation: pending.state === "PENDING_RECONCILIATION" && pending.checkAgainAfter !== undefined
+      ? checkAgainWords(pending.checkAgainAfter, `daski order reconcile ${pending.intentId}`)
+      : `Continue with daski order reconcile ${pending.intentId}.`,
+    details: { intentId: pending.intentId, orderHandle: pending.handle ?? null,
+      ...(pending.state === "PENDING_RECONCILIATION" && pending.checkAgainAfter !== undefined
+        ? { checkAgainAfter: pending.checkAgainAfter } : {}) } });
   return purchaseApproval({ ...args, purchaseNumber: prior.length + 1 });
 }
 
