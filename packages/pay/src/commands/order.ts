@@ -19,6 +19,7 @@ import { createContext, type CommandContext, type ContextOptions, type OrderBind
 import { GatewayClient, gatewayUnsupported } from "../gateway/client.js";
 import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "../gateway/lifecycle.js";
 import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
+import { checkAgainWords } from "../gateway/outcomeTiming.js";
 import { operationalStatus, supportReply } from "../gateway/operations.js";
 import { inputRequest, orderDocuments } from "../gateway/inputRequest.js";
 import { getWhatYouBought, orderFulfilled } from "../gateway/deliverables.js";
@@ -392,7 +393,10 @@ async function grantRead(
  * Settles the local record either way: a handle and state when the order
  * exists, NOT_SETTLED when the gateway lists nothing for the identifier.
  */
-export async function orderReconcile(options: OrderOptions): Promise<Record<string, unknown>> {
+export async function orderReconcile(
+  options: OrderOptions,
+  contextFactory: OrderContextFactory = createContext,
+): Promise<Record<string, unknown>> {
   return withOrder(options, async (context, record) => {
     const outcome = await reconcileByIdentifier({
       client: context.client,
@@ -402,6 +406,7 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
       gatewayUrl: context.profile.gatewayUrl,
       intentId: record.intentId,
     });
+    const reconciled = outcome.status !== "ambiguous" && outcome.status !== "in_flight";
     let updated = record;
     if (outcome.status === "absent") {
       updated = updateOrder(record.intentId, { state: "NOT_SETTLED" }) ?? record;
@@ -413,9 +418,10 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
           : "PENDING_RECONCILIATION",
       }) ?? record;
     }
+    const checkAgainAfter = reconciled ? undefined : updated.checkAgainAfter;
     return {
       intentId: record.intentId,
-      reconciled: outcome.status !== "ambiguous" && outcome.status !== "in_flight",
+      reconciled,
       status: outcome.status,
       orderHandle: updated.handle ?? null,
       gatewayState: outcome.gatewayState ?? null,
@@ -426,10 +432,11 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
           "gateway's refusal, if any, is understood; nothing needs a second signature."
         : outcome.status === "settled"
           ? `The order exists: daski order status ${updated.handle ?? record.intentId}`
-          : "The payment is still in flight or ambiguous on the gateway's side. Do not " +
-            "sign again; re-run this command later.",
+          : "The payment is still in flight or ambiguous on the gateway's side. Do not sign again. " +
+            checkAgainWords(checkAgainAfter, `daski order reconcile ${record.intentId}`, { stillPending: true }),
+      ...(checkAgainAfter === undefined ? {} : { checkAgainAfter }),
     };
-  });
+  }, contextFactory);
 }
 
 /** Builds an order-bound context, injectable so the read path can be tested without a signer. */

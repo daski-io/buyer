@@ -126,6 +126,11 @@ export interface OrderRecord {
    * result with the gateway's `recover-action` follow-up.
    */
   deliverableExecutions?: Record<string, string> | undefined;
+  /**
+   * While the payment's outcome is unknown: when the gateway said it will be
+   * known (ISO 8601, its answer's `until`). Reconcile after it; never re-sign.
+   */
+  checkAgainAfter?: string | undefined;
   createdAt: string;
   updatedAt: string;
   /** The request body, kept so an interrupted purchase can be replayed byte-identically. */
@@ -304,6 +309,8 @@ export function updateOrder(
       ...changes,
       updatedAt: new Date().toISOString(),
     };
+    // The gateway's expected time belongs to an unresolved payment only.
+    if (merged.state !== "PENDING_RECONCILIATION") delete merged.checkAgainAfter;
     file.orders[index] = merged;
     write(file);
     return merged;
