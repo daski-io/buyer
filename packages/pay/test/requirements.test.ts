@@ -120,6 +120,23 @@ test("selectors come first, and a purchase the provider cannot take now is never
     const unsupported = await runRequirements({ json: true, providerAgentId: "8327", outcomeId: "create-server" },
       gateway(() => ({ requiredFields: {}, selectorsRequired: [], fieldErrors: [], supported: false })).factory);
     assert.equal(unsupported.complete, false);
+    assert.match(String(unsupported.next), /cannot take this purchase now/);
+    // The pause leads even while a field is also missing.
+    const pausedAndMissing = await runRequirements({ json: true, providerAgentId: "8327", outcomeId: "create-inference-account" },
+      gateway(() => ({ requiredFields: {}, selectorsRequired: [], supported: false,
+        fieldErrors: [required("creditUsd"), { path: "_", rule: "sales_paused", message: "paused" }] })).factory);
+    assert.match(String(pausedAndMissing.next), /cannot take this purchase now/);
+  });
+});
+
+test("a provider's terms link is named in the CLI's advice only when it is https", async () => {
+  await withHome(async () => {
+    const answer = await runRequirements({ json: true, providerAgentId: "8327", outcomeId: "create-inference-account" },
+      gateway(() => ({ requiredFields: { acceptTerms: { required: true, value: "v1", termsUrl: "http://seller.example/terms" } },
+        selectorsRequired: [], fieldErrors: [], supported: null })).factory);
+    assert.equal(answer.complete, true);
+    assert.match(String(answer.next), /Sending acceptTerms accepts the provider's terms; the quote shows them/);
+    assert.doesNotMatch(String(answer.next), /seller\.example/);
   });
 });
 

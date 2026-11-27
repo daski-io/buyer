@@ -43,7 +43,7 @@ function providerText(text: string): string {
 }
 
 /** A documentation link the CLI may name in its own advice: https only. */
-function docsLink(url: string | null): string | null {
+export function docsLink(url: string | null): string | null {
   if (!url) return null;
   try { return new URL(url).protocol === "https:" ? url : null; } catch { return null; }
 }

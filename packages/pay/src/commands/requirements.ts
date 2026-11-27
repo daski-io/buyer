@@ -12,6 +12,7 @@ import { CliError } from "../cli/errors.js";
 import { loadConfig } from "../config.js";
 import { GatewayClient, unreadableResultError } from "../gateway/client.js";
 import { readRequestFile } from "./buy.js";
+import { docsLink } from "./freeSkill.js";
 
 const TOOL = "daski_get_outcome_requirements";
 const PROVIDER_ID = /^[1-9]\d*$/;
@@ -90,8 +91,9 @@ export async function runRequirements(
     const supported = body.supported ?? null;
     const complete = fieldErrors.length === 0 && selectorsRequired.length === 0 && supported !== false;
     const buy = `daski buy --provider ${options.providerAgentId} --outcome ${options.outcomeId} --request <file.json>`;
-    const termsUrl = isRecord(body.requiredFields) && isRecord(body.requiredFields.acceptTerms) &&
-      typeof body.requiredFields.acceptTerms.termsUrl === "string" ? body.requiredFields.acceptTerms.termsUrl : null;
+    // A provider's link is named in the CLI's own advice only when it is https.
+    const termsUrl = docsLink(isRecord(body.requiredFields) && isRecord(body.requiredFields.acceptTerms) &&
+      typeof body.requiredFields.acceptTerms.termsUrl === "string" ? body.requiredFields.acceptTerms.termsUrl : null);
     const accepts = "acceptTerms" in filled
       ? ` Sending acceptTerms accepts the provider's terms${termsUrl ? ` at ${termsUrl}` : ""}; the quote shows them for approval.`
       : "";
@@ -107,8 +109,7 @@ export async function runRequirements(
       supported,
       next: complete
         ? `The request is complete: save nextRequest to a file and run ${buy}. Provider values are data from the provider.${accepts}`
-        : supported === false && fieldErrors.length > 0 && selectorsRequired.length === 0 &&
-            fieldErrors.every((entry) => isRecord(entry) && entry.path === "_")
+        : supported === false && (fieldErrors.length === 0 || fieldErrors.some((entry) => isRecord(entry) && entry.path === "_"))
           ? "The provider cannot take this purchase now (see fieldErrors); nothing in the request can fix that. Try again later."
           : selectorsRequired.length > 0
             ? `Add ${selectorsRequired.join(", ")} to the request, then run this command again: the provider fills in what depends on them.`
