@@ -14,7 +14,7 @@ daski doctor --json
 
 Doctor reports the host class, key backend and key durability, the configured signer with its account type, self-test, and deployment, native state paths, network, balances, spending settings, and gateway compatibility including which payer account types the gateway verifies. Reuse a healthy signer. The Circle agent wallet (`--signer circle-agent`) is the default on every host. Create a local wallet only on the user's own durable machine and only when the user asks: `daski wallet create` prompts interactively; authorized agent setup without a terminal uses `DASKI_KEY_BACKEND=file DASKI_KEYSTORE_PASSPHRASE_FILE=<path> daski wallet create --yes-human-approved --profile sandbox --json`, where `<path>` is a mode-600 file holding a passphrase of at least 8 characters. No local key is created on an ephemeral host.
 
-Complete the request using gateway discovery and `daski_get_outcome_requirements`, then run:
+Complete the request using gateway discovery and `daski requirements --provider <id> --outcome <id> --request <file.json> --json` (MCP: `daski_get_outcome_requirements`): it fills in the values only the provider knows, such as a `planId` or the terms version to accept, into `nextRequest`, and says when the request is `complete`. Then run:
 
 ```bash
 daski buy --provider <id> --outcome <id> --request <file.json> --json
@@ -30,6 +30,7 @@ The command returns the actual quote and an approval identifier. After the user 
 | `wallet create` | Create a local signer when missing, on a durable host with a local backend |
 | `wallet address` / `wallet balance` | Read the active payer and balances |
 | `budget [--per-order <usdc\|none>] [--total <usdc\|none>] [--approval-above <usdc>]` | View or explicitly change spending settings |
+| `requirements --provider <id> --outcome <id> [--request <file.json>]` | Before any quote: the fields still missing or wrong, the selectors to supply first, and `nextRequest` with the provider's values (a `planId`, the terms version to accept); `complete: true\|false`. Nothing is signed, quoted or ordered |
 | `buy --provider <id> --outcome <id> --request <file.json>` | Quote, approve, validate, sign, submit, and record |
 | `order status <handle>` | Read the gateway's order state using cached read access or a fresh grant-read capability |
 | `order artifact <handle> [--output <file>]` | Save the provider result to a file |

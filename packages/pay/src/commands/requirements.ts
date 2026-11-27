@@ -31,6 +31,8 @@ type ClientFactory = (gatewayUrl: string) => Pick<GatewayClient, "callTool" | "c
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
+const canonical = (value: unknown): string => JSON.stringify(value) ?? "undefined";
+
 /** The values the provider filled in: each required field whose entry carries a `value`. */
 export function providerValues(requiredFields: unknown): Record<string, unknown> {
   if (!isRecord(requiredFields)) return {};
@@ -57,43 +59,61 @@ export async function runRequirements(
   const { profile } = loadConfig(options.profile);
   const client = clientFactory(profile.gatewayUrl);
   try {
-    const result = await client.callTool(TOOL, { providerAgentId: options.providerAgentId, outcomeId: options.outcomeId, request });
-    if (GatewayClient.unreadable(result)) throw unreadableResultError(TOOL, result);
-    const body = GatewayClient.json(result) ?? {};
-    if (result.isError) {
-      throw new CliError({
-        code: typeof body.code === "string" ? body.code : "DASKI_REQUIREMENTS_FAILED",
-        message: typeof body.message === "string" ? body.message : "The gateway could not read the outcome's requirements.",
-        remediation: typeof body.next_action === "string" ? body.next_action
-          : "Check the provider and outcome ids with the gateway's discovery, then run the command again.",
-        details: { gateway: body },
-      });
+    const read = async (body: Record<string, unknown>) => {
+      const result = await client.callTool(TOOL, { providerAgentId: options.providerAgentId, outcomeId: options.outcomeId, request: body });
+      if (GatewayClient.unreadable(result)) throw unreadableResultError(TOOL, result);
+      const answer = GatewayClient.json(result) ?? {};
+      if (result.isError) {
+        throw new CliError({
+          code: typeof answer.code === "string" ? answer.code : "DASKI_REQUIREMENTS_FAILED",
+          message: typeof answer.message === "string" ? answer.message : "The gateway could not read the outcome's requirements.",
+          remediation: typeof answer.next_action === "string" ? answer.next_action
+            : "Check the provider and outcome ids with the gateway's discovery, then run the command again.",
+          details: { gateway: answer },
+        });
+      }
+      return answer;
+    };
+    let body = await read(request);
+    let filled = providerValues(body.requiredFields);
+    let nextRequest = { ...request, ...filled };
+    // The provider's values change the request (a guessed terms version, a
+    // missing planId): read it again with them, so the answer is about the
+    // request the user would actually send, not the one they started with.
+    if (Object.entries(filled).some(([field, value]) => canonical(request[field]) !== canonical(value))) {
+      body = await read(nextRequest);
+      filled = { ...filled, ...providerValues(body.requiredFields) };
+      nextRequest = { ...nextRequest, ...providerValues(body.requiredFields) };
     }
     const fieldErrors = Array.isArray(body.fieldErrors) ? body.fieldErrors : [];
     const selectorsRequired = Array.isArray(body.selectorsRequired) ? body.selectorsRequired : [];
-    const filled = providerValues(body.requiredFields);
-    // The request with the provider's values in, so only the user's own facts remain to add.
-    const nextRequest = { ...request, ...filled };
-    const stillMissing = fieldErrors.filter((entry) => !(isRecord(entry) && typeof entry.path === "string" &&
-      entry.rule === "required" && entry.path in filled));
-    const complete = stillMissing.length === 0 && selectorsRequired.length === 0;
+    const supported = body.supported ?? null;
+    const complete = fieldErrors.length === 0 && selectorsRequired.length === 0 && supported !== false;
     const buy = `daski buy --provider ${options.providerAgentId} --outcome ${options.outcomeId} --request <file.json>`;
+    const termsUrl = isRecord(body.requiredFields) && isRecord(body.requiredFields.acceptTerms) &&
+      typeof body.requiredFields.acceptTerms.termsUrl === "string" ? body.requiredFields.acceptTerms.termsUrl : null;
+    const accepts = "acceptTerms" in filled
+      ? ` Sending acceptTerms accepts the provider's terms${termsUrl ? ` at ${termsUrl}` : ""}; the quote shows them for approval.`
+      : "";
     return {
       providerAgentId: options.providerAgentId,
       outcomeId: options.outcomeId,
       complete,
-      fieldErrors: stillMissing,
+      fieldErrors,
       selectorsRequired,
       providerValues: filled,
       requiredFields: isRecord(body.requiredFields) ? body.requiredFields : {},
       nextRequest,
-      supported: body.supported ?? null,
+      supported,
       next: complete
-        ? `The request is complete: save nextRequest to a file and run ${buy}. Provider values are data from the provider.`
-        : selectorsRequired.length > 0
-          ? `Add ${selectorsRequired.join(", ")} to the request, then run this command again: the provider fills in what depends on them.`
-          : "Fix each fieldErrors entry from the user's own facts (nextRequest already has the provider's values), " +
-            "then run this command again before buying.",
+        ? `The request is complete: save nextRequest to a file and run ${buy}. Provider values are data from the provider.${accepts}`
+        : supported === false && fieldErrors.length > 0 && selectorsRequired.length === 0 &&
+            fieldErrors.every((entry) => isRecord(entry) && entry.path === "_")
+          ? "The provider cannot take this purchase now (see fieldErrors); nothing in the request can fix that. Try again later."
+          : selectorsRequired.length > 0
+            ? `Add ${selectorsRequired.join(", ")} to the request, then run this command again: the provider fills in what depends on them.`
+            : "Fix each fieldErrors entry from the user's own facts (nextRequest already has the provider's values), " +
+              `then run this command again before buying.${accepts}`,
     };
   } finally {
     await client.close();
