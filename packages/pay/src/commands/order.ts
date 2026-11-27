@@ -19,6 +19,7 @@ import { createContext, type CommandContext, type ContextOptions, type OrderBind
 import { GatewayClient, gatewayUnsupported } from "../gateway/client.js";
 import { callWalletQuery, callAuthorizedLifecycleTool, lifecycleFailure } from "../gateway/lifecycle.js";
 import { localOrderState, readPayerOrderRows, reconcileByIdentifier } from "../gateway/purchase.js";
+import { checkAgainWords } from "../gateway/outcomeTiming.js";
 import { operationalStatus, supportReply } from "../gateway/operations.js";
 import { inputRequest, orderDocuments } from "../gateway/inputRequest.js";
 import { getWhatYouBought, orderFulfilled } from "../gateway/deliverables.js";
@@ -402,20 +403,23 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
       gatewayUrl: context.profile.gatewayUrl,
       intentId: record.intentId,
     });
+    const reconciled = outcome.status !== "ambiguous" && outcome.status !== "in_flight";
     let updated = record;
     if (outcome.status === "absent") {
-      updated = updateOrder(record.intentId, { state: "NOT_SETTLED" }) ?? record;
+      updated = updateOrder(record.intentId, { state: "NOT_SETTLED", checkAgainAfter: undefined }) ?? record;
     } else if (outcome.orderHandle) {
       updated = updateOrder(record.intentId, {
         handle: outcome.orderHandle,
         state: outcome.status === "settled" && outcome.gatewayState
           ? localOrderState(outcome.gatewayState, outcome.orderHandle)
           : "PENDING_RECONCILIATION",
+        ...(reconciled ? { checkAgainAfter: undefined } : {}),
       }) ?? record;
     }
+    const checkAgainAfter = reconciled ? undefined : updated.checkAgainAfter;
     return {
       intentId: record.intentId,
-      reconciled: outcome.status !== "ambiguous" && outcome.status !== "in_flight",
+      reconciled,
       status: outcome.status,
       orderHandle: updated.handle ?? null,
       gatewayState: outcome.gatewayState ?? null,
@@ -426,8 +430,9 @@ export async function orderReconcile(options: OrderOptions): Promise<Record<stri
           "gateway's refusal, if any, is understood; nothing needs a second signature."
         : outcome.status === "settled"
           ? `The order exists: daski order status ${updated.handle ?? record.intentId}`
-          : "The payment is still in flight or ambiguous on the gateway's side. Do not " +
-            "sign again; re-run this command later.",
+          : "The payment is still in flight or ambiguous on the gateway's side. Do not sign again. " +
+            checkAgainWords(checkAgainAfter, `daski order reconcile ${record.intentId}`),
+      ...(checkAgainAfter === undefined ? {} : { checkAgainAfter }),
     };
   });
 }

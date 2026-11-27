@@ -217,6 +217,36 @@ test("automatic recovery keeps an in-flight payment pending and does not replay 
   });
 });
 
+test("a pending payment keeps the gateway's known-by time and names it until it is reconciled", async () => {
+  const knownBy = new Date(Date.now() + 5 * 60_000).toISOString();
+  await withFixture(async ({ options, context, signatures, submissions }) => {
+    const original = context.client.callTool;
+    context.client.callTool = async (name: string, args: Record<string, unknown>, meta?: Record<string, unknown>) => {
+      if (name !== "daski_buy_outcome") return original(name, args, meta);
+      submissions.push(meta!["x402/payment"] as PaymentSubmission);
+      return { content: [], isError: true, structuredContent: {
+        code: "PAYMENT_PENDING_RECONCILIATION", paymentMayHaveSettled: true, requiresNewSignature: false, until: knownBy } };
+    };
+    await assert.rejects(runBuy({ ...options, approved: purchaseApproval(approvedTerms).id }, async () => context),
+      (error: unknown) => {
+        assert.ok(error instanceof CliError);
+        assert.equal(error.code, "DASKI_PAYMENT_PENDING_RECONCILIATION");
+        assert.match(error.message, /Do not sign again/);
+        assert.equal(error.remediation,
+          `The gateway will know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that.`);
+        assert.equal(error.details?.checkAgainAfter, knownBy);
+        return true;
+      });
+    assert.equal(findByIntent(intentId)?.checkAgainAfter, knownBy);
+    assert.equal(signatures.length, 1);
+    // A second purchase with the same terms is refused before its approval, and told the same time.
+    assert.throws(() => nextPurchaseApproval(approvedTerms, "sandbox"),
+      (error: unknown) => error instanceof CliError && error.code === "DASKI_PAYMENT_PENDING_RECONCILIATION" &&
+        error.remediation === `The gateway will know the outcome by ${knownBy}: run daski order reconcile ${intentId} after that.`);
+    assert.equal(signatures.length, 1);
+  });
+});
+
 test("a payment the gateway could not admit settles nothing, is not reconciled, and the same command then buys", async () => {
   // The gateway's own envelope, as vendored from its wire fixtures and relayed by the MCP server.
   const unadmitted = (JSON.parse(readFileSync(join(gatewayWireFixtures(), "standard-rail-error.json"), "utf8")) as {

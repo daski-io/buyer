@@ -7,7 +7,7 @@ It is a command-line tool, not a library: run the `daski` commands and read thei
 ## Setup and purchase
 
 ```bash
-npm install -g @daski/pay@0.5.17
+npm install -g @daski/pay@0.5.18
 export DASKI_HOST_CLASS=durable   # or ephemeral
 daski doctor --json
 ```

@@ -5,6 +5,7 @@ import { CliError } from "../cli/errors.js";
 import { confirm, isInteractive } from "../cli/prompt.js";
 import { note } from "../cli/output.js";
 import type { PaymentRequirement } from "../gateway/client.js";
+import { checkAgainWords } from "../gateway/outcomeTiming.js";
 import { isUnspent, listOrders } from "../store/orders.js";
 
 /** Approval survives quote expiry only while all purchase terms stay the same. */
@@ -35,7 +36,9 @@ export function nextPurchaseApproval(args: Parameters<typeof purchaseApproval>[0
   const pending = prior.find((order) => ["AUTHORIZED", "SUBMITTED", "PENDING_RECONCILIATION"].includes(order.state));
   if (pending) throw new CliError({ code: "DASKI_PAYMENT_PENDING_RECONCILIATION",
     message: "This purchase already has an authorized or pending order.",
-    remediation: `Continue with daski order reconcile ${pending.intentId}.`,
+    remediation: pending.checkAgainAfter === undefined
+      ? `Continue with daski order reconcile ${pending.intentId}.`
+      : checkAgainWords(pending.checkAgainAfter, `daski order reconcile ${pending.intentId}`),
     details: { intentId: pending.intentId, orderHandle: pending.handle ?? null } });
   return purchaseApproval({ ...args, purchaseNumber: prior.length + 1 });
 }

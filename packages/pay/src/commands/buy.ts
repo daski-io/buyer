@@ -23,6 +23,7 @@ import {
   requestChallenge,
   submitPayment,
 } from "../gateway/purchase.js";
+import { checkAgainWords, outcomeKnownBy } from "../gateway/outcomeTiming.js";
 import { assertContractSignerUsable } from "../signers/contract.js";
 import { updateOrder } from "../store/orders.js";
 
@@ -164,6 +165,7 @@ export async function runBuy(options: BuyOptions, contextFactory: (options: Cont
       return await reconcile(context, {
         intentId,
         cause: `gateway reported ${code ?? "an error"} with the payment outcome unknown`,
+        checkAgainAfter: outcomeKnownBy(body),
       });
     }
     if (GatewayClient.unreadable(result)) {
@@ -218,9 +220,14 @@ async function reconcile(
   args: {
     intentId: string;
     cause: string;
+    /** When the gateway said the outcome will be known, if it said. */
+    checkAgainAfter?: string | undefined;
   },
 ): Promise<Record<string, unknown>> {
-  updateOrder(args.intentId, { state: "PENDING_RECONCILIATION" });
+  updateOrder(args.intentId, {
+    state: "PENDING_RECONCILIATION",
+    ...(args.checkAgainAfter === undefined ? {} : { checkAgainAfter: args.checkAgainAfter }),
+  });
   note(`payment outcome unclear (${args.cause}); reconciling before any re-sign...`);
   const record = updateOrder(args.intentId, {})!;
   const outcome = await reconcileByIdentifier({
@@ -251,10 +258,12 @@ async function reconcile(
   }
 
   if (outcome.status !== "absent") {
+    const checkAgainAfter = updateOrder(args.intentId, {})?.checkAgainAfter;
     throw new CliError({ code: "DASKI_PAYMENT_PENDING_RECONCILIATION",
-      message: "The gateway is still resolving this payment.",
-      remediation: `Check again with daski order reconcile ${args.intentId}.`,
-      details: { intentId: args.intentId, status: outcome.status, reconciliation: outcome.evidence }, exitCode: 3 });
+      message: "The gateway is still resolving this payment. Do not sign again.",
+      remediation: checkAgainWords(checkAgainAfter, `daski order reconcile ${args.intentId}`),
+      details: { intentId: args.intentId, status: outcome.status, reconciliation: outcome.evidence,
+        ...(checkAgainAfter === undefined ? {} : { checkAgainAfter }) }, exitCode: 3 });
   }
   updateOrder(args.intentId, { state: "NOT_SETTLED" });
   throw new CliError({
